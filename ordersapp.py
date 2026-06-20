@@ -1,6 +1,14 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
+from datetime import date
+
 from orders import run_process_web
+from quick_order import (
+    quick_lookup_member,
+    quick_create_order,
+    send_confirmation,
+    build_line_message,
+)
 
 st.set_page_config(page_title="儲值金訂單系統", page_icon="💰", layout="wide")
 
@@ -122,7 +130,9 @@ html, body, [class*="css"] {
 [data-testid="stTextInput"] label,
 [data-testid="stNumberInput"] label,
 [data-testid="stSelectbox"] label,
-[data-testid="stMultiSelect"] label {
+[data-testid="stMultiSelect"] label,
+[data-testid="stDateInput"] label,
+[data-testid="stRadio"] label {
     font-size: 13px !important;
     color: var(--ink) !important;
     font-weight: 700 !important;
@@ -131,7 +141,8 @@ html, body, [class*="css"] {
 [data-testid="stTextInput"] input,
 [data-testid="stNumberInput"] input,
 [data-testid="stSelectbox"] > div > div,
-[data-testid="stMultiSelect"] > div > div {
+[data-testid="stMultiSelect"] > div > div,
+[data-testid="stDateInput"] input {
     border-radius: 10px !important;
     border: 1.5px solid var(--border) !important;
     background: white !important;
@@ -226,6 +237,31 @@ hr {
 """, unsafe_allow_html=True)
 
 
+CLEAN_TYPE_ID_MAP = {"居家清潔": "1", "辦公室清潔": "2", "裝修細清": "3"}
+
+PERIOD_OPTIONS = [
+    "08:30-12:30",
+    "09:00-11:00",
+    "09:00-12:00",
+    "14:00-16:00",
+    "14:00-17:00",
+    "14:00-18:00",
+    "09:00-16:00",
+    "09:00-18:00",
+]
+
+PERIOD_HOUR_MAP = {
+    "08:30-12:30": 4,
+    "09:00-11:00": 2,
+    "09:00-12:00": 3,
+    "14:00-16:00": 2,
+    "14:00-17:00": 3,
+    "14:00-18:00": 4,
+    "09:00-16:00": 6,
+    "09:00-18:00": 8,
+}
+
+
 def step(num, title):
     st.markdown(
         f'<div class="step-pill"><span class="step-num">{num}</span>{title}</div>',
@@ -282,7 +318,7 @@ st.markdown("""
   <div class="hero-emoji">💰</div>
   <div>
     <div class="hero-title">儲值金訂單系統</div>
-    <div class="hero-sub">支援建單、寄確認信、改 Google 日曆，可指定列號批次處理。</div>
+    <div class="hero-sub">支援批次建單（Google Sheet）與單筆快速建單，可寄確認信、改 Google 日曆。</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -299,124 +335,270 @@ with col_env:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-step("2", "執行設定")
-
-c1, c2, c3 = st.columns(3)
-with c1:
-    region = st.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
-with c2:
-    sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604")
-with c3:
-    row_input = st.text_input("執行列號", value="", placeholder="例：2,3,5-7")
-
-st.markdown(
-    '<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code></div>',
-    unsafe_allow_html=True
+mode = st.radio(
+    "操作模式",
+    ["批次建單（Google Sheet）", "單筆快速建單"],
+    horizontal=True,
 )
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-step("3", "執行項目")
 
-default_actions = (
-    ["建單", "寄確認信", "改 Google 日曆"]
-    if env == "prod"
-    else ["建單"]
-)
+# =========================================================
+# 模式一：批次建單（Google Sheet）
+# =========================================================
+if mode == "批次建單（Google Sheet）":
 
-selected_actions = st.multiselect(
-    "執行項目",
-    options=["建單", "寄確認信", "改 Google 日曆"],
-    default=default_actions,
-    label_visibility="collapsed",
-)
+    step("2", "執行設定")
 
-st.markdown(
-    '<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>',
-    unsafe_allow_html=True
-)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        region = st.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
+    with c2:
+        sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604")
+    with c3:
+        row_input = st.text_input("執行列號", value="", placeholder="例：2,3,5-7")
 
-st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code></div>',
+        unsafe_allow_html=True
+    )
 
-run_clicked = st.button("🚀  開始執行", use_container_width=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
 
-with st.expander("📄  執行過程", expanded=True):
-    log_box = st.empty()
-    log_box.code("尚未執行")
+    step("3", "執行項目")
 
-result_container = st.container()
+    default_actions = (
+        ["建單", "寄確認信", "改 Google 日曆"]
+        if env == "prod"
+        else ["建單"]
+    )
 
-if run_clicked:
-    if not backend_email.strip():
-        st.error("請輸入後台帳號")
-        st.stop()
-    if not backend_password.strip():
-        st.error("請輸入後台密碼")
-        st.stop()
-    if not sheet_name.strip():
-        st.error("請輸入工作表名稱")
-        st.stop()
-    if not selected_actions:
-        st.error("請至少選擇一個執行項目")
-        st.stop()
+    selected_actions = st.multiselect(
+        "執行項目",
+        options=["建單", "寄確認信", "改 Google 日曆"],
+        default=default_actions,
+        label_visibility="collapsed",
+    )
 
-    try:
-        target_rows = parse_row_input(row_input)
-    except Exception as e:
-        st.error(f"列號格式錯誤：{e}")
-        st.stop()
+    st.markdown(
+        '<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>',
+        unsafe_allow_html=True
+    )
 
-    logs = []
+    st.markdown("<hr>", unsafe_allow_html=True)
 
-    def ui_log(msg):
-        logs.append(format_log_message(msg))
-        display_text = "\n\n".join(logs[-120:])
-        log_box.code(display_text)
+    run_clicked = st.button("🚀  開始執行", use_container_width=True)
 
-    total_success = 0
-    total_fail = 0
-    total_processed = 0
+    with st.expander("📄  執行過程", expanded=True):
+        log_box = st.empty()
+        log_box.code("尚未執行")
 
-    with st.spinner("執行中，請稍候…"):
-        for row_no in target_rows:
-            ui_log(f"▶ 開始執行第 {row_no} 列…")
+    result_container = st.container()
 
-            try:
-                result = run_process_web(
+    if run_clicked:
+        if not backend_email.strip():
+            st.error("請輸入後台帳號")
+            st.stop()
+        if not backend_password.strip():
+            st.error("請輸入後台密碼")
+            st.stop()
+        if not sheet_name.strip():
+            st.error("請輸入工作表名稱")
+            st.stop()
+        if not selected_actions:
+            st.error("請至少選擇一個執行項目")
+            st.stop()
+
+        try:
+            target_rows = parse_row_input(row_input)
+        except Exception as e:
+            st.error(f"列號格式錯誤：{e}")
+            st.stop()
+
+        logs = []
+
+        def ui_log(msg):
+            logs.append(format_log_message(msg))
+            display_text = "\n\n".join(logs[-120:])
+            log_box.code(display_text)
+
+        total_success = 0
+        total_fail = 0
+        total_processed = 0
+
+        with st.spinner("執行中，請稍候…"):
+            for row_no in target_rows:
+                ui_log(f"▶ 開始執行第 {row_no} 列…")
+
+                try:
+                    result = run_process_web(
+                        env_name=env,
+                        region=region,
+                        backend_email=backend_email.strip(),
+                        backend_password=backend_password.strip(),
+                        sheet_name=sheet_name.strip(),
+                        start_row=row_no,
+                        end_row=row_no,
+                        selected_actions=selected_actions,
+                        logger=ui_log,
+                    )
+
+                    if isinstance(result, dict):
+                        total_success += result.get("success_count", 0)
+                        total_fail += result.get("fail_count", 0)
+                        total_processed += result.get("total_processed", 0)
+
+                except Exception as e:
+                    total_fail += 1
+                    ui_log(f"❌ 第 {row_no} 列失敗：{e}")
+
+        ui_log("===== 執行完成 =====")
+
+        with result_container:
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("4", "執行結果")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("執行筆數", total_processed)
+            c2.metric("成功", total_success)
+            c3.metric("失敗", total_fail)
+
+            if total_fail == 0 and total_processed > 0:
+                st.success(f"✅ 全部完成，共處理 **{total_processed}** 筆，成功 **{total_success}** 筆。")
+            elif total_fail > 0:
+                st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
+            else:
+                st.info("執行完成，無資料被處理。")
+
+
+# =========================================================
+# 模式二：單筆快速建單
+# =========================================================
+else:
+    step("2", "查詢客人")
+
+    q1, q2 = st.columns(2)
+    with q1:
+        q_phone = st.text_input("客人電話")
+        q_clean_type = st.selectbox("購買項目", list(CLEAN_TYPE_ID_MAP.keys()))
+    with q2:
+        q_payway = st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"])
+        q_region = st.selectbox("區域（決定 ATM 收款帳戶 / 日曆）", ["台北", "台中", "桃園", "新竹", "高雄"])
+
+    lookup_clicked = st.button("🔍  查詢會員", use_container_width=True)
+
+    if lookup_clicked:
+        if not backend_email.strip() or not backend_password.strip():
+            st.error("請先輸入後台帳號密碼")
+            st.stop()
+        if not q_phone.strip():
+            st.error("請輸入客人電話")
+            st.stop()
+
+        try:
+            with st.spinner("查詢中…"):
+                st.session_state.q_lookup = quick_lookup_member(
                     env_name=env,
-                    region=region,
                     backend_email=backend_email.strip(),
                     backend_password=backend_password.strip(),
-                    sheet_name=sheet_name.strip(),
-                    start_row=row_no,
-                    end_row=row_no,
-                    selected_actions=selected_actions,
-                    logger=ui_log,
+                    phone=q_phone.strip(),
+                    clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type],
+                )
+            st.session_state.q_order_result = None
+        except Exception as e:
+            st.error(f"查詢失敗：{e}")
+            st.session_state.q_lookup = None
+
+    lookup = st.session_state.get("q_lookup")
+
+    if lookup is not None:
+        member_payload = lookup.get("member_payload")
+
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+        if not member_payload:
+            st.warning("查無此會員（新客人），請先傳下方話術跟客人收集資料，後台手動建會員後再回來查詢一次：")
+            st.code(
+                "您好，請您提供如下訂購人資訊，以利協助您預約，謝謝\n"
+                "訂購人姓名：\n訂購人電話：\n訂購人Email：\n服務地址：\n室內坪數 :\n"
+                "付款方式： 信用卡 / 轉帳匯款 擇一  \n"
+                "發票載具：會員載具/手機載具(請提供載碼 ) 或 統編發票( 請留下 公司抬頭及統一編號)",
+                language=None,
+            )
+        else:
+            member = member_payload.get("member", {})
+            addr_list = member_payload.get("member", {}).get("memberAddressList", [])
+            addr_options = [a.get("address", "") for a in addr_list if a.get("address")]
+
+            st.markdown(f"**會員姓名：** {member.get('name', '')}　|　**會員電話：** {lookup.get('phone', '')}")
+
+            step("3", "服務資訊（同上次客人 - 除非有多個地址才需要改）")
+
+            if not addr_options:
+                st.error("此會員沒有留存地址，請改用後台手動建單，或先請客人提供完整地址。")
+            else:
+                d1, d2, d3 = st.columns(3)
+                with d1:
+                    q_address = st.selectbox("服務地址", addr_options)
+                with d2:
+                    q_date = st.date_input("服務日期", value=date.today())
+                with d3:
+                    q_period = st.selectbox("時段", PERIOD_OPTIONS)
+
+                q_hour = PERIOD_HOUR_MAP.get(q_period, 3)
+                st.markdown(
+                    f'<div class="hint-box">💡 此時段預設時數：<b>{q_hour} 小時</b>，如需調整請聯繫工程師擴充人工輸入欄位。</div>',
+                    unsafe_allow_html=True
                 )
 
-                if isinstance(result, dict):
-                    total_success += result.get("success_count", 0)
-                    total_fail += result.get("fail_count", 0)
-                    total_processed += result.get("total_processed", 0)
+                st.markdown("<hr>", unsafe_allow_html=True)
 
-            except Exception as e:
-                total_fail += 1
-                ui_log(f"❌ 第 {row_no} 列失敗：{e}")
+                create_clicked = st.button("🚀  建立訂單", use_container_width=True)
 
-    ui_log("===== 執行完成 =====")
+                if create_clicked:
+                    try:
+                        with st.spinner("建單中，請稍候…"):
+                            result = quick_create_order(
+                                env_name=env,
+                                payway=q_payway,
+                                region=q_region,
+                                lookup_result=lookup,
+                                address=q_address,
+                                clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type],
+                                date_s=q_date.strftime("%Y-%m-%d"),
+                                period_s=q_period,
+                                hour=q_hour,
+                            )
+                            ok, mail_msg = send_confirmation(result)
+                            result["mail_sent"] = ok
+                            result["mail_msg"] = mail_msg
 
-    with result_container:
+                        st.session_state.q_order_result = result
+                    except Exception as e:
+                        st.error(f"建單失敗：{e}")
+                        st.session_state.q_order_result = None
+
+    order_result = st.session_state.get("q_order_result")
+
+    if order_result:
         st.markdown("<hr>", unsafe_allow_html=True)
         step("4", "執行結果")
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("執行筆數", total_processed)
-        c2.metric("成功", total_success)
-        c3.metric("失敗", total_fail)
+        c1.metric("訂單編號", order_result["order_no"])
+        c2.metric("金額", order_result.get("price") or "—")
+        c3.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
 
-        if total_fail == 0 and total_processed > 0:
-            st.success(f"✅ 全部完成，共處理 **{total_processed}** 筆，成功 **{total_success}** 筆。")
-        elif total_fail > 0:
-            st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
+        if not order_result.get("mail_sent"):
+            st.warning(f"確認信發送失敗：{order_result.get('mail_msg', '')}")
         else:
-            st.info("執行完成，無資料被處理。")
+            st.success("✅ 訂單建立成功，確認信已發送。")
+
+        st.markdown("**📋 複製貼給客人的 LINE 訊息**")
+        st.text_area(
+            "LINE 訊息內容",
+            build_line_message(order_result),
+            height=420,
+            label_visibility="collapsed",
+        )
