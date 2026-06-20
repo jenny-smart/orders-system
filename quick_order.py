@@ -206,15 +206,47 @@ def _fetch_purchase_blocks_for_phone(session, phone, name="", purchase_status=""
     looks_like_login_page = "login" in resp.url.lower() or (
         len(raw_blocks) == 0 and "password" in resp.text.lower()
     )
+    effective_purchase_status = purchase_status
+    fallback_info = {}
+
+    if purchase_status and resp.status_code == 200 and not raw_blocks and not looks_like_login_page:
+        fallback_params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        fallback_params["phone"] = normalize_phone(phone)
+        if name and not fallback_params["phone"]:
+            fallback_params["name"] = name
+
+        fallback_resp = session.get(
+            orders.PURCHASE_URL,
+            params=fallback_params,
+            headers=HEADERS,
+            allow_redirects=True,
+        )
+        fallback_blocks = []
+        if fallback_resp.status_code == 200:
+            fallback_blocks = extract_order_cards_from_purchase_html(fallback_resp.text)
+
+        fallback_info = {
+            "fallback_request_url": getattr(fallback_resp.request, "url", ""),
+            "fallback_status_code": fallback_resp.status_code,
+            "fallback_raw_block_count": len(fallback_blocks),
+        }
+
+        if fallback_blocks:
+            resp = fallback_resp
+            raw_blocks = fallback_blocks
+            effective_purchase_status = ""
+            looks_like_login_page = "login" in resp.url.lower()
 
     _LAST_PURCHASE_FETCH_DEBUG = {
         "request_url": getattr(resp.request, "url", ""),
         "final_url": resp.url,
         "status_code": resp.status_code,
         "purchase_status_filter": purchase_status,
+        "effective_purchase_status_filter": effective_purchase_status,
         "raw_block_count": len(raw_blocks),
         "looks_like_login_page": looks_like_login_page,
         "snippet": resp.text[:300].replace("\n", " ").strip() if resp.status_code == 200 else "",
+        **fallback_info,
     }
 
     if resp.status_code != 200:
@@ -307,6 +339,13 @@ def _extract_person_hour_line(joined_text):
     return person, hour
 
 
+def _date_not_after_today(date_text):
+    try:
+        return datetime.strptime(str(date_text), "%Y-%m-%d").date() <= date.today()
+    except Exception:
+        return False
+
+
 def _extract_payway_line(joined_text):
     """
     從訂單區塊文字解析「付款方式」。
@@ -330,7 +369,20 @@ def _is_paid_order_text(joined_text, trusted_paid_filter=False):
         return False
     if trusted_paid_filter:
         return True
-    return "已付款" in joined_text
+    compact = re.sub(r"\s+", "", str(joined_text or ""))
+    if "待付款" in compact or "未付款" in compact:
+        return False
+    if "已付款" in compact:
+        return True
+    if "儲值金" in compact and (
+        _extract_total_amount_line(joined_text) == "0"
+        or "扣儲值金" in compact
+        or "儲值金扣款" in compact
+    ):
+        return True
+    if re.search(r"付款.{0,12}(完成|成功)", compact):
+        return True
+    return False
 
 
 def _extract_invoice_line(joined_text):
@@ -384,13 +436,16 @@ def get_customer_paid_orders(session, phone, known_addresses=None, name=""):
         name=name,
         purchase_status=PURCHASE_STATUS_PAID,
     )
+    trusted_paid_filter = (
+        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
+    )
 
     results = []
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
 
-        if not _is_paid_order_text(joined, trusted_paid_filter=True):
+        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
             continue
 
         service_date, service_time = _parse_service_date_time_loose(joined)
@@ -488,6 +543,8 @@ def get_last_paid_per_address(session, phone, member_payload, known_addresses, w
             d = datetime.strptime(o["date"], "%Y-%m-%d").date()
         except Exception:
             continue
+        if d > date.today():
+            continue
         if d < cutoff:
             continue
         by_address[addr] = o
@@ -525,6 +582,10 @@ def get_last_paid_summary(session, phone, member_payload, known_addresses):
     """
     name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
     paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
+    paid_orders = [
+        o for o in paid_orders
+        if _date_not_after_today(o.get("date", ""))
+    ]
     if not paid_orders:
         return None
 
@@ -574,13 +635,16 @@ def get_unserved_paid_orders(session, phone, member_payload, known_addresses, to
         name=name,
         purchase_status=PURCHASE_STATUS_PAID,
     )
+    trusted_paid_filter = (
+        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
+    )
 
     upcoming = []
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
 
-        if not _is_paid_order_text(joined, trusted_paid_filter=True):
+        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
             continue
 
         service_date, service_time = _parse_service_date_time_loose(joined)
