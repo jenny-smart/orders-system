@@ -144,33 +144,65 @@ PURCHASE_FILTER_PARAMS_TEMPLATE = {
 }
 
 
+_LAST_PURCHASE_FETCH_DEBUG = {}
+
+
+def get_last_purchase_fetch_debug():
+    """取得最近一次 _fetch_purchase_blocks_for_phone 的診斷資訊，供畫面顯示除錯用。"""
+    return dict(_LAST_PURCHASE_FETCH_DEBUG)
+
+
 def _fetch_purchase_blocks_for_phone(session, phone, name=""):
     """
     比照後台「訂單管理」篩選列搜尋的實際請求格式。
 
     phone= 和 name= 都已經各自實測證實有效，這裡兩個都帶（電話一定有，
     姓名有就一起帶，互相保險），篩出結果後再用電話文字比對一次防呆。
+
+    同時記錄診斷資訊（實際請求網址、回應狀態、是否疑似被導回登入頁、
+    抓到幾筆區塊），查無結果時可以直接看是真的沒資料還是請求本身有問題。
     """
+    global _LAST_PURCHASE_FETCH_DEBUG
+
     params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
     params["phone"] = normalize_phone(phone)
     if name:
         params["name"] = name
 
     resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+
+    raw_blocks = []
+    if resp.status_code == 200:
+        raw_blocks = extract_order_cards_from_purchase_html(resp.text)
+
+    looks_like_login_page = "login" in resp.url.lower() or (
+        len(raw_blocks) == 0 and "password" in resp.text.lower()
+    )
+
+    _LAST_PURCHASE_FETCH_DEBUG = {
+        "request_url": getattr(resp.request, "url", ""),
+        "final_url": resp.url,
+        "status_code": resp.status_code,
+        "raw_block_count": len(raw_blocks),
+        "looks_like_login_page": looks_like_login_page,
+        "snippet": resp.text[:300].replace("\n", " ").strip() if resp.status_code == 200 else "",
+    }
+
     if resp.status_code != 200:
         return []
 
-    blocks = extract_order_cards_from_purchase_html(resp.text)
-
     phone_norm = normalize_phone(phone)
     if not phone_norm:
-        return blocks
+        _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(raw_blocks)
+        return raw_blocks
 
     filtered = []
-    for block in blocks:
+    for block in raw_blocks:
         joined_compact = "\n".join(block.get("lines", [])).replace("-", "").replace(" ", "")
         if phone_norm in joined_compact:
             filtered.append(block)
+
+    _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(filtered)
     return filtered
 
 
