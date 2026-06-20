@@ -8,6 +8,7 @@ from quick_order import (
     quick_create_order,
     send_confirmation,
     build_line_message,
+    get_last_service_summary,
 )
 
 st.set_page_config(page_title="儲值金訂單系統", page_icon="💰", layout="wide")
@@ -538,19 +539,53 @@ else:
             if not addr_options:
                 st.error("此會員沒有留存地址，請改用後台手動建單，或先請客人提供完整地址。")
             else:
-                d1, d2, d3 = st.columns(3)
-                with d1:
-                    q_address = st.selectbox("服務地址", addr_options)
-                with d2:
-                    q_date = st.date_input("服務日期", value=date.today())
-                with d3:
-                    q_period = st.selectbox("時段", PERIOD_OPTIONS)
+                q_address = st.selectbox("服務地址", addr_options)
 
-                q_hour = PERIOD_HOUR_MAP.get(q_period, 3)
-                st.markdown(
-                    f'<div class="hint-box">💡 此時段預設時數：<b>{q_hour} 小時</b>，如需調整請聯繫工程師擴充人工輸入欄位。</div>',
-                    unsafe_allow_html=True
-                )
+                last_summary = get_last_service_summary(lookup["session"], member_payload, q_address)
+                default_person = 2
+                if last_summary and str(last_summary.get("person", "")).strip().isdigit():
+                    default_person = int(last_summary["person"])
+
+                d1, d2, d3, d4 = st.columns(4)
+                with d1:
+                    q_date = st.date_input("服務日期", value=date.today())
+                with d2:
+                    q_period = st.selectbox("時段", PERIOD_OPTIONS)
+                with d3:
+                    q_person = st.number_input(
+                        "人數",
+                        min_value=1,
+                        max_value=8,
+                        value=default_person,
+                        help="預設帶入上次服務人數，可手動調整",
+                    )
+                with d4:
+                    q_hour = PERIOD_HOUR_MAP.get(q_period, 3)
+                    st.markdown(f"<br><b>{q_hour} 小時</b>（依時段自動帶出）", unsafe_allow_html=True)
+
+                if last_summary:
+                    last_date = last_summary.get("date") or "未知"
+                    last_time = last_summary.get("time") or ""
+                    last_staff = last_summary.get("staff") or "未知"
+                    last_person = last_summary.get("person") or ""
+                    last_hour = last_summary.get("hour") or ""
+                    person_hour_text = (
+                        f"{last_person}人{last_hour}小時" if last_person or last_hour else "未知"
+                    )
+                    st.markdown(
+                        f'<div class="hint-box">'
+                        f'📌 <b>上次服務</b>：{last_date} {last_time}　|　'
+                        f'<b>服務人員</b>：{last_staff}　|　'
+                        f'<b>總人時</b>：{person_hour_text}'
+                        f'　——　人數已預設帶入上次紀錄，如有變動請手動調整上方「人數」欄位。'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        '<div class="hint-box">📌 查無此地址上次服務紀錄（可能是新地址），人數預設為 2 人，請確認後再送出。</div>',
+                        unsafe_allow_html=True
+                    )
 
                 st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -569,6 +604,7 @@ else:
                                 date_s=q_date.strftime("%Y-%m-%d"),
                                 period_s=q_period,
                                 hour=q_hour,
+                                person=q_person,
                             )
                             ok, mail_msg = send_confirmation(result)
                             result["mail_sent"] = ok
@@ -587,7 +623,7 @@ else:
 
         c1, c2, c3 = st.columns(3)
         c1.metric("訂單編號", order_result["order_no"])
-        c2.metric("金額", order_result.get("price") or "—")
+        c2.metric("金額（含稅）", order_result.get("price_with_tax") or "—")
         c3.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
 
         if not order_result.get("mail_sent"):
