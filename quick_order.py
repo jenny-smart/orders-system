@@ -28,12 +28,9 @@ from orders import (
     slot_exists_in_section_response,
     extract_cleaners_from_section_response,
     format_staff_from_cleaners,
-    fetch_order_no_by_date_and_period,
     fetch_order_meta_by_order_no,
     extract_order_cards_from_purchase_html,
     _extract_staff_line,
-    _extract_status_line,
-    _extract_fare_line,
     send_confirmation_mail,
     normalize_phone,
     normalize_addr_for_match,
@@ -188,44 +185,6 @@ def _parse_service_date_time_loose(joined_text):
     return service_date, f"{start} - {end}"
 
 
-def find_upcoming_orders(session, phone, today_value=None):
-    """
-    抓這支電話「今天（含）以後」、未取消的訂單，用於畫面提醒。
-
-    用途：避免客服明明是要幫客人「異動」原本的服務時間，
-    卻誤建立第二筆新訂單，造成重複收費/重複派工。
-    """
-    today_value = today_value or date.today()
-    blocks = _fetch_purchase_blocks_for_phone(session, phone)
-
-    upcoming = []
-    for block in blocks:
-        lines = block.get("lines", [])
-        joined = "\n".join(lines)
-
-        if "已取消" in joined:
-            continue
-
-        service_date, service_time = _parse_service_date_time_loose(joined)
-        if not service_date:
-            continue
-
-        try:
-            d = datetime.strptime(service_date, "%Y-%m-%d").date()
-        except Exception:
-            continue
-
-        if d < today_value:
-            continue
-
-        upcoming.append({
-            "order_no": block["order_no"],
-            "date": service_date,
-            "time": service_time,
-        })
-
-    upcoming.sort(key=lambda x: x["date"])
-    return upcoming
 def _extract_payway_line(joined_text):
     """
     從訂單區塊文字解析「付款方式」。
@@ -248,20 +207,54 @@ def _extract_invoice_line(joined_text):
     return m.group(1).strip() if m else ""
 
 
-def get_recent_orders_with_address(session, phone, known_addresses, limit=5):
-    """
-    抓這支電話最近 N 筆訂單（不限付款狀態，因為這裡只是要看「最近常約哪個地址」），
-    並比對每一筆對應到會員哪一個留存地址（用地址字串比對，不靠標籤解析）。
+CLEAN_TYPE_LABELS = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除"]
 
-    用途：客人有多個地址時，提醒客服跟客人確認本次到底是哪一個地址，
-    避免約錯地點。
+
+def _extract_clean_type_line(joined_text):
+    """從訂單區塊文字解析服務類別（居家清潔/辦公室清潔/裝修細清/大掃除）。"""
+    for label in CLEAN_TYPE_LABELS:
+        if label in joined_text:
+            return label
+    return ""
+
+
+def _extract_label_value(lines, label, stop_labels):
     """
+    抓「標籤」獨立一行、值接在後面（可能空白）的欄位，例如客服備註/財務備註。
+    抓不到或值為空白都回傳空字串。
+    """
+    try:
+        idx = lines.index(label)
+    except ValueError:
+        return ""
+    value_lines = []
+    for line in lines[idx + 1:]:
+        if line in stop_labels or line in CLEAN_TYPE_LABELS:
+            break
+        value_lines.append(line)
+    return " ".join(value_lines).strip()
+
+
+def get_customer_paid_orders(session, phone, known_addresses=None):
+    """
+    抓這支電話「所有已付款」訂單，不限地址、不限服務類別、不限付款方式。
+
+    重要：判斷客人「是否曾被服務過」一律只看「電話 + 已付款」，
+    不應該因為這次服務類別（例如裝修細清 vs 居家清潔）不同
+    就誤判成新客人——客人是同一個人，只是買了不同服務。
+
+    由新到舊排序。
+    """
+    known_addresses = known_addresses or []
     blocks = _fetch_purchase_blocks_for_phone(session, phone)
 
     results = []
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
+
+        if "已付款" not in joined:
+            continue
 
         service_date, service_time = _parse_service_date_time_loose(joined)
         if not service_date:
@@ -279,106 +272,136 @@ def get_recent_orders_with_address(session, phone, known_addresses, limit=5):
             "date": service_date,
             "time": service_time,
             "address": matched_addr,
+            "clean_type": _extract_clean_type_line(joined),
+            "staff": _extract_staff_line(lines),
+            "payway": _extract_payway_line(joined),
+            "invoice_text": _extract_invoice_line(joined),
+            "service_notice": _extract_label_value(lines, "客服備註", ["財務備註", "客人備註"]),
         })
 
     results.sort(key=lambda x: x["date"], reverse=True)
-    return results[:limit]
+    return results
 
 
-def find_last_paid_service(session, phone, address):
+def _match_person_hour(member_payload, order_no, address):
     """
-    用後台「訂單管理」實際的篩選參數（phone=）先讓後台篩出這支電話的所有訂單，
-    再從中找「地址相符 + 付款狀態已付款」、服務日期最新的一筆。
-
-    避免抓到未付款／已取消的訂單，誤判成已經服務過
-    （未付款訂單通常還沒派工，服務人員會是「無人力」）。
+    人數/時數訂單列表頁面本身不會顯示，要去會員 JSON
+    （lastPurchase / 該地址的 purchase 物件）配對 order_no 才抓得到。
     """
-    addr_norm = normalize_addr_for_match(address)
-    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    if not isinstance(member_payload, dict):
+        return "", ""
+
+    last_purchase = member_payload.get("lastPurchase", {}) or {}
+    member = member_payload.get("member", {}) or {}
+    addr_list = member.get("memberAddressList", []) or []
 
     candidates = []
+    if last_purchase:
+        candidates.append(last_purchase)
+
+    target_norm = normalize_addr_for_match(address) if address else ""
+    for item in addr_list:
+        if target_norm and normalize_addr_for_match(item.get("address", "")) == target_norm:
+            item_purchase = item.get("purchase", {})
+            if isinstance(item_purchase, dict) and item_purchase:
+                candidates.append(item_purchase)
+
+    for c in candidates:
+        if str(c.get("order_no", "")).strip() == str(order_no).strip():
+            return c.get("person", ""), c.get("hour", "")
+
+    return "", ""
+
+
+def get_last_paid_summary(session, phone, member_payload, known_addresses):
+    """
+    取得「這支電話」全部地址、全部服務類別中，最近一次已付款服務的完整摘要。
+    地址/服務類別/付款方式/發票都直接從這筆抓出來，作為這次建單的預設值。
+
+    若最近服務日期當天有多筆訂單（例如同天約了不同住處/不同服務），
+    same_date_orders 會列出當天所有筆數，避免客服誤判成只有一筆。
+    """
+    paid_orders = get_customer_paid_orders(session, phone, known_addresses)
+    if not paid_orders:
+        return None
+
+    latest = paid_orders[0]
+    same_date_orders = [o for o in paid_orders if o["date"] == latest["date"]]
+
+    person, hour = _match_person_hour(member_payload, latest["order_no"], latest["address"])
+
+    return {
+        "order_no": latest["order_no"],
+        "date": latest["date"],
+        "time": latest["time"],
+        "address": latest["address"],
+        "clean_type": latest["clean_type"],
+        "staff": latest["staff"],
+        "payway": latest["payway"],
+        "invoice_text": latest["invoice_text"],
+        "service_notice": latest["service_notice"],
+        "person": person,
+        "hour": hour,
+        "same_date_orders": same_date_orders,
+    }
+
+
+def get_unserved_paid_orders(session, phone, member_payload, known_addresses, today_value=None):
+    """
+    「已付款但服務日期還沒到」的訂單清單（排除已取消）。
+
+    用途：避免客服明明是要幫客人「異動」原本的服務時間，
+    卻誤建立第二筆新訂單，造成重複收費/重複派工。
+    儲值金訂單沒有付款方式/發票概念，畫面顯示時請自行省略。
+    """
+    today_value = today_value or date.today()
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+
+    upcoming = []
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
 
-        if addr_norm and addr_norm not in normalize_addr_for_match(joined):
-            continue
-        if "已付款" not in joined:
+        if "已取消" in joined or "已付款" not in joined:
             continue
 
         service_date, service_time = _parse_service_date_time_loose(joined)
         if not service_date:
             continue
 
-        candidates.append({
+        try:
+            d = datetime.strptime(service_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        if d < today_value:
+            continue
+
+        joined_norm = normalize_addr_for_match(joined)
+        matched_addr = ""
+        for addr in known_addresses or []:
+            if addr and normalize_addr_for_match(addr) in joined_norm:
+                matched_addr = addr
+                break
+
+        payway = _extract_payway_line(joined)
+        person, hour = _match_person_hour(member_payload, block["order_no"], matched_addr)
+
+        upcoming.append({
             "order_no": block["order_no"],
             "date": service_date,
             "time": service_time,
+            "address": matched_addr,
+            "clean_type": _extract_clean_type_line(joined),
             "staff": _extract_staff_line(lines),
-            "service_status": _extract_status_line(lines),
-            "fare": _extract_fare_line(lines),
-            "payway": _extract_payway_line(joined),
-            "invoice_text": _extract_invoice_line(joined),
+            "payway": payway,
+            "invoice_text": "" if payway == "儲值金" else _extract_invoice_line(joined),
+            "person": person,
+            "hour": hour,
         })
 
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x["date"], reverse=True)
-    return candidates[0]
-
-
-def get_last_service_summary(session, phone, member_payload, address):
-    """
-    取得選定地址「上一次『已付款』服務」摘要：日期/時段/服務人員/總人時，
-    給畫面提示用，避免約錯人時或誤判上次服務人員。
-
-    只認已付款訂單；未付款/已取消的不算數，因為根本還沒實際服務過。
-    人數/時數若能對到會員留存的 lastPurchase / 地址 purchase 物件就一併帶出，
-    對不到則顯示未知（不影響已付款日期/服務人員的正確性）。
-    """
-    if not isinstance(member_payload, dict):
-        return None
-
-    paid = find_last_paid_service(session, phone, address)
-    if not paid:
-        return None
-
-    person = ""
-    hour = ""
-
-    last_purchase = member_payload.get("lastPurchase", {}) or {}
-    member = member_payload.get("member", {}) or {}
-    addr_list = member.get("memberAddressList", []) or []
-
-    target_norm = normalize_addr_for_match(address)
-    candidates_for_hours = []
-
-    if last_purchase and normalize_addr_for_match(last_purchase.get("address", "")) == target_norm:
-        candidates_for_hours.append(last_purchase)
-
-    for item in addr_list:
-        if normalize_addr_for_match(item.get("address", "")) == target_norm:
-            item_purchase = item.get("purchase", {})
-            if isinstance(item_purchase, dict) and item_purchase:
-                candidates_for_hours.append(item_purchase)
-
-    for c in candidates_for_hours:
-        if str(c.get("order_no", "")).strip() == paid["order_no"]:
-            person = c.get("person", "")
-            hour = c.get("hour", "")
-            break
-
-    return {
-        "date": paid["date"],
-        "time": paid["time"],
-        "person": person,
-        "hour": hour,
-        "staff": paid["staff"],
-        "payway": paid.get("payway", ""),
-        "invoice_text": paid.get("invoice_text", ""),
-        "order_no": paid["order_no"],
-    }
+    upcoming.sort(key=lambda x: x["date"])
+    return upcoming
 
 
 def quick_create_order(
