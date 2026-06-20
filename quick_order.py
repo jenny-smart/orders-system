@@ -28,6 +28,10 @@ from orders import (
     fetch_order_no_by_date_and_period,
     fetch_order_meta_by_order_no,
     extract_order_cards_from_purchase_html,
+    _extract_service_date_time,
+    _extract_staff_line,
+    _extract_status_line,
+    _extract_fare_line,
     send_confirmation_mail,
     normalize_phone,
     normalize_addr_for_match,
@@ -135,61 +139,104 @@ def list_order_numbers_for_phone(session, phone):
     return result
 
 
-def get_last_service_summary(session, member_payload, address):
+def find_last_paid_service(session, phone, address):
     """
-    取得選定地址「上一次服務」摘要：日期/時段/服務人員/總人時，
+    掃描訂單列表頁，只挑「電話 + 地址 + 付款狀態已付款」的訂單，
+    取服務日期最新的一筆，作為「上次真的有服務」的依據。
+
+    避免抓到未付款／已取消的訂單，誤判成已經服務過
+    （未付款訂單通常還沒派工，服務人員會是「無人力」）。
+    """
+    resp = session.get(orders.PURCHASE_URL, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return None
+
+    phone_norm = normalize_phone(phone)
+    addr_norm = normalize_addr_for_match(address)
+
+    blocks = extract_order_cards_from_purchase_html(resp.text)
+    candidates = []
+
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+        joined_compact = joined.replace("-", "").replace(" ", "")
+
+        if phone_norm and phone_norm not in joined_compact:
+            continue
+        if addr_norm and addr_norm not in normalize_addr_for_match(joined):
+            continue
+        if "已付款" not in joined:
+            continue
+
+        service_date, service_time = _extract_service_date_time(lines)
+        if not service_date:
+            continue
+
+        candidates.append({
+            "order_no": block["order_no"],
+            "date": service_date,
+            "time": service_time,
+            "staff": _extract_staff_line(lines),
+            "service_status": _extract_status_line(lines),
+            "fare": _extract_fare_line(lines),
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x["date"], reverse=True)
+    return candidates[0]
+
+
+def get_last_service_summary(session, phone, member_payload, address):
+    """
+    取得選定地址「上一次『已付款』服務」摘要：日期/時段/服務人員/總人時，
     給畫面提示用，避免約錯人時或誤判上次服務人員。
 
-    優先用 lastPurchase（若地址相符），否則退而求其次用該地址的 purchase 物件。
-    若有 order_no，再去後台訂單列表撈實際服務日期/時間/服務人員（比較準確）。
+    只認已付款訂單；未付款/已取消的不算數，因為根本還沒實際服務過。
+    人數/時數若能對到會員留存的 lastPurchase / 地址 purchase 物件就一併帶出，
+    對不到則顯示未知（不影響已付款日期/服務人員的正確性）。
     """
     if not isinstance(member_payload, dict):
         return None
+
+    paid = find_last_paid_service(session, phone, address)
+    if not paid:
+        return None
+
+    person = ""
+    hour = ""
 
     last_purchase = member_payload.get("lastPurchase", {}) or {}
     member = member_payload.get("member", {}) or {}
     addr_list = member.get("memberAddressList", []) or []
 
     target_norm = normalize_addr_for_match(address)
-    matched = {}
+    candidates_for_hours = []
 
     if last_purchase and normalize_addr_for_match(last_purchase.get("address", "")) == target_norm:
-        matched = last_purchase
-    else:
-        for item in addr_list:
-            if normalize_addr_for_match(item.get("address", "")) == target_norm:
-                item_purchase = item.get("purchase", {})
-                if isinstance(item_purchase, dict) and item_purchase:
-                    matched = item_purchase
-                break
+        candidates_for_hours.append(last_purchase)
 
-    if not matched:
-        return None
+    for item in addr_list:
+        if normalize_addr_for_match(item.get("address", "")) == target_norm:
+            item_purchase = item.get("purchase", {})
+            if isinstance(item_purchase, dict) and item_purchase:
+                candidates_for_hours.append(item_purchase)
 
-    person = matched.get("person", "")
-    hour = matched.get("hour", "")
-    order_no = str(matched.get("order_no", "") or "").strip()
-    service_date = str(matched.get("date_clean", "") or "")
-    service_time = ""
-    staff = ""
-
-    if order_no:
-        try:
-            meta = fetch_order_meta_by_order_no(session, order_no)
-            staff = meta.get("服務人員", "") or ""
-            service_time = meta.get("服務時間", "") or ""
-            if meta.get("服務日期"):
-                service_date = meta.get("服務日期")
-        except Exception:
-            pass
+    for c in candidates_for_hours:
+        if str(c.get("order_no", "")).strip() == paid["order_no"]:
+            person = c.get("person", "")
+            hour = c.get("hour", "")
+            break
 
     return {
-        "date": service_date,
-        "time": service_time,
+        "date": paid["date"],
+        "time": paid["time"],
         "person": person,
         "hour": hour,
-        "staff": staff,
-        "order_no": order_no,
+        "staff": paid["staff"],
+        "order_no": paid["order_no"],
     }
 
 
