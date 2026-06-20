@@ -248,6 +248,43 @@ def _extract_invoice_line(joined_text):
     return m.group(1).strip() if m else ""
 
 
+def get_recent_orders_with_address(session, phone, known_addresses, limit=5):
+    """
+    抓這支電話最近 N 筆訂單（不限付款狀態，因為這裡只是要看「最近常約哪個地址」），
+    並比對每一筆對應到會員哪一個留存地址（用地址字串比對，不靠標籤解析）。
+
+    用途：客人有多個地址時，提醒客服跟客人確認本次到底是哪一個地址，
+    避免約錯地點。
+    """
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+
+    results = []
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        if not service_date:
+            continue
+
+        joined_norm = normalize_addr_for_match(joined)
+        matched_addr = ""
+        for addr in known_addresses:
+            if addr and normalize_addr_for_match(addr) in joined_norm:
+                matched_addr = addr
+                break
+
+        results.append({
+            "order_no": block["order_no"],
+            "date": service_date,
+            "time": service_time,
+            "address": matched_addr,
+        })
+
+    results.sort(key=lambda x: x["date"], reverse=True)
+    return results[:limit]
+
+
 def find_last_paid_service(session, phone, address):
     """
     用後台「訂單管理」實際的篩選參數（phone=）先讓後台篩出這支電話的所有訂單，
