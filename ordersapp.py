@@ -267,6 +267,23 @@ PERIOD_HOUR_MAP = {
 }
 
 
+def compact_period(value):
+    return str(value or "").replace(" ", "")
+
+
+def nonzero_money(value):
+    try:
+        return float(str(value or "0").replace(",", "")) != 0
+    except Exception:
+        return bool(str(value or "").strip())
+
+
+def payment_invoice_display(payway, invoice_text):
+    if payway == "儲值金":
+        return "儲值金客（無付款方式/發票資訊）"
+    return f"付款：{payway or '未知'}　發票：{invoice_text or '未知'}"
+
+
 def step(num, title):
     st.markdown(
         f'<div class="step-pill"><span class="step-num">{num}</span>{title}</div>',
@@ -567,10 +584,12 @@ else:
                             addr_rows.append(f"・{addr}　——　近一年內查無已付款服務紀錄")
                         else:
                             ph_text = f"{info['person']}人{info['hour']}小時" if (info["person"] or info["hour"]) else "未知"
+                            payment_text = payment_invoice_display(info.get("payway"), info.get("invoice_text"))
+                            fare_text = f"　車馬費：{info['fare']}" if nonzero_money(info.get("fare")) else ""
                             addr_rows.append(
                                 f"・{addr}　——　{info['date']} {info['time']}　"
                                 f"類別：{info['clean_type'] or '未知'}　服務人員：{info['staff'] or '未知'}　"
-                                f"總人時：{ph_text}　付款：{info['payway'] or '未知'}　發票：{info['invoice_text'] or '未知'}"
+                                f"總人時：{ph_text}　{payment_text}{fare_text}"
                             )
                     st.markdown(
                         f'<div class="hint-box">'
@@ -589,6 +608,9 @@ else:
                     default_clean_type = last_summary["clean_type"]
                 clean_type_index = list(CLEAN_TYPE_ID_MAP.keys()).index(default_clean_type)
 
+                default_period = compact_period(last_summary.get("time")) if last_summary else ""
+                period_index = PERIOD_OPTIONS.index(default_period) if default_period in PERIOD_OPTIONS else 0
+
                 e1, e2 = st.columns(2)
                 with e1:
                     q_clean_type_confirm = st.selectbox(
@@ -605,7 +627,7 @@ else:
                 with d1:
                     q_date = st.date_input("服務日期", value=date.today())
                 with d2:
-                    q_period = st.selectbox("時段", PERIOD_OPTIONS)
+                    q_period = st.selectbox("時段", PERIOD_OPTIONS, index=period_index)
                 with d3:
                     q_person = st.number_input(
                         "人數",
@@ -627,18 +649,29 @@ else:
                     last_person = last_summary.get("person") or ""
                     last_hour = last_summary.get("hour") or ""
                     last_payway = last_summary.get("payway") or "未知"
-                    last_invoice = last_summary.get("invoice_text") or "未知"
+                    last_invoice = last_summary.get("invoice_text") or ""
                     last_notice = last_summary.get("service_notice") or "無"
+                    last_fare = last_summary.get("fare") or ""
                     person_hour_text = (
                         f"{last_person}人{last_hour}小時" if last_person or last_hour else "未知"
                     )
+                    payment_text = payment_invoice_display(last_payway, last_invoice)
+                    fare_text = f"　|　<b>車馬費</b>：{last_fare}" if nonzero_money(last_fare) else ""
 
                     same_date_orders = last_summary.get("same_date_orders") or []
                     if len(same_date_orders) > 1:
-                        multi_html = "<br>".join(
-                            f"・{o['order_no']}　{o['time']}　服務人員：{o['staff'] or '未知'}　地址：{o['address'] or '未知'}"
-                            for o in same_date_orders
-                        )
+                        multi_rows = []
+                        for o in same_date_orders:
+                            o_ph_text = f"{o.get('person') or ''}人{o.get('hour') or ''}小時" if (o.get("person") or o.get("hour")) else "未知"
+                            o_payment = payment_invoice_display(o.get("payway"), o.get("invoice_text"))
+                            o_notice = o.get("service_notice") or "無"
+                            o_fare = f"　車馬費：{o.get('fare')}" if nonzero_money(o.get("fare")) else ""
+                            multi_rows.append(
+                                f"・{o['order_no']}　{o.get('date', '')} {o.get('time', '')}　"
+                                f"人時：{o_ph_text}　服務人員：{o.get('staff') or '未知'}　"
+                                f"地址：{o.get('address') or '未知'}　{o_payment}　客服備註：{o_notice}{o_fare}"
+                            )
+                        multi_html = "<br>".join(multi_rows)
                         multi_block = (
                             f'<br>⚠️ 該日期共有 <b>{len(same_date_orders)}</b> 筆已付款訂單：<br>{multi_html}'
                         )
@@ -650,7 +683,7 @@ else:
                         f'📌 <b>上次（已付款）服務</b>　訂單：{last_summary.get("order_no", "")}　'
                         f'{last_date} {last_time}　|　<b>地址</b>：{last_addr}　|　<b>類別</b>：{last_clean_type}<br>'
                         f'<b>服務人員</b>：{last_staff}　|　<b>總人時</b>：{person_hour_text}<br>'
-                        f'<b>付款方式</b>：{last_payway}　|　<b>發票</b>：{last_invoice}　|　<b>客服備註</b>：{last_notice}'
+                        f'<b>{payment_text}</b>　|　<b>客服備註</b>：{last_notice}{fare_text}'
                         f'{multi_block}'
                         f'　——　以上皆已預設帶入，如有變動請手動調整對應欄位。'
                         f'</div>',
@@ -668,6 +701,7 @@ else:
                         st.write(f"回應狀態碼：{debug_info.get('status_code', '')}")
                         st.write(f"頁面抓到的訂單區塊數（篩選前）：{debug_info.get('raw_block_count', '')}")
                         st.write(f"篩選電話後剩下的區塊數：{debug_info.get('filtered_block_count', '')}")
+                        st.write(f"付款狀態篩選：{debug_info.get('purchase_status_filter', '') or '全部'}")
                         if debug_info.get("looks_like_login_page"):
                             st.error("⚠️ 回應內容疑似是登入頁，而不是訂單列表頁，可能是 session 過期或被導回登入。")
                         st.code(debug_info.get("snippet", ""), language=None)
@@ -692,9 +726,10 @@ else:
                     for o in unserved_orders:
                         ph_text = f"{o['person']}人{o['hour']}小時" if (o["person"] or o["hour"]) else "未知"
                         pay_invoice = "" if o["payway"] == "儲值金" else f"　付款：{o['payway'] or '未知'}　發票：{o['invoice_text'] or '未知'}"
+                        fare_text = f"　車馬費：{o['fare']}" if nonzero_money(o.get("fare")) else ""
                         rows_html.append(
                             f"・{o['order_no']}　{o['date']} {o['time']}　地址：{o['address'] or '未知'}　"
-                            f"類別：{o['clean_type'] or '未知'}　人時：{ph_text}{pay_invoice}"
+                            f"類別：{o['clean_type'] or '未知'}　人時：{ph_text}{pay_invoice}{fare_text}"
                         )
                     st.markdown(
                         f'<div class="hint-box" style="border-left-color:#FF3B30;background:#FFF5F5;">'
