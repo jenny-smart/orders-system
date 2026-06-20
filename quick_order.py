@@ -9,6 +9,9 @@
 直接 reuse orders.py 既有的後台互動 function，避免重複邏輯/重複維護。
 """
 import time
+import re
+from datetime import date, datetime
+
 import requests
 
 import orders  # 直接 import 模組本身，才能在執行前覆寫它的環境變數
@@ -28,7 +31,6 @@ from orders import (
     fetch_order_no_by_date_and_period,
     fetch_order_meta_by_order_no,
     extract_order_cards_from_purchase_html,
-    _extract_service_date_time,
     _extract_staff_line,
     _extract_status_line,
     _extract_fare_line,
@@ -38,8 +40,10 @@ from orders import (
     display_period_text,
     first_nonzero,
     find_nested_value,
+    get_region_by_address,
     HEADERS,
 )
+from accounts import ACCOUNTS
 from env import BASE_URL_DEV, BASE_URL_PROD, ORDER_PREFIX_DEV, ORDER_PREFIX_PROD
 
 # 後台 payway 欄位對照（沿用代客預訂單次表單的 select option value）
@@ -168,6 +172,82 @@ def list_order_numbers_for_phone(session, phone):
     return {block["order_no"] for block in blocks if block.get("order_no")}
 
 
+def _parse_service_date_time_loose(joined_text):
+    """
+    比 orders.py 的 _extract_service_date_time 更寬鬆的日期/時段解析，
+    不限制時間一定要在日期的「下一行」，避免格式微調就抓不到。
+    回傳 (日期, "起-迄" 時段字串)，抓不到回傳 ("", "")。
+    """
+    match = re.search(
+        r"(\d{4}-\d{2}-\d{2})[^\d]{0,20}?(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})",
+        joined_text,
+    )
+    if not match:
+        return "", ""
+    service_date, start, end = match.groups()
+    return service_date, f"{start} - {end}"
+
+
+def find_upcoming_orders(session, phone, today_value=None):
+    """
+    抓這支電話「今天（含）以後」、未取消的訂單，用於畫面提醒。
+
+    用途：避免客服明明是要幫客人「異動」原本的服務時間，
+    卻誤建立第二筆新訂單，造成重複收費/重複派工。
+    """
+    today_value = today_value or date.today()
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+
+    upcoming = []
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+
+        if "已取消" in joined:
+            continue
+
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        if not service_date:
+            continue
+
+        try:
+            d = datetime.strptime(service_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        if d < today_value:
+            continue
+
+        upcoming.append({
+            "order_no": block["order_no"],
+            "date": service_date,
+            "time": service_time,
+        })
+
+    upcoming.sort(key=lambda x: x["date"])
+    return upcoming
+def _extract_payway_line(joined_text):
+    """
+    從訂單區塊文字解析「付款方式」。
+    一般客訂單會明確顯示「付款方式：信用卡」或「付款方式：ATM」；
+    儲值金訂單通常不會有這行，改用區塊內出現「儲值金」字樣判斷。
+    """
+    m = re.search(r"付款方式[：:]\s*([^\s\n]+)", joined_text)
+    if m:
+        value = m.group(1).strip()
+        if value in ("信用卡", "ATM"):
+            return value
+    if "儲值金" in joined_text:
+        return "儲值金"
+    return ""
+
+
+def _extract_invoice_line(joined_text):
+    """從訂單區塊文字解析發票顯示文字（二聯式/三聯式/捐贈發票那一行），純文字顯示用。"""
+    m = re.search(r"((?:二聯式|三聯式|捐贈發票)[：:][^\n]*)", joined_text)
+    return m.group(1).strip() if m else ""
+
+
 def find_last_paid_service(session, phone, address):
     """
     用後台「訂單管理」實際的篩選參數（phone=）先讓後台篩出這支電話的所有訂單，
@@ -189,7 +269,7 @@ def find_last_paid_service(session, phone, address):
         if "已付款" not in joined:
             continue
 
-        service_date, service_time = _extract_service_date_time(lines)
+        service_date, service_time = _parse_service_date_time_loose(joined)
         if not service_date:
             continue
 
@@ -200,6 +280,8 @@ def find_last_paid_service(session, phone, address):
             "staff": _extract_staff_line(lines),
             "service_status": _extract_status_line(lines),
             "fare": _extract_fare_line(lines),
+            "payway": _extract_payway_line(joined),
+            "invoice_text": _extract_invoice_line(joined),
         })
 
     if not candidates:
@@ -256,6 +338,8 @@ def get_last_service_summary(session, phone, member_payload, address):
         "person": person,
         "hour": hour,
         "staff": paid["staff"],
+        "payway": paid.get("payway", ""),
+        "invoice_text": paid.get("invoice_text", ""),
         "order_no": paid["order_no"],
     }
 
@@ -333,6 +417,30 @@ def quick_create_order(
     )
     best_addr["fare"] = fare_from_check
 
+    # 發票欄位：/booking/single（信用卡/ATM 走這條）後台表單把「發票類別」設為必填，
+    # 之前完全沒帶這幾個欄位，後台驗證沒過、根本沒建立訂單，
+    # 但畫面上看起來像「建單失敗」訊息，其實是表單沒送成功。
+    # 優先沿用 check_contain 回傳的上次發票設定，沒有才用預設值（個人二聯式 + 會員載具/email）。
+    invoice_type = str(
+        first_nonzero(
+            purchase_info.get("invoiceType") if purchase_info else "",
+            find_nested_value(addr_check, ["invoiceType", "invoice_type"]),
+            default="2",
+        )
+    )
+    carrier_type_id = str(
+        first_nonzero(
+            purchase_info.get("carrierTypeId") if purchase_info else "",
+            default="1",
+        )
+    )
+    carrier_info = str(
+        purchase_info.get("carrierInfo") if purchase_info and purchase_info.get("carrierInfo") else (member.get("email") or "")
+    )
+    company_title = str(purchase_info.get("companyTitle", "") if purchase_info else "")
+    company_no = str(purchase_info.get("companyNo", "") if purchase_info else "")
+    donate_code = str(purchase_info.get("donateCode", "8585") if purchase_info else "8585")
+
     old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
 
     def pick(key, default=""):
@@ -383,6 +491,12 @@ def quick_create_order(
         "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
         "discount_code": "",
         "payway": PAYWAY_MAP.get(payway, "2"),
+        "invoice_type": invoice_type,
+        "carrier_type_id": carrier_type_id,
+        "carrier_info": carrier_info,
+        "company_title": company_title,
+        "company_no": company_no,
+        "donate_code": donate_code,
         "is_backend": "477",
         "member_id": str(member.get("member_id") or ""),
         "company_id": str(best_addr.get("company_id") or pick("company_id", "1")),
@@ -424,7 +538,7 @@ def quick_create_order(
     # 避免撞到同日期同時段的舊訂單時被誤判成功。
     before_order_nos = list_order_numbers_for_phone(session, phone)
 
-    session.post(
+    booking_resp = session.post(
         booking_url,
         data={**base_data, "_token": token, "date_list[]": [slot]},
         headers=HEADERS,
@@ -438,9 +552,14 @@ def quick_create_order(
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
 
     if not new_order_nos:
+        # 把後台實際回應狀態/網址/內容片段一起附上，
+        # 才看得出來是真的撞單，還是表單驗證沒過（例如缺必填欄位）導致根本沒送出。
+        debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
         raise Exception(
-            "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在，或後台拒絕重複預約）。"
-            "請至後台『訂單管理』手動確認，不要直接使用畫面上顯示的舊訂單資訊。"
+            "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在、後台拒絕重複預約，"
+            "或表單缺少必填欄位導致後台驗證沒過）。請至後台『訂單管理』手動確認，不要直接使用畫面上顯示的舊訂單資訊。\n"
+            f"［除錯資訊］回應狀態：{booking_resp.status_code}，回應網址：{booking_resp.url}\n"
+            f"回應片段：{debug_snippet}"
         )
 
     if len(new_order_nos) == 1:
