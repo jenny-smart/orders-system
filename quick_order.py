@@ -10,7 +10,7 @@
 """
 import time
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -144,28 +144,42 @@ PURCHASE_FILTER_PARAMS_TEMPLATE = {
 }
 
 
-def _fetch_purchase_blocks_for_phone(session, phone):
+def _fetch_purchase_blocks_for_phone(session, phone, name=""):
     """
-    比照後台「訂單管理」篩選列搜尋的實際請求格式（GET /purchase?phone=...），
-    讓後台先篩好「這支電話」的訂單，不再自己掃全公司、所有客人的訂單列表
-    （之前那樣做，舊訂單常常因為被其他客人訂單擠到後面分頁而掃不到）。
+    比照後台「訂單管理」篩選列搜尋的實際請求格式。
+
+    phone= 和 name= 都已經各自實測證實有效，這裡兩個都帶（電話一定有，
+    姓名有就一起帶，互相保險），篩出結果後再用電話文字比對一次防呆。
     """
     params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
     params["phone"] = normalize_phone(phone)
+    if name:
+        params["name"] = name
 
     resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
         return []
 
-    return extract_order_cards_from_purchase_html(resp.text)
+    blocks = extract_order_cards_from_purchase_html(resp.text)
+
+    phone_norm = normalize_phone(phone)
+    if not phone_norm:
+        return blocks
+
+    filtered = []
+    for block in blocks:
+        joined_compact = "\n".join(block.get("lines", [])).replace("-", "").replace(" ", "")
+        if phone_norm in joined_compact:
+            filtered.append(block)
+    return filtered
 
 
-def list_order_numbers_for_phone(session, phone):
+def list_order_numbers_for_phone(session, phone, name=""):
     """
     取得「這支電話」目前所有訂單編號集合。
     用於送出建單前後比對，確認真的有新訂單產生。
     """
-    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
     return {block["order_no"] for block in blocks if block.get("order_no")}
 
 
@@ -235,7 +249,7 @@ def _extract_label_value(lines, label, stop_labels):
     return " ".join(value_lines).strip()
 
 
-def get_customer_paid_orders(session, phone, known_addresses=None):
+def get_customer_paid_orders(session, phone, known_addresses=None, name=""):
     """
     抓這支電話「所有已付款」訂單，不限地址、不限服務類別、不限付款方式。
 
@@ -246,7 +260,7 @@ def get_customer_paid_orders(session, phone, known_addresses=None):
     由新到舊排序。
     """
     known_addresses = known_addresses or []
-    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
 
     results = []
     for block in blocks:
@@ -313,6 +327,58 @@ def _match_person_hour(member_payload, order_no, address):
     return "", ""
 
 
+def get_last_paid_per_address(session, phone, member_payload, known_addresses, within_days=365):
+    """
+    客人有多個地址時，每個地址各自找「近一年內」最近一次已付款服務。
+
+    跟 get_last_paid_summary() 不同：那個是抓「全部地址中最新一筆」，
+    這個是「每個地址各自的最新一筆」，用於多地址客人完整顯示各地點服務史，
+    避免只看到全域最新那筆、其他地址的服務紀錄被蓋掉看不到。
+
+    地址對不到（matched address 為空）的訂單不計入任何地址。
+    超過 within_days 天數的不算「近一年內」，回傳該地址為 None。
+    """
+    cutoff = date.today() - timedelta(days=within_days)
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
+
+    by_address = {}
+    for o in paid_orders:
+        addr = o.get("address", "")
+        if not addr:
+            continue
+        if addr in by_address:
+            continue  # 已經有更新的這個地址訂單了（paid_orders 已由新到舊排序）
+        try:
+            d = datetime.strptime(o["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if d < cutoff:
+            continue
+        by_address[addr] = o
+
+    result = {}
+    for addr in known_addresses:
+        order = by_address.get(addr)
+        if not order:
+            result[addr] = None
+            continue
+        person, hour = _match_person_hour(member_payload, order["order_no"], addr)
+        result[addr] = {
+            "order_no": order["order_no"],
+            "date": order["date"],
+            "time": order["time"],
+            "clean_type": order["clean_type"],
+            "staff": order["staff"],
+            "payway": order["payway"],
+            "invoice_text": order["invoice_text"],
+            "service_notice": order["service_notice"],
+            "person": person,
+            "hour": hour,
+        }
+    return result
+
+
 def get_last_paid_summary(session, phone, member_payload, known_addresses):
     """
     取得「這支電話」全部地址、全部服務類別中，最近一次已付款服務的完整摘要。
@@ -321,7 +387,8 @@ def get_last_paid_summary(session, phone, member_payload, known_addresses):
     若最近服務日期當天有多筆訂單（例如同天約了不同住處/不同服務），
     same_date_orders 會列出當天所有筆數，避免客服誤判成只有一筆。
     """
-    paid_orders = get_customer_paid_orders(session, phone, known_addresses)
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
     if not paid_orders:
         return None
 
@@ -355,7 +422,8 @@ def get_unserved_paid_orders(session, phone, member_payload, known_addresses, to
     儲值金訂單沒有付款方式/發票概念，畫面顯示時請自行省略。
     """
     today_value = today_value or date.today()
-    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
 
     upcoming = []
     for block in blocks:
@@ -427,6 +495,7 @@ def quick_create_order(
     token = lookup_result["token"]
     member_payload = lookup_result["member_payload"]
     phone = lookup_result["phone"]
+    member_name = (member_payload.get("member", {}) or {}).get("name", "") if member_payload else ""
 
     if not member_payload:
         raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
@@ -596,7 +665,7 @@ def quick_create_order(
     # 送出建單前，先記錄此電話目前有哪些訂單編號，
     # 用來在送出後判斷「是否真的產生新訂單」，
     # 避免撞到同日期同時段的舊訂單時被誤判成功。
-    before_order_nos = list_order_numbers_for_phone(session, phone)
+    before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
 
     booking_resp = session.post(
         booking_url,
@@ -606,7 +675,7 @@ def quick_create_order(
     )
     time.sleep(1)
 
-    after_order_nos = list_order_numbers_for_phone(session, phone)
+    after_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
     new_order_nos = after_order_nos - before_order_nos
 
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
