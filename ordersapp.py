@@ -9,9 +9,8 @@ from quick_order import (
     quick_create_order,
     send_confirmation,
     build_line_message,
-    get_last_service_summary,
-    find_upcoming_orders,
-    get_recent_orders_with_address,
+    get_last_paid_summary,
+    get_unserved_paid_orders,
 )
 
 st.set_page_config(page_title="儲值金訂單系統", page_icon="💰", layout="wide")
@@ -540,29 +539,42 @@ else:
             if not addr_options:
                 st.error("此會員沒有留存地址，請改用後台手動建單，或先請客人提供完整地址。")
             else:
-                q_address = st.selectbox("服務地址", addr_options)
+                # 「曾服務過」一律只看「電話 + 已付款」，不分地址、不分服務類別，
+                # 找到的這筆同時拿來預設地址/服務類別/人數/時數/付款方式/發票。
+                last_summary = get_last_paid_summary(lookup["session"], lookup["phone"], member_payload, addr_options)
+
+                default_addr_index = 0
+                if last_summary and last_summary.get("address") in addr_options:
+                    default_addr_index = addr_options.index(last_summary["address"])
+
+                q_address = st.selectbox("服務地址", addr_options, index=default_addr_index)
 
                 if len(addr_options) > 1:
-                    recent_orders = get_recent_orders_with_address(lookup["session"], lookup["phone"], addr_options, limit=5)
-                    distinct_addrs = {o["address"] for o in recent_orders if o["address"]}
-                    if len(distinct_addrs) > 1:
-                        lines_html = "<br>".join(
-                            f"・{o['date']} {o['time']}　→　{o['address'] or '（無法判斷地址）'}"
-                            for o in recent_orders
-                        )
-                        st.markdown(
-                            f'<div class="hint-box" style="border-left-color:#FF3B30;background:#FFF5F5;">'
-                            f'⚠️ <b>此客人有多個地址，且最近 5 筆訂單橫跨不同地址</b>，'
-                            f'請務必跟客人確認本次服務地址是否為「{q_address}」：<br>'
-                            f'{lines_html}'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
+                    st.caption(
+                        f"⚠️ 此客人留存 {len(addr_options)} 個地址，已預設選擇上次「已付款」服務的地址，"
+                        f"請務必跟客人確認本次地點是否正確。"
+                    )
 
-                last_summary = get_last_service_summary(lookup["session"], lookup["phone"], member_payload, q_address)
                 default_person = 2
                 if last_summary and str(last_summary.get("person", "")).strip().isdigit():
                     default_person = int(last_summary["person"])
+
+                default_clean_type = "居家清潔"
+                if last_summary and last_summary.get("clean_type") in CLEAN_TYPE_ID_MAP:
+                    default_clean_type = last_summary["clean_type"]
+                clean_type_index = list(CLEAN_TYPE_ID_MAP.keys()).index(default_clean_type)
+
+                e1, e2 = st.columns(2)
+                with e1:
+                    q_clean_type_confirm = st.selectbox(
+                        "服務類別（預設同上次，可調整）",
+                        list(CLEAN_TYPE_ID_MAP.keys()),
+                        index=clean_type_index,
+                        key="q_clean_type_confirm",
+                    )
+                with e2:
+                    if last_summary and q_clean_type_confirm != q_clean_type:
+                        st.caption(f"⚠️ 與查詢會員時所選的「{q_clean_type}」不同，將以這裡選的「{q_clean_type_confirm}」為準建單。")
 
                 d1, d2, d3, d4 = st.columns(4)
                 with d1:
@@ -584,32 +596,48 @@ else:
                 if last_summary:
                     last_date = last_summary.get("date") or "未知"
                     last_time = last_summary.get("time") or ""
+                    last_addr = last_summary.get("address") or "（無法判斷地址）"
+                    last_clean_type = last_summary.get("clean_type") or "未知"
                     last_staff = last_summary.get("staff") or "未知"
                     last_person = last_summary.get("person") or ""
                     last_hour = last_summary.get("hour") or ""
-                    last_payway = last_summary.get("payway") or ""
+                    last_payway = last_summary.get("payway") or "未知"
                     last_invoice = last_summary.get("invoice_text") or "未知"
+                    last_notice = last_summary.get("service_notice") or "無"
                     person_hour_text = (
                         f"{last_person}人{last_hour}小時" if last_person or last_hour else "未知"
                     )
+
+                    same_date_orders = last_summary.get("same_date_orders") or []
+                    if len(same_date_orders) > 1:
+                        multi_html = "<br>".join(
+                            f"・{o['order_no']}　{o['time']}　服務人員：{o['staff'] or '未知'}　地址：{o['address'] or '未知'}"
+                            for o in same_date_orders
+                        )
+                        multi_block = (
+                            f'<br>⚠️ 該日期共有 <b>{len(same_date_orders)}</b> 筆已付款訂單：<br>{multi_html}'
+                        )
+                    else:
+                        multi_block = ""
+
                     st.markdown(
                         f'<div class="hint-box">'
-                        f'📌 <b>上次（已付款）服務</b>：{last_date} {last_time}　|　'
-                        f'<b>服務人員</b>：{last_staff}　|　'
-                        f'<b>總人時</b>：{person_hour_text}'
-                        f'<br><b>付款方式</b>：{last_payway or "未知"}　|　'
-                        f'<b>發票</b>：{last_invoice}'
-                        f'　——　人數/付款方式/發票皆已預設帶入上次紀錄，如有變動請手動調整上方「人數」欄位（付款方式如需變更請至後台手動建單）。'
+                        f'📌 <b>上次（已付款）服務</b>　訂單：{last_summary.get("order_no", "")}　'
+                        f'{last_date} {last_time}　|　<b>地址</b>：{last_addr}　|　<b>類別</b>：{last_clean_type}<br>'
+                        f'<b>服務人員</b>：{last_staff}　|　<b>總人時</b>：{person_hour_text}<br>'
+                        f'<b>付款方式</b>：{last_payway}　|　<b>發票</b>：{last_invoice}　|　<b>客服備註</b>：{last_notice}'
+                        f'{multi_block}'
+                        f'　——　以上皆已預設帶入，如有變動請手動調整對應欄位。'
                         f'</div>',
                         unsafe_allow_html=True
                     )
                 else:
                     st.markdown(
-                        '<div class="hint-box">📌 查無此地址「已付款」的服務紀錄（可能是新地址，或之前都未完成付款），人數預設為 2 人，請確認後再送出。</div>',
+                        '<div class="hint-box">📌 查無此客人任何「已付款」紀錄（可能是新客人，或之前都未完成付款），各欄位請手動確認後再送出。</div>',
                         unsafe_allow_html=True
                     )
 
-                # 付款方式：優先用上次紀錄自動帶出，不需要每次手動選。
+                # 付款方式：優先用上次「已付款」紀錄自動帶出，不需要每次手動選。
                 # 只有完全查無上次付款紀錄時，才退而求其次給一個小選單讓客服指定。
                 if last_summary and last_summary.get("payway"):
                     q_payway = last_summary["payway"]
@@ -623,16 +651,21 @@ else:
                 q_region = get_region_by_address(q_address, ACCOUNTS) or "台北"
                 st.caption(f"區域（自動判斷，決定 ATM 收款帳戶/日曆）：{q_region}")
 
-                upcoming_orders = find_upcoming_orders(lookup["session"], lookup["phone"])
-                if upcoming_orders:
-                    lines_html = "<br>".join(
-                        f"・{o['order_no']}　{o['date']} {o['time']}" for o in upcoming_orders
-                    )
+                unserved_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options)
+                if unserved_orders:
+                    rows_html = []
+                    for o in unserved_orders:
+                        ph_text = f"{o['person']}人{o['hour']}小時" if (o["person"] or o["hour"]) else "未知"
+                        pay_invoice = "" if o["payway"] == "儲值金" else f"　付款：{o['payway'] or '未知'}　發票：{o['invoice_text'] or '未知'}"
+                        rows_html.append(
+                            f"・{o['order_no']}　{o['date']} {o['time']}　地址：{o['address'] or '未知'}　"
+                            f"類別：{o['clean_type'] or '未知'}　人時：{ph_text}{pay_invoice}"
+                        )
                     st.markdown(
                         f'<div class="hint-box" style="border-left-color:#FF3B30;background:#FFF5F5;">'
-                        f'⚠️ <b>此客人目前還有 {len(upcoming_orders)} 筆「今天以後」未取消的訂單</b>，'
+                        f'⚠️ <b>此客人目前還有 {len(unserved_orders)} 筆「已付款但服務日期還沒到」的訂單</b>，'
                         f'請先確認這次是要新增一筆服務，還是其實是要異動下面這些既有訂單（異動請改用後台『修改日期』，不要在這裡重新建單）：<br>'
-                        f'{lines_html}'
+                        + "<br>".join(rows_html) +
                         f'</div>',
                         unsafe_allow_html=True
                     )
@@ -650,7 +683,7 @@ else:
                                 region=q_region,
                                 lookup_result=lookup,
                                 address=q_address,
-                                clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type],
+                                clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
                                 date_s=q_date.strftime("%Y-%m-%d"),
                                 period_s=q_period,
                                 hour=q_hour,
@@ -671,10 +704,14 @@ else:
         st.markdown("<hr>", unsafe_allow_html=True)
         step("4", "執行結果")
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("訂單編號", order_result["order_no"])
-        c2.metric("金額（含稅）", order_result.get("price_with_tax") or "—")
-        c3.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
+        if order_result.get("payway") == "儲值金":
+            c2.metric("本次扣儲值金", order_result.get("price") or "—")
+        else:
+            c2.metric("金額（含稅）", order_result.get("price_with_tax") or "—")
+        c3.metric("車馬費", order_result.get("fare") or "0")
+        c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
 
         if not order_result.get("mail_sent"):
             st.warning(f"確認信發送失敗：{order_result.get('mail_msg', '')}")
