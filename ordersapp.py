@@ -541,7 +541,7 @@ else:
             else:
                 q_address = st.selectbox("服務地址", addr_options)
 
-                last_summary = get_last_service_summary(lookup["session"], member_payload, q_address)
+                last_summary = get_last_service_summary(lookup["session"], lookup["phone"], member_payload, q_address)
                 default_person = 2
                 if last_summary and str(last_summary.get("person", "")).strip().isdigit():
                     default_person = int(last_summary["person"])
@@ -574,7 +574,7 @@ else:
                     )
                     st.markdown(
                         f'<div class="hint-box">'
-                        f'📌 <b>上次服務</b>：{last_date} {last_time}　|　'
+                        f'📌 <b>上次（已付款）服務</b>：{last_date} {last_time}　|　'
                         f'<b>服務人員</b>：{last_staff}　|　'
                         f'<b>總人時</b>：{person_hour_text}'
                         f'　——　人數已預設帶入上次紀錄，如有變動請手動調整上方「人數」欄位。'
@@ -583,7 +583,7 @@ else:
                     )
                 else:
                     st.markdown(
-                        '<div class="hint-box">📌 查無此地址上次服務紀錄（可能是新地址），人數預設為 2 人，請確認後再送出。</div>',
+                        '<div class="hint-box">📌 查無此地址「已付款」的服務紀錄（可能是新地址，或之前都未完成付款），人數預設為 2 人，請確認後再送出。</div>',
                         unsafe_allow_html=True
                     )
 
