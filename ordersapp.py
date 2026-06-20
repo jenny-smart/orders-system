@@ -10,7 +10,9 @@ from quick_order import (
     send_confirmation,
     build_line_message,
     get_last_paid_summary,
+    get_last_paid_per_address,
     get_unserved_paid_orders,
+    get_last_purchase_fetch_debug,
 )
 
 st.set_page_config(page_title="儲值金訂單系統", page_icon="💰", layout="wide")
@@ -555,6 +557,29 @@ else:
                         f"請務必跟客人確認本次地點是否正確。"
                     )
 
+                    per_addr_summary = get_last_paid_per_address(
+                        lookup["session"], lookup["phone"], member_payload, addr_options, within_days=365
+                    )
+                    addr_rows = []
+                    for addr in addr_options:
+                        info = per_addr_summary.get(addr)
+                        if not info:
+                            addr_rows.append(f"・{addr}　——　近一年內查無已付款服務紀錄")
+                        else:
+                            ph_text = f"{info['person']}人{info['hour']}小時" if (info["person"] or info["hour"]) else "未知"
+                            addr_rows.append(
+                                f"・{addr}　——　{info['date']} {info['time']}　"
+                                f"類別：{info['clean_type'] or '未知'}　服務人員：{info['staff'] or '未知'}　"
+                                f"總人時：{ph_text}　付款：{info['payway'] or '未知'}　發票：{info['invoice_text'] or '未知'}"
+                            )
+                    st.markdown(
+                        f'<div class="hint-box">'
+                        f'📍 <b>各地址近一年內最近一次已付款服務</b>：<br>'
+                        + "<br>".join(addr_rows) +
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
                 default_person = 2
                 if last_summary and str(last_summary.get("person", "")).strip().isdigit():
                     default_person = int(last_summary["person"])
@@ -636,6 +661,16 @@ else:
                         '<div class="hint-box">📌 查無此客人任何「已付款」紀錄（可能是新客人，或之前都未完成付款），各欄位請手動確認後再送出。</div>',
                         unsafe_allow_html=True
                     )
+                    debug_info = get_last_purchase_fetch_debug()
+                    with st.expander("🔧 除錯資訊（查無紀錄時可展開確認是否為請求問題）"):
+                        st.write(f"實際請求網址：{debug_info.get('request_url', '')}")
+                        st.write(f"最終回應網址：{debug_info.get('final_url', '')}")
+                        st.write(f"回應狀態碼：{debug_info.get('status_code', '')}")
+                        st.write(f"頁面抓到的訂單區塊數（篩選前）：{debug_info.get('raw_block_count', '')}")
+                        st.write(f"篩選電話後剩下的區塊數：{debug_info.get('filtered_block_count', '')}")
+                        if debug_info.get("looks_like_login_page"):
+                            st.error("⚠️ 回應內容疑似是登入頁，而不是訂單列表頁，可能是 session 過期或被導回登入。")
+                        st.code(debug_info.get("snippet", ""), language=None)
 
                 # 付款方式：優先用上次「已付款」紀錄自動帶出，不需要每次手動選。
                 # 只有完全查無上次付款紀錄時，才退而求其次給一個小選單讓客服指定。
