@@ -117,53 +117,73 @@ def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_
     }
 
 
+PURCHASE_FILTER_PARAMS_TEMPLATE = {
+    "keyword": "",
+    "name": "",
+    "phone": "",
+    "orderNo": "",
+    "date_s": "",
+    "date_e": "",
+    "clean_date_s": "",
+    "clean_date_e": "",
+    "paid_at_s": "",
+    "paid_at_e": "",
+    "refundDateS": "",
+    "refundDateE": "",
+    "buy": "",
+    "area_id": "",
+    "isCharge": "",
+    "isRefund": "",
+    "payway": "",
+    "purchase_status": "",
+    "progress_status": "",
+    "invoiceStatus": "",
+    "otherFee": "",
+    "orderBy": "",
+}
+
+
+def _fetch_purchase_blocks_for_phone(session, phone):
+    """
+    比照後台「訂單管理」篩選列搜尋的實際請求格式（GET /purchase?phone=...），
+    讓後台先篩好「這支電話」的訂單，不再自己掃全公司、所有客人的訂單列表
+    （之前那樣做，舊訂單常常因為被其他客人訂單擠到後面分頁而掃不到）。
+    """
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["phone"] = normalize_phone(phone)
+
+    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return []
+
+    return extract_order_cards_from_purchase_html(resp.text)
+
+
 def list_order_numbers_for_phone(session, phone):
     """
-    掃描訂單列表頁，只抓「電話符合」的訂單編號集合。
-    用於送出建單前後比對，確認真的有新訂單產生，
-    而不是 fetch_order_no_by_date_and_period 那種不限客人、
-    撞到同日期同時段的舊訂單就誤判成功。
+    取得「這支電話」目前所有訂單編號集合。
+    用於送出建單前後比對，確認真的有新訂單產生。
     """
-    resp = session.get(orders.PURCHASE_URL, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return set()
-
-    phone_norm = normalize_phone(phone)
-    blocks = extract_order_cards_from_purchase_html(resp.text)
-
-    result = set()
-    for block in blocks:
-        joined = "\n".join(block.get("lines", []))
-        if phone_norm and phone_norm in joined.replace("-", "").replace(" ", ""):
-            result.add(block["order_no"])
-    return result
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    return {block["order_no"] for block in blocks if block.get("order_no")}
 
 
 def find_last_paid_service(session, phone, address):
     """
-    掃描訂單列表頁，只挑「電話 + 地址 + 付款狀態已付款」的訂單，
-    取服務日期最新的一筆，作為「上次真的有服務」的依據。
+    用後台「訂單管理」實際的篩選參數（phone=）先讓後台篩出這支電話的所有訂單，
+    再從中找「地址相符 + 付款狀態已付款」、服務日期最新的一筆。
 
     避免抓到未付款／已取消的訂單，誤判成已經服務過
     （未付款訂單通常還沒派工，服務人員會是「無人力」）。
     """
-    resp = session.get(orders.PURCHASE_URL, headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return None
-
-    phone_norm = normalize_phone(phone)
     addr_norm = normalize_addr_for_match(address)
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
 
-    blocks = extract_order_cards_from_purchase_html(resp.text)
     candidates = []
-
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
-        joined_compact = joined.replace("-", "").replace(" ", "")
 
-        if phone_norm and phone_norm not in joined_compact:
-            continue
         if addr_norm and addr_norm not in normalize_addr_for_match(joined):
             continue
         if "已付款" not in joined:
