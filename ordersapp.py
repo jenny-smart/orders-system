@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import html
+import json
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import date
 
 from orders import run_process_web, get_region_by_address
@@ -446,6 +448,47 @@ def last_summary_card_html(summary):
         + same_date_html
         + '<div class="history-note">以上已預設帶入，如有變動請手動調整對應欄位。</div>'
         + '</div>'
+    )
+
+
+def copy_button(label, text, key):
+    payload = json.dumps(text, ensure_ascii=False)
+    label_payload = json.dumps(label, ensure_ascii=False)
+    components.html(
+        f"""
+        <button id="{key}" style="
+            width: 100%;
+            padding: 0.65rem 1rem;
+            border: 0;
+            border-radius: 10px;
+            background: #F5C518;
+            color: #1C1C1E;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+        ">複製 LINE 訊息</button>
+        <script>
+        const btn = document.getElementById({json.dumps(key)});
+        const text = {payload};
+        const label = {label_payload};
+        btn.addEventListener("click", async () => {{
+            try {{
+                await navigator.clipboard.writeText(text);
+                btn.textContent = "已複製";
+            }} catch (err) {{
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                btn.textContent = "已複製";
+            }}
+            setTimeout(() => {{ btn.textContent = label; }}, 1600);
+        }});
+        </script>
+        """,
+        height=54,
     )
 
 
@@ -909,9 +952,11 @@ else:
             st.success("✅ 訂單建立成功，確認信已發送。")
 
         st.markdown("**📋 複製貼給客人的 LINE 訊息**")
+        line_message = build_line_message(order_result)
         st.text_area(
             "LINE 訊息內容",
-            build_line_message(order_result),
+            line_message,
             height=420,
             label_visibility="collapsed",
         )
+        copy_button("複製 LINE 訊息", line_message, "copy-line-message")
