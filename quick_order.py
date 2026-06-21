@@ -1,15 +1,15 @@
 # ============================================================
-# 檔名：quick_order_6.py
-# 版本：v6
+# 檔名：quick_order_7.py
+# 版本：v7
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
-# v6
-# - 依使用者指定下載檔名重新輸出版本檔
-# - 保留服務訂單系統、功能選單與單筆建單功能調整
-# - 檔名與 Header 版本一致，方便 GitHub / 本機備份辨識
+# v7
+# - 新增新客制式文字拆解函式
+# - 保留舊客快速建單與 LINE 通知功能
+# - 移除 UI 對獨立需求搜尋與新客直接建單的依賴
 # ============================================================
 # -*- coding: utf-8 -*-
 """
@@ -1549,6 +1549,111 @@ def search_available_service_dates(
                     return results
     return results
 
+
+
+def parse_new_customer_order_text(raw_text):
+    """
+    將客服貼上的新客制式文字拆解成欄位。
+
+    注意：
+    - 此函式只做文字拆解，不建立訂單、不送後台。
+    - 不內建任何個資預設值。
+    - 支援常見標籤：訂購人姓名、訂購人電話、訂購人Email、服務地址、室內坪數、付款方式、發票載具、載具號碼、服務需求。
+    """
+    text = str(raw_text or "").strip()
+    result = {
+        "name": "",
+        "phone": "",
+        "email": "",
+        "address": "",
+        "ping": "",
+        "payway": "",
+        "invoice_type": "",
+        "carrier": "",
+        "requirement": "",
+        "note": "",
+    }
+    if not text:
+        return result
+
+    def clean_value(value):
+        return str(value or "").strip().strip("：:").strip()
+
+    # Normalize full-width colon and split lines.
+    normalized = text.replace("：", ":")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+    label_map = [
+        ("name", ["訂購人姓名", "姓名", "客人姓名"]),
+        ("phone", ["訂購人電話", "電話", "手機", "客人電話"]),
+        ("email", ["訂購人Email", "訂購人email", "Email", "email", "信箱"]),
+        ("address", ["服務地址", "地址"]),
+        ("ping", ["室內坪數", "坪數"]),
+        ("payway", ["付款方式"]),
+        ("invoice_type", ["發票載具", "發票方式", "載具類型"]),
+        ("carrier", ["載具號碼", "載碼", "載具", "統編資訊", "統編"]),
+        ("requirement", ["服務需求", "需求", "服務條件"]),
+    ]
+
+    consumed = set()
+
+    for idx, line in enumerate(lines):
+        compact_line = line.replace(" ", "")
+        for key, labels in label_map:
+            for label in labels:
+                compact_label = label.replace(" ", "")
+                if compact_line.startswith(compact_label + ":"):
+                    result[key] = clean_value(line.split(":", 1)[1])
+                    consumed.add(idx)
+                    break
+                if compact_line == compact_label and idx + 1 < len(lines):
+                    result[key] = clean_value(lines[idx + 1])
+                    consumed.add(idx)
+                    consumed.add(idx + 1)
+                    break
+            if idx in consumed:
+                break
+
+    # Extract carrier when it is written alone on the next line, e.g. /T8K346B
+    if not result["carrier"]:
+        for idx, line in enumerate(lines):
+            value = line.strip()
+            if re.match(r"^/[A-Za-z0-9.+-]{6,}$", value):
+                result["carrier"] = value
+                consumed.add(idx)
+                break
+
+    # Extract email if no label was found.
+    if not result["email"]:
+        m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
+        if m:
+            result["email"] = m.group(0)
+
+    # Extract Taiwan mobile if no label was found.
+    if not result["phone"]:
+        m = re.search(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,12}", text)
+        if m:
+            result["phone"] = normalize_phone(m.group(0))
+
+    # Treat short requirement-like lines not consumed as service requirement.
+    requirement_patterns = [
+        r"(平日|週末|假日|不限).*(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
+        r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
+    ]
+    if not result["requirement"]:
+        for idx, line in enumerate(lines):
+            if idx in consumed:
+                continue
+            if any(re.search(pattern, line) for pattern in requirement_patterns):
+                result["requirement"] = line.strip()
+                consumed.add(idx)
+                break
+
+    # Remaining non-empty text is note.
+    notes = [line for idx, line in enumerate(lines) if idx not in consumed]
+    result["note"] = "\n".join(notes).strip()
+
+    return result
 
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
     """
