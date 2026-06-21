@@ -10,8 +10,10 @@ from accounts import ACCOUNTS
 from quick_order import (
     quick_lookup_member,
     quick_create_order,
+    quick_check_available_slots,
     send_confirmation,
     build_line_message,
+    build_line_message_from_order_no,
     get_last_paid_summary,
     get_last_paid_per_address,
     get_unserved_paid_orders,
@@ -706,6 +708,52 @@ if mode == "批次建單（Google Sheet）":
 # 模式二：單筆快速建單
 # =========================================================
 else:
+    with st.expander("📋 依訂單編號產生 LINE 通知訊息"):
+        o1, o2, o3 = st.columns([2, 1, 1])
+        with o1:
+            line_order_no = st.text_input("訂單編號", placeholder="例：LC00211517", key="line_order_no")
+        with o2:
+            line_fallback_payway = st.selectbox("付款方式（抓不到時使用）", ["信用卡", "ATM", "儲值金"], key="line_fallback_payway")
+        with o3:
+            line_fallback_region = st.selectbox("區域（抓不到時使用）", ["台北", "台中", "桃園", "新竹", "高雄"], key="line_fallback_region")
+
+        make_line_clicked = st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no")
+        if make_line_clicked:
+            if not backend_email.strip() or not backend_password.strip():
+                st.error("請先輸入後台帳號密碼")
+            elif not line_order_no.strip():
+                st.error("請輸入訂單編號")
+            else:
+                try:
+                    with st.spinner("查詢訂單並產生訊息中…"):
+                        line_result, line_text = build_line_message_from_order_no(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            order_no=line_order_no.strip(),
+                            fallback_payway=line_fallback_payway,
+                            fallback_region=line_fallback_region,
+                        )
+                    st.session_state.line_from_order_no_result = line_result
+                    st.session_state.line_from_order_no_text = line_text
+                except Exception as e:
+                    st.session_state.line_from_order_no_result = None
+                    st.session_state.line_from_order_no_text = ""
+                    st.error(f"產生失敗：{e}")
+
+        line_text = st.session_state.get("line_from_order_no_text", "")
+        line_result = st.session_state.get("line_from_order_no_result")
+        if line_text and line_result:
+            st.caption(
+                f"訂單：{line_result.get('order_no')}　付款方式：{line_result.get('payway')}　"
+                f"區域：{line_result.get('region')}　金額：{line_result.get('service_amount') or '—'}　"
+                f"車馬費：{line_result.get('fare') or '0'}"
+            )
+            st.text_area("訂單 LINE 訊息內容", line_text, height=420, label_visibility="collapsed")
+            copy_button("複製 LINE 訊息", line_text, "copy-line-message-from-order-no")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+
     step("2", "查詢客人")
 
     q1, q2 = st.columns(2)
@@ -904,6 +952,41 @@ else:
                     )
 
                 st.markdown("<hr>", unsafe_allow_html=True)
+
+                s1, s2 = st.columns([1, 2])
+                with s1:
+                    check_slots_clicked = st.button("🔎 查詢班表可排時段", use_container_width=True)
+                with s2:
+                    st.caption("會用目前地址、服務類別、人數、時數向後台查班表；只查詢，不會建立訂單。")
+
+                if check_slots_clicked:
+                    try:
+                        with st.spinner("查詢班表中…"):
+                            st.session_state.q_available_slots = quick_check_available_slots(
+                                env_name=env,
+                                payway=q_payway,
+                                lookup_result=lookup,
+                                address=q_address,
+                                clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
+                                date_s=q_date.strftime("%Y-%m-%d"),
+                                hour=q_hour,
+                                person=q_person,
+                                periods=PERIOD_OPTIONS,
+                                period_hours=PERIOD_HOUR_MAP,
+                            )
+                    except Exception as e:
+                        st.session_state.q_available_slots = []
+                        st.error(f"查詢班表失敗：{e}")
+
+                available_slots = st.session_state.get("q_available_slots")
+                if available_slots:
+                    st.markdown("**可排時段查詢結果**")
+                    cols = st.columns(2)
+                    for idx, row in enumerate(available_slots):
+                        status = "✅ 有班表" if row.get("available") else "— 無班表"
+                        staff = f"　服務人員：{row.get('staff')}" if row.get("staff") else ""
+                        with cols[idx % 2]:
+                            st.write(f"{row.get('period')}　{status}{staff}")
 
                 create_clicked = st.button("🚀  建立訂單", use_container_width=True)
 
