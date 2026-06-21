@@ -996,17 +996,21 @@ def build_line_message(order_result):
     payway = order_result["payway"]
     region = order_result["region"]
     date_disp = order_result["date"].replace("-", "/")
-    period = order_result["period"]
-    price = order_result.get("price_with_tax", order_result.get("price"))
+    period = str(order_result["period"]).replace(" ", "")
+    price = order_result.get("service_amount") or order_result.get("price_with_tax", order_result.get("price"))
     fare = order_result["fare"]
     address = order_result["address"]
     order_no = order_result["order_no"]
     order_last6 = order_no[-6:] if len(order_no) >= 6 else order_no
 
-    common_footer = """＊若現場溝通時確認無法於服務時間內完成服務需求，會請您排優先順序，以時間內可以完成的區域為主。
+    common_footer = """**當您完成付款後即表示服務已完成預約，
+預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
+請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+＊若現場溝通時確認無法於服務時間內完成服務需求，會請您排優先順序，以時間內可以完成的區域為主。
 ＊窗戶獨立於各區域單獨計算，拆紗窗不拆玻璃，含窗溝及窗框及內側，若外側無法安全站立則以手能擦拭範圍為主。
 ＊夏季天氣炎熱，若情況充許請提供電扇或冷氣供專員使用，謝謝。
 ＊若超過服務時間，則會以加時費用計算。
+
 若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。"""
 
     cancel_policy = """**異動/取消服務注意事項
@@ -1038,15 +1042,15 @@ https://www.lemonclean.com.tw/login
 車馬費： {fare}   (服務完後收取)
 服務地址：{address}
 ※麻煩您於『明天 24:00前』完成付款，為保留他人訂購權利，逾期付款訂單將自動取消
-**當您完成付款後即表示服務已完成預約，
-預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
-請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+
 {common_footer}
+
 線上刷卡流程:
-[https://www.lemonclean.com.tw/order/](https://www.lemonclean.com.tw/order/{order_no}){order_last6}
+https://www.lemonclean.com.tw/order/{order_last6}
 登入會員
 帳號：email；密碼：手機號碼
 在訂單點選付款狀態點選『重新付款』即可
+
 {cancel_policy}"""
 
     if payway == "ATM":
@@ -1054,10 +1058,9 @@ https://www.lemonclean.com.tw/login
             bank_block = """銀行戶名：檸檬專業清潔有限公司
 銀行代碼 台北富邦銀行(012)-松高分行
 銀行帳號 7091-2000-3320"""
-            extra_note = (
-                "*發票於付款完成後24小時之內會開立並寄至Email，屆時麻煩查收或是檢查垃圾郵件。\n"
-                "*匯款完成後再請您提供您的匯款帳號後5碼，以供檸檬家事為您核對帳款。\n"
-            )
+            extra_note = """*發票於付款完成後24小時之內會開立並寄至Email，屆時麻煩查收或是檢查垃圾郵件。
+*匯款完成後再請您提供您的匯款帳號後5碼，以供檸檬家事為您核對帳款。
+"""
         else:
             # 台中帳戶；其餘區域（桃園/新竹/高雄）目前沿用台中帳戶，
             # 若日後各區開獨立帳戶，這裡再依 region 擴充對照表。
@@ -1066,21 +1069,28 @@ https://www.lemonclean.com.tw/login
 銀行帳號 00200102520512"""
             extra_note = ""
 
+        atm_pay_title = "▲請您依下列匯款帳戶資訊繳費，謝謝！" if region == "台北" else "請您依下列匯款帳戶資訊繳費，謝謝！"
+        extra_note_block = f"\n{extra_note}" if extra_note else ""
+        service_lines = (
+            f"服務時間 : {date_disp}  {period}\n車馬費：{fare}\n服務地址：{address}"
+            if region == "台北"
+            else f"服務時間 : {date_disp}  {period}\n服務地址：{address}\n車馬費:{fare}"
+        )
+
         return f"""感謝您於 檸檬家事 預約【居家清潔】服務！
-服務時間 : {date_disp}  {period}
-服務地址：{address}
-車馬費：{fare}
+{service_lines}
 ※麻煩您於『明天 24:00前』完成付款，為保留他人訂購權利，逾期付款訂單將自動取消
-**當您完成付款後即表示服務已完成預約，
-預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
-請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+
 {common_footer}
-▲請您依下列匯款帳戶資訊繳費，謝謝！
+
+{atm_pay_title}
 {bank_block}
 轉帳金額  {price}元（含營業稅）
+
 訂單可以登入『會員中心』查詢確認
 https://www.lemonclean.com.tw/login
 帳號：email；密碼：手機號碼
-{extra_note}{cancel_policy}"""
+{extra_note_block}
+{cancel_policy}"""
 
     raise Exception(f"未知付款方式: {payway}")
