@@ -294,6 +294,21 @@ def list_order_numbers_for_phone(session, phone, name=""):
     return {block["order_no"] for block in blocks if block.get("order_no")}
 
 
+def _fetch_purchase_block_for_order_no(session, order_no):
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["orderNo"] = str(order_no or "").strip()
+    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        raise Exception(f"查詢訂單失敗：HTTP {resp.status_code}")
+
+    target = str(order_no or "").strip()
+    for block in extract_order_cards_from_purchase_html(resp.text):
+        if block.get("order_no") == target:
+            return block
+
+    raise Exception(f"查無訂單：{target}")
+
+
 def _parse_service_date_time_loose(joined_text):
     """
     比 orders.py 的 _extract_service_date_time 更寬鬆的日期/時段解析，
@@ -358,6 +373,16 @@ def _extract_person_hour_line(joined_text):
     return person, hour
 
 
+def _extract_address_line(lines):
+    for line in lines:
+        text = str(line or "").strip()
+        if not text or "@" in text or text.upper() == "LINE":
+            continue
+        if re.search(r"(台|臺|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|嘉義|苗栗|彰化|南投|雲林|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江).*(市|縣).*(區|鄉|鎮|市)", text):
+            return text
+    return ""
+
+
 def _date_not_after_today(date_text):
     try:
         return datetime.strptime(str(date_text), "%Y-%m-%d").date() <= date.today()
@@ -381,6 +406,226 @@ def _extract_payway_line(joined_text):
     if _extract_total_amount_line(joined_text) == "0" and not _extract_invoice_line(joined_text):
         return "儲值金"
     return ""
+
+
+def _service_amount_from_block(joined_text, fare):
+    total = _extract_total_amount_line(joined_text)
+    if not total:
+        return ""
+    try:
+        total_num = int(round(float(str(total).replace(",", ""))))
+        fare_num = int(round(float(str(fare or "0").replace(",", ""))))
+        amount = total_num - fare_num if fare_num and total_num > fare_num else total_num
+        return str(amount)
+    except Exception:
+        return total
+
+
+def build_line_message_from_order_no(
+    env_name,
+    backend_email,
+    backend_password,
+    order_no,
+    fallback_payway="信用卡",
+    fallback_region="台北",
+):
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    block = _fetch_purchase_block_for_order_no(session, order_no)
+    lines = block.get("lines", [])
+    joined = "\n".join(lines)
+
+    service_date, service_time = _parse_service_date_time_loose(joined)
+    address = _extract_address_line(lines)
+    fare = _extract_fare_line(joined) or "0"
+    payway = _extract_payway_line(joined) or fallback_payway
+    region = get_region_by_address(address, ACCOUNTS) or fallback_region
+    service_amount = _service_amount_from_block(joined, fare)
+
+    if not service_date or not service_time:
+        raise Exception(f"訂單 {order_no} 缺少服務日期或時段，無法產生通知")
+    if not address:
+        raise Exception(f"訂單 {order_no} 缺少服務地址，無法產生通知")
+    if payway != "儲值金" and not service_amount:
+        raise Exception(f"訂單 {order_no} 缺少服務金額，無法產生通知")
+
+    result = {
+        "order_no": block["order_no"],
+        "address": address,
+        "date": service_date,
+        "period": service_time,
+        "service_amount": service_amount,
+        "price_with_tax": service_amount,
+        "fare": fare,
+        "payway": payway,
+        "region": region,
+        "env_name": env_name,
+        "session": session,
+        "source_url": f"{base_url}/purchase?orderNo={block['order_no']}",
+    }
+    return result, build_line_message(result)
+
+
+def quick_check_available_slots(
+    env_name,
+    payway,
+    lookup_result,
+    address,
+    clean_type_id,
+    date_s,
+    hour,
+    person="2",
+    periods=None,
+    period_hours=None,
+):
+    """
+    用目前單筆建單表單資料向後台查班表，但不建立訂單。
+    回傳每個時段是否有班表與可解析到的服務人員。
+    """
+    base_url = _configure_environment(env_name)
+    session = lookup_result["session"]
+    token = _get_booking_token_for_payway(session, base_url, payway)
+    member_payload = lookup_result["member_payload"]
+
+    if not member_payload:
+        raise Exception("此電話查無會員資料，請先查詢會員")
+
+    member = member_payload.get("member", {})
+    best_addr = pick_best_address_info(member_payload, address)
+    if not best_addr:
+        raise Exception(f"找不到對應地址資料：{address}")
+
+    selected_address = str(best_addr.get("address") or address).strip()
+    geo_lat, geo_lng = geocode_address(selected_address)
+    if geo_lat and geo_lng:
+        best_addr["lat"] = geo_lat
+        best_addr["lng"] = geo_lng
+
+    addr_check = check_contain(
+        session,
+        member.get("member_id", ""),
+        selected_address,
+        best_addr.get("lat", ""),
+        best_addr.get("lng", ""),
+        token,
+        clean_type_id,
+    )
+    if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
+        addr_check = check_contain(
+            session,
+            member.get("member_id", ""),
+            selected_address,
+            best_addr.get("lat", ""),
+            best_addr.get("lng", ""),
+            lookup_result["token"],
+            clean_type_id,
+        )
+    if not addr_check:
+        raise Exception(f"查詢地址/地區失敗：{selected_address}")
+
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    if area_info:
+        best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
+        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
+        best_addr["country_id"] = area_info.get("country_id", best_addr.get("country_id"))
+
+    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
+
+    def pick(key, default=""):
+        value = old_purchase.get(key)
+        return value if value not in (None, "") else default
+
+    base_data = {
+        "clean_type_id": clean_type_id,
+        "phone": lookup_result.get("phone", ""),
+        "name": str(member.get("name") or "").strip(),
+        "email": str(member.get("email") or "").strip(),
+        "tel": str(member.get("tel") or lookup_result.get("phone", "")),
+        "line": str(member.get("line") or ""),
+        "fbName": str(member.get("fb_name") or ""),
+        "fb": str(member.get("fb") or ""),
+        "memoProcess": str(member.get("memo_process") or ""),
+        "memoFinance": str(member.get("memo_finance") or ""),
+        "addressId": str(best_addr.get("addressId") or ""),
+        "country_id": str(best_addr.get("country_id") or pick("country_id", "12")),
+        "address": selected_address,
+        "ping": str(pick("ping", "4")),
+        "room": str(pick("room", "0")),
+        "bathroom": str(pick("bathroom", "0")),
+        "balcony": str(pick("balcony", "0")),
+        "livingroom": str(pick("livingroom", "0")),
+        "kitchen": str(pick("kitchen", "0")),
+        "window": str(pick("window", "")),
+        "shutter": str(pick("shutter", "")),
+        "clothes": str(pick("clothes", "0")),
+        "dyson": str(pick("dyson", "0")),
+        "refrigerator": str(pick("refrigerator", "0")),
+        "disinfection": str(pick("disinfection", "0")),
+        "go_abord": str(pick("go_abord", "0")),
+        "home_move": str(pick("home_move", "0")),
+        "storage": str(pick("storage", "0")),
+        "cabinet": str(pick("cabinet", "0")),
+        "quintuple": str(pick("quintuple", "0")),
+        "hour": str(int(float(hour))),
+        "price": "",
+        "price_vvip": "",
+        "person": str(person),
+        "date_s": date_s,
+        "period_s": "",
+        "period": "",
+        "cycle": "1",
+        "fare": "",
+        "memo": "",
+        "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
+        "discount_code": "",
+        "payway": PAYWAY_MAP.get(payway, "2"),
+        "invoice_type": "2",
+        "carrier_type_id": "1",
+        "carrier_info": str(member.get("email") or ""),
+        "company_title": "",
+        "company_no": "",
+        "donate_code": "8585",
+        "is_backend": "477",
+        "member_id": str(member.get("member_id") or ""),
+        "company_id": str(best_addr.get("company_id") or pick("company_id", "1")),
+        "area_id": str(best_addr.get("area_id") or pick("area_id", "25")),
+        "lat": str(best_addr.get("lat") or pick("lat", "")),
+        "lng": str(best_addr.get("lng") or pick("lng", "")),
+    }
+
+    rows = []
+    for period in periods or []:
+        slot = f"{date_s}_{period}"
+        data = base_data.copy()
+        data["period_s"] = period
+        data["hour"] = str(int(float((period_hours or {}).get(period, hour))))
+        calc_result = calculate_hour(session, data, token)
+        if not calc_result:
+            rows.append({
+                "date": date_s,
+                "period": period,
+                "available": False,
+                "staff": "",
+                "error": "計算時數失敗",
+            })
+            continue
+        calc_fields = extract_calc_fields(calc_result, fallback_hours=data["hour"], fallback_fare="0")
+        data["price"] = str(calc_fields.get("price") or "0")
+        data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
+        data["fare"] = str(calc_fields.get("fare") or "0")
+        raw_section = get_section_raw(session, data, token, slot)
+        available = slot_exists_in_section_response(raw_section, slot)
+        cleaners = extract_cleaners_from_section_response(raw_section, slot) if available else []
+        rows.append({
+            "date": date_s,
+            "period": period,
+            "available": available,
+            "staff": format_staff_from_cleaners(cleaners, people=person) if available else "",
+        })
+    return rows
 
 
 def _is_paid_order_text(joined_text, trusted_paid_filter=False):
