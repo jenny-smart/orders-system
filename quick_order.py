@@ -446,7 +446,6 @@ def build_line_message_from_order_no(
     backend_email,
     backend_password,
     order_no,
-    fallback_payway="信用卡",
     fallback_region="台北",
 ):
     base_url = _configure_environment(env_name)
@@ -461,7 +460,7 @@ def build_line_message_from_order_no(
     service_date, service_time = _parse_service_date_time_loose(joined)
     address = _extract_address_line(lines)
     fare = _extract_fare_line(joined) or "0"
-    payway = _extract_payway_line(joined) or fallback_payway
+    payway = _extract_payway_line(joined)
     region = get_region_by_address(address, ACCOUNTS) or fallback_region
     service_amount = _service_amount_from_block(joined, fare)
 
@@ -469,6 +468,10 @@ def build_line_message_from_order_no(
         raise Exception(f"訂單 {order_no} 缺少服務日期或時段，無法產生通知")
     if not address:
         raise Exception(f"訂單 {order_no} 缺少服務地址，無法產生通知")
+    if not payway:
+        # 付款方式不可用 fallback 猜，猜錯訊息樣板/金額會整個錯，
+        # 寧可請客服去後台確認真實付款方式，不要冒險帶錯。
+        raise Exception(f"訂單 {order_no} 無法判斷付款方式（信用卡/ATM/儲值金），請至後台『訂單管理』確認後手動處理，不要使用本功能猜測。")
     if payway != "儲值金" and not service_amount:
         raise Exception(f"訂單 {order_no} 缺少服務金額，無法產生通知")
 
@@ -1283,6 +1286,7 @@ def build_line_message(order_result):
 ＊窗戶獨立於各區域單獨計算，拆紗窗不拆玻璃，含窗溝及窗框及內側，若外側無法安全站立則以手能擦拭範圍為主。
 ＊夏季天氣炎熱，若情況充許請提供電扇或冷氣供專員使用，謝謝。
 ＊若超過服務時間，則會以加時費用計算。
+
 若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。"""
 
     cancel_policy = """**異動/取消服務注意事項
