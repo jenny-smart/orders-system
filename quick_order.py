@@ -89,6 +89,15 @@ def _configure_environment(env_name):
     return base_url
 
 
+def _booking_url_for_payway(base_url, payway):
+    return f"{base_url}{BOOKING_ENDPOINT_MAP.get(payway, '/booking/single')}"
+
+
+def _get_booking_token_for_payway(session, base_url, payway):
+    orders.BOOKING_URL = _booking_url_for_payway(base_url, payway)
+    return get_csrf_token(session)
+
+
 def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1"):
     """
     電話查會員。回傳 session/token 給後續單筆建單共用，
@@ -710,7 +719,7 @@ def quick_create_order(
     base_url = _configure_environment(env_name)
 
     session = lookup_result["session"]
-    token = lookup_result["token"]
+    token = _get_booking_token_for_payway(session, base_url, payway)
     member_payload = lookup_result["member_payload"]
     phone = lookup_result["phone"]
     member_name = (member_payload.get("member", {}) or {}).get("name", "") if member_payload else ""
@@ -739,8 +748,19 @@ def quick_create_order(
         token,
         clean_type_id,
     )
+    if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
+        addr_check = check_contain(
+            session,
+            member.get("member_id", ""),
+            selected_address,
+            best_addr.get("lat", ""),
+            best_addr.get("lng", ""),
+            lookup_result["token"],
+            clean_type_id,
+        )
     if not addr_check:
-        raise Exception(f"查詢地址/地區失敗：{selected_address}")
+        route = BOOKING_ENDPOINT_MAP.get(payway, "/booking/single")
+        raise Exception(f"查詢地址/地區失敗（{payway}：{route}）：{selected_address}")
 
     area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
     if area_info:
@@ -878,7 +898,7 @@ def quick_create_order(
     cleaners = extract_cleaners_from_section_response(raw_section, slot)
     staff_display = format_staff_from_cleaners(cleaners, people=person)
 
-    booking_url = f"{base_url}{BOOKING_ENDPOINT_MAP.get(payway, '/booking/single')}"
+    booking_url = _booking_url_for_payway(base_url, payway)
 
     # 送出建單前，先記錄此電話目前有哪些訂單編號，
     # 用來在送出後判斷「是否真的產生新訂單」，
