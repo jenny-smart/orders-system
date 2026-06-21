@@ -1,15 +1,15 @@
 # ============================================================
-# 檔名：quick_order_7_1.py
-# 版本：v7.1
+# 檔名：quick_order_7_2.py
+# 版本：v7.2
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
-# v7.1
-# - 保留新客制式文字拆解函式
-# - 提供已付款未服務訂單查詢資料給主畫面顯示
-# - 修正 UI v7.1 所需後端相容
+# v7.2
+# - 新客資料拆解電話統一轉純數字
+# - 新增發票抬頭與統編解析
+# - 保留載具/統編資訊相容欄位
 # ============================================================
 # -*- coding: utf-8 -*-
 """
@@ -1569,6 +1569,8 @@ def parse_new_customer_order_text(raw_text):
         "ping": "",
         "payway": "",
         "invoice_type": "",
+        "invoice_title": "",
+        "tax_id": "",
         "carrier": "",
         "requirement": "",
         "note": "",
@@ -1590,8 +1592,10 @@ def parse_new_customer_order_text(raw_text):
         ("address", ["服務地址", "地址"]),
         ("ping", ["室內坪數", "坪數"]),
         ("payway", ["付款方式"]),
-        ("invoice_type", ["發票載具", "發票方式", "載具類型"]),
-        ("carrier", ["載具號碼", "載碼", "載具", "統編資訊", "統編"]),
+        ("invoice_type", ["發票載具", "發票方式", "載具類型", "發票"]),
+        ("invoice_title", ["發票抬頭", "公司抬頭", "抬頭", "買受人"]),
+        ("tax_id", ["統一編號", "統編", "公司統編", "買受人統編"]),
+        ("carrier", ["載具號碼", "載碼", "載具", "統編資訊"]),
         ("requirement", ["服務需求", "需求", "服務條件"]),
     ]
 
@@ -1635,6 +1639,10 @@ def parse_new_customer_order_text(raw_text):
         if m:
             result["phone"] = normalize_phone(m.group(0))
 
+    # Normalize phone to digits only, even if user typed hyphens/spaces.
+    if result.get("phone"):
+        result["phone"] = normalize_phone(result["phone"])
+
     # Treat short requirement-like lines not consumed as service requirement.
     requirement_patterns = [
         r"(平日|週末|假日|不限).*(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
@@ -1648,6 +1656,12 @@ def parse_new_customer_order_text(raw_text):
                 result["requirement"] = line.strip()
                 consumed.add(idx)
                 break
+
+    # Extract 8-digit Taiwan tax ID if no label was found.
+    if not result["tax_id"]:
+        tax_matches = re.findall(r"(?<!\d)\d{8}(?!\d)", text)
+        if tax_matches:
+            result["tax_id"] = tax_matches[0]
 
     # Remaining non-empty text is note.
     notes = [line for idx, line in enumerate(lines) if idx not in consumed]
