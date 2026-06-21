@@ -709,12 +709,10 @@ if mode == "批次建單（Google Sheet）":
 # =========================================================
 else:
     with st.expander("📋 依訂單編號產生 LINE 通知訊息"):
-        o1, o2, o3 = st.columns([2, 1, 1])
+        o1, o2 = st.columns([2, 1])
         with o1:
             line_order_no = st.text_input("訂單編號", placeholder="例：LC00211517", key="line_order_no")
         with o2:
-            line_fallback_payway = st.selectbox("付款方式（抓不到時使用）", ["信用卡", "ATM", "儲值金"], key="line_fallback_payway")
-        with o3:
             line_fallback_region = st.selectbox("區域（抓不到時使用）", ["台北", "台中", "桃園", "新竹", "高雄"], key="line_fallback_region")
 
         make_line_clicked = st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no")
@@ -731,7 +729,6 @@ else:
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
                             order_no=line_order_no.strip(),
-                            fallback_payway=line_fallback_payway,
                             fallback_region=line_fallback_region,
                         )
                     st.session_state.line_from_order_no_result = line_result
