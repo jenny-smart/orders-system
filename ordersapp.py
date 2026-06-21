@@ -897,9 +897,9 @@ else:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("訂單編號", order_result["order_no"])
         if order_result.get("payway") == "儲值金":
-            c2.metric("本次扣儲值金", order_result.get("price") or "—")
+            c2.metric("本次扣儲值金（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
         else:
-            c2.metric("金額（含稅）", order_result.get("price_with_tax") or "—")
+            c2.metric("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
         c3.metric("車馬費", order_result.get("fare") or "0")
         c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
 
