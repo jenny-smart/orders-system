@@ -1,15 +1,16 @@
 # ============================================================
-# 檔名：ordersapp_7.py
-# 版本：v7
+# 檔名：ordersapp_7_1.py
+# 版本：v7.1
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
-# v7
-# - 主功能選單改為批次建單、舊客快速建單、新客資料拆解、LINE通知產生器
-# - 移除不能直接使用的獨立需求搜尋入口
-# - 新客改為制式文字拆解成可修改欄位，不預設個資
+# v7.1
+# - 顯示已付款但尚未服務訂單，避免誤建重複訂單
+# - 修正新客資料拆解後欄位未帶入問題
+# - 移除殘留的獨立需求搜尋功能分支
+# - 保留舊客快速建單內的已知日期/依需求搜尋切換
 # - LINE通知移除區域選擇，由訂單資料自動判斷
 # ============================================================
 # -*- coding: utf-8 -*-
@@ -840,7 +841,7 @@ else:
             member_payload = lookup.get("member_payload")
             st.markdown("<hr>", unsafe_allow_html=True)
             if not member_payload:
-                st.warning("查無此會員。請改用上方『新客建單』功能，直接輸入訂購人資料、服務地址、付款方式與載具資料。")
+                st.warning("查無此會員。請改用上方『新客資料拆解』功能，直接輸入訂購人資料、服務地址、付款方式與載具資料。")
             else:
                 member = member_payload.get("member", {})
                 addr_list = member_payload.get("member", {}).get("memberAddressList", [])
@@ -880,6 +881,41 @@ else:
 
                     if last_summary:
                         st.markdown(last_summary_card_html(last_summary), unsafe_allow_html=True)
+
+                    upcoming_orders = get_unserved_paid_orders(
+                        lookup["session"],
+                        lookup["phone"],
+                        member_payload,
+                        addr_options,
+                        today_value=date.today(),
+                    )
+                    if upcoming_orders:
+                        st.markdown(
+                            '<div class="hint-box"><b>⚠️ 目前已付款但尚未服務訂單</b><br>'
+                            '請先確認客人是否要異動既有訂單，避免重複建單。</div>',
+                            unsafe_allow_html=True,
+                        )
+                        for idx, order in enumerate(upcoming_orders, start=1):
+                            ph_text = person_hour_display(order.get("person"), order.get("hour"))
+                            payment_text = payment_invoice_display(order.get("payway"), order.get("invoice_text"))
+                            address_text = order.get("address") or "未能對應留存地址，請至後台確認"
+                            staff_text = order.get("staff") or "待確認"
+                            fare_text = f"｜車馬費：{order.get('fare')}" if nonzero_money(order.get("fare")) else ""
+                            st.markdown(
+                                f"""
+                                <div class="history-order">
+                                  <div class="history-order-main">{idx}. {h(order.get('order_no'))}　{h(order.get('date'))} {h(order.get('time'), '')}</div>
+                                  <div class="history-order-meta">
+                                    <div>地址：{h(address_text)}</div>
+                                    <div>類別：{h(order.get('clean_type'))}</div>
+                                    <div>服務人員：{h(staff_text)}</div>
+                                    <div>人時：{h(ph_text)}{h(fare_text, '')}</div>
+                                    <div>{h(payment_text)}</div>
+                                  </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
 
                     date_mode = st.radio("日期/班表查詢方式", ["已知日期", "依需求搜尋可服務日期"], horizontal=True, key="old_date_mode")
 
@@ -1020,6 +1056,16 @@ else:
 
         if st.button("拆解資料", use_container_width=True, key="parse_new_customer_text_btn"):
             st.session_state.parsed_new_customer = parsed_customer
+            st.session_state.parsed_new_name = parsed_customer.get("name", "")
+            st.session_state.parsed_new_phone = parsed_customer.get("phone", "")
+            st.session_state.parsed_new_email = parsed_customer.get("email", "")
+            st.session_state.parsed_new_address = parsed_customer.get("address", "")
+            st.session_state.parsed_new_ping = parsed_customer.get("ping", "")
+            st.session_state.parsed_new_payway = parsed_customer.get("payway", "")
+            st.session_state.parsed_new_invoice = parsed_customer.get("invoice_type", "")
+            st.session_state.parsed_new_carrier = parsed_customer.get("carrier", "")
+            st.session_state.parsed_new_requirement = parsed_customer.get("requirement", "")
+            st.session_state.parsed_new_note = parsed_customer.get("note", "")
             st.success("已拆解資料，請檢查下方欄位。")
 
         parsed_customer = st.session_state.get("parsed_new_customer", parsed_customer)
@@ -1062,13 +1108,6 @@ else:
         ])
 
         st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
-
-    # -----------------------------------------------------
-    # 依需求搜尋可服務日期（獨立工具）
-    # -----------------------------------------------------
-    elif single_feature == "依需求搜尋可服務日期":
-        info_panel("功能說明", ["此工具用來先找可服務日期，不直接建單。", "適合客人只說平日、週末、不限或 4 小時等需求。", "若要查真實人員班表，仍需先有會員/地址資料或後端支援新客查班表。"])
-        st.info("目前可在『舊客快速建單』內使用完整依需求搜尋；新客搜尋需串接新客地址查班表流程後啟用。")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
