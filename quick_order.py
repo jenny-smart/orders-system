@@ -1002,6 +1002,14 @@ def build_line_message(order_result):
     address = order_result["address"]
     order_no = order_result["order_no"]
     order_last6 = order_no[-6:] if len(order_no) >= 6 else order_no
+    try:
+        has_fare = float(str(fare or "0").replace(",", "")) != 0
+    except Exception:
+        has_fare = bool(str(fare or "").strip())
+    vip_fare_line = f"車馬費：{fare}\n" if has_fare else ""
+    card_fare_line = f"車馬費： {fare}   (服務完後收取)\n" if has_fare else ""
+    taipei_atm_fare_line = f"車馬費：{fare}\n" if has_fare else ""
+    taichung_atm_fare_line = f"\n車馬費:{fare}" if has_fare else ""
 
     common_footer = """**當您完成付款後即表示服務已完成預約，
 預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
@@ -1024,8 +1032,7 @@ def build_line_message(order_result):
         return f"""感謝您預約檸檬家事【居家清潔】服務
 服務時間：{date_disp} {period}
 服務地址：{address}
-車馬費：{fare}
-檸檬家事專員會於現場再溝通服務需求，
+{vip_fare_line}檸檬家事專員會於現場再溝通服務需求，
 以於系統估算時間內可以完的服務項目為主。
 預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
 請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
@@ -1039,8 +1046,7 @@ https://www.lemonclean.com.tw/login
         return f"""感謝您於 檸檬家事 預約【居家清潔】服務！
 服務時間 : {date_disp}  {period}
 服務金額：{price}（含稅）
-車馬費： {fare}   (服務完後收取)
-服務地址：{address}
+{card_fare_line}服務地址：{address}
 ※麻煩您於『明天 24:00前』完成付款，為保留他人訂購權利，逾期付款訂單將自動取消
 
 {common_footer}
@@ -1072,9 +1078,9 @@ https://www.lemonclean.com.tw/order/{order_last6}
         atm_pay_title = "▲請您依下列匯款帳戶資訊繳費，謝謝！" if region == "台北" else "請您依下列匯款帳戶資訊繳費，謝謝！"
         extra_note_block = f"\n{extra_note}" if extra_note else ""
         service_lines = (
-            f"服務時間 : {date_disp}  {period}\n車馬費：{fare}\n服務地址：{address}"
+            f"服務時間 : {date_disp}  {period}\n{taipei_atm_fare_line}服務地址：{address}"
             if region == "台北"
-            else f"服務時間 : {date_disp}  {period}\n服務地址：{address}\n車馬費:{fare}"
+            else f"服務時間 : {date_disp}  {period}\n服務地址：{address}{taichung_atm_fare_line}"
         )
 
         return f"""感謝您於 檸檬家事 預約【居家清潔】服務！
