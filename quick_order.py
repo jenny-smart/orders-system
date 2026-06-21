@@ -958,6 +958,7 @@ def quick_create_order(
         "period": display_period,
         "price": price_no_tax,              # 後台原始未稅服務費，保留供除錯核對
         "price_with_tax": price_with_tax,    # 含稅金額，訊息/畫面顯示用這個
+        "service_amount": price_with_tax,     # 對外顯示的服務金額一律含稅
         "fare": base_data["fare"],
         "payway": payway,
         "region": region,
