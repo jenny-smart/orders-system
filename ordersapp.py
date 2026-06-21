@@ -1,16 +1,15 @@
 # ============================================================
-# 檔名：ordersapp_7_1.py
-# 版本：v7.1
+# 檔名：ordersapp_7_2.py
+# 版本：v7.2
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
-# v7.1
-# - 顯示已付款但尚未服務訂單，避免誤建重複訂單
-# - 修正新客資料拆解後欄位未帶入問題
-# - 移除殘留的獨立需求搜尋功能分支
-# - 保留舊客快速建單內的已知日期/依需求搜尋切換
+# v7.2
+# - 新客資料拆解電話欄位統一只保留數字
+# - 新增發票抬頭與統編拆解欄位
+# - 整理後文字同步輸出抬頭/統編，方便貼到後台
 # - LINE通知移除區域選擇，由訂單資料自動判斷
 # ============================================================
 # -*- coding: utf-8 -*-
@@ -1063,6 +1062,8 @@ else:
             st.session_state.parsed_new_ping = parsed_customer.get("ping", "")
             st.session_state.parsed_new_payway = parsed_customer.get("payway", "")
             st.session_state.parsed_new_invoice = parsed_customer.get("invoice_type", "")
+            st.session_state.parsed_new_invoice_title = parsed_customer.get("invoice_title", "")
+            st.session_state.parsed_new_tax_id = parsed_customer.get("tax_id", "")
             st.session_state.parsed_new_carrier = parsed_customer.get("carrier", "")
             st.session_state.parsed_new_requirement = parsed_customer.get("requirement", "")
             st.session_state.parsed_new_note = parsed_customer.get("note", "")
@@ -1089,7 +1090,13 @@ else:
         with p3:
             parsed_invoice = st.text_input("發票/載具類型", value=parsed_customer.get("invoice_type", ""), key="parsed_new_invoice")
         with p4:
-            parsed_carrier = st.text_input("載具號碼 / 統編資訊", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
+            parsed_carrier = st.text_input("載具號碼", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
+
+        i1, i2 = st.columns(2)
+        with i1:
+            parsed_invoice_title = st.text_input("發票抬頭", value=parsed_customer.get("invoice_title", ""), key="parsed_new_invoice_title")
+        with i2:
+            parsed_tax_id = st.text_input("統一編號", value=parsed_customer.get("tax_id", ""), key="parsed_new_tax_id")
 
         parsed_requirement = st.text_input("服務需求", value=parsed_customer.get("requirement", ""), key="parsed_new_requirement")
         parsed_note = st.text_area("其他備註", value=parsed_customer.get("note", ""), height=100, key="parsed_new_note")
@@ -1102,7 +1109,9 @@ else:
             f"室內坪數：{parsed_ping}",
             f"付款方式：{parsed_payway}",
             f"發票/載具：{parsed_invoice}",
-            f"載具號碼/統編：{parsed_carrier}",
+            f"發票抬頭：{parsed_invoice_title}",
+            f"統一編號：{parsed_tax_id}",
+            f"載具號碼：{parsed_carrier}",
             f"服務需求：{parsed_requirement}",
             f"其他備註：{parsed_note}",
         ])
