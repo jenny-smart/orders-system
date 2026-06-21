@@ -311,21 +311,41 @@ def _fetch_purchase_block_for_order_no(session, order_no):
 
 def _parse_service_date_time_loose(joined_text):
     """
-    比 orders.py 的 _extract_service_date_time 更寬鬆的日期/時段解析，
-    不限制時間一定要在日期的「下一行」，避免格式微調就抓不到。
-    回傳 (日期, "起-迄" 時段字串)，抓不到回傳 ("", "")。
+    從訂單區塊文字解析「服務日期」與「服務時段」。
+
+    重要修正：訂單區塊裡同時存在兩個日期字串：
+    - 訂購日期：格式為 "YYYY-MM-DD HH:MM:SS"（帶秒數的時間戳記），
+      在文字流裡通常排在「服務日期」前面（訂購資訊欄位先出現）。
+    - 服務日期：格式為 "YYYY-MM-DD (週幾)"，例如 "2026-07-04 (六)"，
+      後面緊接著服務時段 "HH:MM - HH:MM"（無秒數）。
+
+    舊版邏輯「抓文字裡第一個日期」會誤抓到訂購日期。
+    這裡改成優先找「日期 + 星期幾括號」這個服務日期專屬的格式特徵；
+    真的找不到才退而求其次，找一個「後面不是緊接著 HH:MM:SS」的日期
+    （排除訂購日期戳記）。
+
+    回傳 (日期, "起 - 迄" 時段字串)，抓不到回傳 ("", "")。
     """
-    date_match = re.search(r"服務日期[\s\S]{0,80}?(\d{4}-\d{2}-\d{2})", joined_text)
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})\s*[（(][一二三四五六日][）)]", joined_text)
+
     if not date_match:
-        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", joined_text)
+        for m in re.finditer(r"(\d{4}-\d{2}-\d{2})", joined_text):
+            tail = joined_text[m.end():m.end() + 12]
+            # 訂購日期格式緊接著 " HH:MM:SS"，排除掉；剩下的才當作候選服務日期
+            if not re.match(r"\s*\d{1,2}:\d{2}:\d{2}", tail):
+                date_match = m
+                break
+
     if not date_match:
         return "", ""
+
     service_date = date_match.group(1)
 
     tail = joined_text[date_match.end():date_match.end() + 600]
-    time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", tail)
+    # 時段格式為 "HH:MM - HH:MM"（無秒數），用 (?!:) 避免誤吃到 HH:MM:SS 的前半段
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", tail)
     if not time_match:
-        time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", joined_text)
+        time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", joined_text)
     if not time_match:
         return service_date, ""
 
