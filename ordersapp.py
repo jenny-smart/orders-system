@@ -1,15 +1,16 @@
 # ============================================================
-# 檔名：ordersapp_6.py
-# 版本：v6
+# 檔名：ordersapp_7.py
+# 版本：v7
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
-# v6
-# - 依使用者指定下載檔名重新輸出版本檔
-# - 保留服務訂單系統、功能選單與單筆建單功能調整
-# - 檔名與 Header 版本一致，方便 GitHub / 本機備份辨識
+# v7
+# - 主功能選單改為批次建單、舊客快速建單、新客資料拆解、LINE通知產生器
+# - 移除不能直接使用的獨立需求搜尋入口
+# - 新客改為制式文字拆解成可修改欄位，不預設個資
+# - LINE通知移除區域選擇，由訂單資料自動判斷
 # ============================================================
 # -*- coding: utf-8 -*-
 import html
@@ -33,7 +34,7 @@ from quick_order import (
     get_last_purchase_fetch_debug,
     build_equivalent_plans,
     search_available_service_dates,
-    quick_create_new_customer_order,
+    parse_new_customer_order_text,
 )
 
 st.set_page_config(page_title="服務訂單系統", page_icon="🧹", layout="wide")
@@ -574,7 +575,7 @@ st.markdown("""
   <div class="hero-emoji">🧹</div>
   <div>
     <div class="hero-title">服務訂單系統</div>
-    <div class="hero-sub">支援批次建單、舊客快速建單、新客建單、需求搜尋班表、LINE 通知、確認信與 Google 日曆同步。</div>
+    <div class="hero-sub">支援批次建單、舊客快速建單、新客資料拆解、LINE 通知、確認信與 Google 日曆同步。</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -596,12 +597,14 @@ info_panel(
     "功能說明",
     [
         "批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步 Google 日曆。",
-        "單筆服務訂單：提供舊客快速建單、新客建單、依需求搜尋可服務日期、LINE 通知產生器。",
+        "舊客快速建單：用電話查會員，帶入歷史已付款服務資料後建單；需求搜尋整合在此流程內。",
+        "新客資料拆解：貼上客人提供的制式文字，系統拆成欄位供客服修改與複製，不直接送單。",
+        "LINE 通知產生器：用已成立訂單編號補產生通知訊息。",
     ],
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "單筆服務訂單"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器"],
     horizontal=True,
 )
 
@@ -757,42 +760,15 @@ if mode == "批次建單（Google Sheet）":
 # 功能：單筆服務訂單
 # =========================================================
 else:
-    step("3", "單筆服務訂單功能")
-    info_panel(
-        "功能說明",
-        [
-            "LINE 通知產生器：用已成立訂單編號補產生通知訊息。",
-            "舊客快速建單：用電話查會員，帶入歷史服務資料後建單。",
-            "新客建單：獨立輸入新客資料、服務條件、付款與載具資訊。",
-            "依需求搜尋可服務日期：客人未指定日期時，用平日/週末/不限與時段偏好往後找班表。",
-        ],
-    )
-
-    st.markdown(
-        '<div class="hint-box"><b>請先選擇本次要使用的功能</b><br>'
-        '・舊客：先查會員，再建單。<br>'
-        '・新客：直接輸入客人資料，再查班表。<br>'
-        '・需求搜尋：客人只說平日/週末/不限時使用，不必先選定單一日期。</div>',
-        unsafe_allow_html=True,
-    )
-
-    single_feature = st.radio(
-        "單筆服務訂單功能選單",
-        ["舊客快速建單", "新客建單", "依需求搜尋可服務日期", "LINE 通知產生器"],
-        horizontal=True,
-        key="single_feature",
-    )
+    single_feature = mode
+    step("3", single_feature)
 
     # -----------------------------------------------------
     # LINE 通知產生器
     # -----------------------------------------------------
     if single_feature == "LINE 通知產生器":
         info_panel("使用說明", ["輸入已成立訂單編號。", "系統讀取訂單日期、地址、付款方式與金額。", "確認內容後複製貼到 LINE。"])
-        o1, o2 = st.columns([2, 1])
-        with o1:
-            line_order_no = st.text_input("訂單編號", placeholder="例：LC00211517", key="line_order_no")
-        with o2:
-            line_fallback_region = st.selectbox("區域（抓不到時使用）", ["台北", "台中", "桃園", "新竹", "高雄"], key="line_fallback_region")
+        line_order_no = st.text_input("訂單編號", placeholder="", key="line_order_no")
 
         if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
             if not backend_email.strip() or not backend_password.strip():
@@ -807,7 +783,6 @@ else:
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
                             order_no=line_order_no.strip(),
-                            fallback_region=line_fallback_region,
                         )
                     st.session_state.line_from_order_no_result = line_result
                     st.session_state.line_from_order_no_text = line_text
@@ -1020,79 +995,73 @@ else:
                                 st.warning("目前依條件搜尋不到可服務日期，請放寬日期類型、時段偏好或延長搜尋天數。")
 
     # -----------------------------------------------------
-    # 新客建單
+    # 新客資料拆解
     # -----------------------------------------------------
-    elif single_feature == "新客建單":
-        info_panel("功能說明", ["新客建單是獨立功能，不依賴會員查詢結果。", "客服可先輸入客人提供的完整資料，再查詢班表。", "若要直接送進後台，需後端另接新客建立會員/建單 API；目前先整理資料與查詢邏輯。"])
+    elif single_feature == "新客資料拆解":
+        info_panel(
+            "功能說明",
+            [
+                "此功能不直接建立訂單，避免與後台新客建單流程重複。",
+                "客服貼上客人提供的制式文字後，系統會拆成欄位，方便檢查、修改與複製到後台。",
+                "畫面不預設任何個人姓名、電話、Email、地址或載具資料，避免個資外洩。",
+            ],
+        )
 
-        step("3", "新客訂購資料")
+        step("4", "貼上新客制式資料")
+        raw_new_customer_text = st.text_area(
+            "請貼上客人提供的訂購資料",
+            value="",
+            height=220,
+            placeholder="請貼上完整文字，例如：訂購人姓名、電話、Email、服務地址、坪數、付款方式、發票載具、服務需求等",
+            key="new_customer_raw_text",
+        )
+
+        parsed_customer = parse_new_customer_order_text(raw_new_customer_text)
+
+        if st.button("拆解資料", use_container_width=True, key="parse_new_customer_text_btn"):
+            st.session_state.parsed_new_customer = parsed_customer
+            st.success("已拆解資料，請檢查下方欄位。")
+
+        parsed_customer = st.session_state.get("parsed_new_customer", parsed_customer)
+
+        step("5", "拆解後欄位（可修改）")
         c1, c2, c3 = st.columns(3)
         with c1:
-            new_name = st.text_input("訂購人姓名", value="", placeholder="例：游景程", key="new_name")
+            parsed_name = st.text_input("訂購人姓名", value=parsed_customer.get("name", ""), key="parsed_new_name")
         with c2:
-            new_phone = st.text_input("訂購人電話", value="", placeholder="例：0988800737", key="new_phone")
+            parsed_phone = st.text_input("訂購人電話", value=parsed_customer.get("phone", ""), key="parsed_new_phone")
         with c3:
-            new_email = st.text_input("訂購人 Email", value="", placeholder="例：kuan_mich@yahoo.com", key="new_email")
-        new_address = st.text_input("服務地址", value="", placeholder="例：台北市景興路202巷11號", key="new_address")
-        n1, n2, n3, n4 = st.columns(4)
-        with n1:
-            new_ping = st.number_input("室內坪數", min_value=0, max_value=300, value=40, key="new_ping")
-        with n2:
-            new_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="new_clean_type")
-        with n3:
-            new_payway = st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"], key="new_payway")
-        with n4:
-            new_invoice_type = st.selectbox("發票載具", ["會員載具", "手機載具", "統編發票", "捐贈發票"], key="new_invoice_type")
-        new_carrier = st.text_input("載具號碼 / 統編資訊", value="", placeholder="手機載具例：/T8K346B", key="new_carrier")
-        new_note = st.text_area("客人需求備註", value="平日 2人3小時", height=90, key="new_note")
+            parsed_email = st.text_input("訂購人 Email", value=parsed_customer.get("email", ""), key="parsed_new_email")
 
-        step("4", "新客班表查詢")
-        date_mode = st.radio("日期/班表查詢方式", ["已知日期", "依需求搜尋可服務日期"], horizontal=True, key="new_date_mode")
-        if date_mode == "已知日期":
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                new_date = st.date_input("服務日期", value=date.today(), key="new_known_date")
-            with d2:
-                new_period = st.selectbox("時段", PERIOD_OPTIONS, key="new_known_period")
-            with d3:
-                new_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="new_known_person")
-            new_hour = PERIOD_HOUR_MAP.get(new_period, 3)
-            st.caption(f"此時段系統帶出：{new_person}人{new_hour}小時")
-        else:
-            a1, a2, a3, a4 = st.columns(4)
-            with a1:
-                new_day_type = st.selectbox("日期類型", ["平日", "週末", "不限"], key="new_day_type")
-            with a2:
-                new_time_pref = st.selectbox("時段偏好", ["上午", "下午", "不限"], key="new_time_pref")
-            with a3:
-                new_base_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="new_search_person")
-            with a4:
-                new_base_hour = st.number_input("每人時數", min_value=2, max_value=8, value=3, key="new_search_hour")
-            new_plans = build_equivalent_plans(new_base_person, new_base_hour)
-            st.caption("將查詢方案：" + "、".join([f"{p['person']}人{p['hour']}小時" for p in new_plans]))
+        parsed_address = st.text_input("服務地址", value=parsed_customer.get("address", ""), key="parsed_new_address")
 
-        if st.button("建立新客訂單", use_container_width=True, key="new_create_btn"):
-            try:
-                result = quick_create_new_customer_order(
-                    env_name=env,
-                    backend_email=backend_email.strip(),
-                    backend_password=backend_password.strip(),
-                    customer={
-                        "name": new_name,
-                        "phone": new_phone,
-                        "email": new_email,
-                        "address": new_address,
-                        "ping": new_ping,
-                        "payway": new_payway,
-                        "invoice_type": new_invoice_type,
-                        "carrier": new_carrier,
-                        "note": new_note,
-                        "clean_type_id": CLEAN_TYPE_ID_MAP[new_clean_type],
-                    },
-                )
-                st.success(result.get("message", "新客訂單資料已建立"))
-            except Exception as e:
-                st.warning(str(e))
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            parsed_ping = st.text_input("室內坪數", value=parsed_customer.get("ping", ""), key="parsed_new_ping")
+        with p2:
+            parsed_payway = st.text_input("付款方式", value=parsed_customer.get("payway", ""), key="parsed_new_payway")
+        with p3:
+            parsed_invoice = st.text_input("發票/載具類型", value=parsed_customer.get("invoice_type", ""), key="parsed_new_invoice")
+        with p4:
+            parsed_carrier = st.text_input("載具號碼 / 統編資訊", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
+
+        parsed_requirement = st.text_input("服務需求", value=parsed_customer.get("requirement", ""), key="parsed_new_requirement")
+        parsed_note = st.text_area("其他備註", value=parsed_customer.get("note", ""), height=100, key="parsed_new_note")
+
+        formatted_text = "\\n".join([
+            f"訂購人姓名：{parsed_name}",
+            f"訂購人電話：{parsed_phone}",
+            f"訂購人Email：{parsed_email}",
+            f"服務地址：{parsed_address}",
+            f"室內坪數：{parsed_ping}",
+            f"付款方式：{parsed_payway}",
+            f"發票/載具：{parsed_invoice}",
+            f"載具號碼/統編：{parsed_carrier}",
+            f"服務需求：{parsed_requirement}",
+            f"其他備註：{parsed_note}",
+        ])
+
+        st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
 
     # -----------------------------------------------------
     # 依需求搜尋可服務日期（獨立工具）
