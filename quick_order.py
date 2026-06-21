@@ -1,4 +1,16 @@
-# quick_order.py
+# ============================================================
+# 檔名：quick_order_6.py
+# 版本：v6
+# 模組：單筆服務訂單後端模組
+# 建立日期：2026-06-22
+# 最後更新：2026-06-22
+#
+# Change Log
+# v6
+# - 依使用者指定下載檔名重新輸出版本檔
+# - 保留服務訂單系統、功能選單與單筆建單功能調整
+# - 檔名與 Header 版本一致，方便 GitHub / 本機備份辨識
+# ============================================================
 # -*- coding: utf-8 -*-
 """
 單筆快速建單模組（信用卡 / ATM / 儲值金）
@@ -1376,3 +1388,188 @@ https://www.lemonclean.com.tw/login
 {cancel_policy}"""
 
     raise Exception(f"未知付款方式: {payway}")
+# =========================================================
+# 需求搜尋 / 新客建單輔助功能（服務訂單系統 UI 使用）
+# =========================================================
+
+def _is_target_day(d, day_type="不限"):
+    """依平日/週末/不限判斷日期是否符合搜尋條件。"""
+    weekday = d.weekday()
+    if day_type == "平日":
+        return weekday < 5
+    if day_type == "週末":
+        return weekday >= 5
+    return True
+
+
+def _filter_periods_by_preference(periods, time_preference="不限"):
+    """依上午/下午/不限篩選系統時段。"""
+    selected = []
+    for period in periods or []:
+        try:
+            start_hour = int(str(period).split("-", 1)[0].split(":", 1)[0])
+        except Exception:
+            start_hour = 0
+        if time_preference == "上午" and start_hour >= 12:
+            continue
+        if time_preference == "下午" and start_hour < 12:
+            continue
+        selected.append(period)
+    return selected
+
+
+def build_equivalent_plans(person, hour):
+    """
+    產生等效人時方案。
+
+    人時 = 人數 × 服務時數。
+    例：2人6小時 = 12人時，會同時提供 2人6小時與 3人4小時。
+    目前先提供最常用的原方案與可整除替代方案，避免列出太多不實用組合。
+    """
+    try:
+        base_person = int(person)
+        base_hour = int(float(hour))
+    except Exception:
+        base_person, base_hour = 2, 4
+
+    total_person_hours = base_person * base_hour
+    candidates = [(base_person, base_hour)]
+
+    for p in range(1, 5):
+        if p == base_person:
+            continue
+        if total_person_hours % p != 0:
+            continue
+        h = total_person_hours // p
+        if 2 <= h <= 8:
+            candidates.append((p, h))
+
+    # 常用顯示順序：原方案優先，其餘依人數由少到多。
+    seen = set()
+    plans = []
+    for p, h in candidates:
+        key = (p, h)
+        if key in seen:
+            continue
+        seen.add(key)
+        plans.append({"person": p, "hour": h, "total_person_hours": total_person_hours})
+    return plans
+
+
+def search_available_service_dates(
+    env_name,
+    payway,
+    lookup_result,
+    address,
+    clean_type_id,
+    start_date,
+    days=30,
+    day_type="不限",
+    time_preference="不限",
+    plans=None,
+    periods=None,
+    period_hours=None,
+    max_results=30,
+):
+    """
+    依客人需求往後搜尋可服務日期。
+
+    使用情境：客人未指定日期，只說「平日」、「週末」、「不限」、
+    「上午」、「下午」、「不限時段」與人時需求時使用。
+
+    回傳每筆包含：date / period / person / hour / staff。
+    """
+    if isinstance(start_date, datetime):
+        cursor = start_date.date()
+    elif isinstance(start_date, date):
+        cursor = start_date
+    else:
+        cursor = datetime.strptime(str(start_date), "%Y-%m-%d").date()
+
+    periods = periods or [
+        "08:30-12:30",
+        "09:00-11:00",
+        "09:00-12:00",
+        "14:00-16:00",
+        "14:00-17:00",
+        "14:00-18:00",
+        "09:00-16:00",
+        "09:00-18:00",
+    ]
+    period_hours = period_hours or {
+        "08:30-12:30": 4,
+        "09:00-11:00": 2,
+        "09:00-12:00": 3,
+        "14:00-16:00": 2,
+        "14:00-17:00": 3,
+        "14:00-18:00": 4,
+        "09:00-16:00": 6,
+        "09:00-18:00": 8,
+    }
+    periods = _filter_periods_by_preference(periods, time_preference)
+    plans = plans or build_equivalent_plans(2, 4)
+
+    results = []
+    for offset in range(int(days)):
+        d = cursor + timedelta(days=offset)
+        if not _is_target_day(d, day_type):
+            continue
+
+        date_s = d.strftime("%Y-%m-%d")
+        for plan in plans:
+            target_hour = int(plan.get("hour") or 0)
+            target_periods = [p for p in periods if int(period_hours.get(p, 0)) == target_hour]
+            if not target_periods:
+                # 若沒有剛好符合時數的標準時段，就跳過該方案，避免送錯班表時段。
+                continue
+            rows = quick_check_available_slots(
+                env_name=env_name,
+                payway=payway,
+                lookup_result=lookup_result,
+                address=address,
+                clean_type_id=clean_type_id,
+                date_s=date_s,
+                hour=target_hour,
+                person=plan.get("person"),
+                periods=target_periods,
+                period_hours=period_hours,
+            )
+            for row in rows:
+                if not row.get("available"):
+                    continue
+                results.append({
+                    "date": date_s,
+                    "period": row.get("period"),
+                    "person": plan.get("person"),
+                    "hour": target_hour,
+                    "total_person_hours": plan.get("total_person_hours"),
+                    "staff": row.get("staff", ""),
+                })
+                if len(results) >= int(max_results):
+                    return results
+    return results
+
+
+def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
+    """
+    新客建單入口。
+
+    目前舊 quick_create_order() 依賴後台會員 payload 與既有 addressId，
+    因此新客若要直接建立訂單，需要另接「建立會員/地址」或「新客訂單」後台流程。
+    這個函式先集中驗證新客資料，避免 UI 與後端邏輯混在一起。
+    """
+    required = ["name", "phone", "email", "address", "payway", "clean_type_id"]
+    missing = [key for key in required if not str((customer or {}).get(key, "")).strip()]
+    if missing:
+        raise Exception("新客資料不足，請補齊：" + "、".join(missing))
+
+    carrier = str((customer or {}).get("carrier", "")).strip()
+    invoice_type = str((customer or {}).get("invoice_type", "")).strip()
+    if invoice_type == "手機載具" and not carrier.startswith("/"):
+        raise Exception("手機載具格式可能不正確，範例：/T8K346B")
+
+    raise Exception(
+        "新客資料已完成前端收集與驗證；但目前 quick_order.py 的既有建單核心需要會員 addressId，"
+        "尚未接上新客建立會員/地址或新客訂單送出 API。請先依此資料至後台建立會員，"
+        "或下一版新增 create_new_member_and_order() 後再直接送單。"
+    )
