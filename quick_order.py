@@ -98,6 +98,16 @@ def _get_booking_token_for_payway(session, base_url, payway):
     return get_csrf_token(session)
 
 
+def _build_booking_submit_data(base_data, token, payway, slot):
+    data = {**base_data, "_token": token}
+    if payway in ("信用卡", "ATM"):
+        data["date_s"] = ""
+        data["datePeriod"] = slot
+    else:
+        data["date_list[]"] = [slot]
+    return data
+
+
 def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1"):
     """
     電話查會員。回傳 session/token 給後續單筆建單共用，
@@ -907,7 +917,7 @@ def quick_create_order(
 
     booking_resp = session.post(
         booking_url,
-        data={**base_data, "_token": token, "date_list[]": [slot]},
+        data=_build_booking_submit_data(base_data, token, payway, slot),
         headers=HEADERS,
         allow_redirects=True,
     )
