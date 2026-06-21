@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import html
 import streamlit as st
 from datetime import date
 
@@ -238,6 +239,89 @@ hr {
     border-color: #e8e8e8 !important;
     margin: 1.4rem 0 !important;
 }
+
+.history-card {
+    background: var(--lemon-soft);
+    border-left: 4px solid var(--lemon);
+    border-radius: 0 10px 10px 0;
+    padding: 1rem 1.1rem;
+    margin-top: 0.85rem;
+    font-size: 0.94rem;
+    color: var(--ink);
+}
+
+.history-title {
+    font-size: 1rem;
+    font-weight: 800;
+    color: var(--charcoal);
+    margin-bottom: 0.75rem;
+}
+
+.history-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem 1.2rem;
+}
+
+.history-field {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    gap: 0.35rem;
+    align-items: start;
+}
+
+.history-label {
+    color: var(--muted);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.history-value {
+    color: var(--charcoal);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.history-subtitle {
+    margin-top: 0.9rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--lemon-mid);
+    font-weight: 800;
+    color: var(--charcoal);
+}
+
+.history-order {
+    margin-top: 0.55rem;
+    padding: 0.65rem 0.75rem;
+    background: rgba(255,255,255,0.58);
+    border: 1px solid var(--lemon-mid);
+    border-radius: 8px;
+}
+
+.history-order-main {
+    font-weight: 800;
+    color: var(--charcoal);
+    margin-bottom: 0.35rem;
+}
+
+.history-order-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.25rem 1rem;
+    color: var(--ink);
+}
+
+.history-note {
+    margin-top: 0.75rem;
+    color: var(--muted);
+}
+
+@media (max-width: 720px) {
+    .history-grid,
+    .history-order-meta {
+        grid-template-columns: 1fr;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -282,6 +366,87 @@ def payment_invoice_display(payway, invoice_text):
     if payway == "儲值金":
         return "儲值金客（無付款方式/發票資訊）"
     return f"付款：{payway or '未知'}　發票：{invoice_text or '未知'}"
+
+
+def booking_route_display(payway):
+    if payway == "儲值金":
+        return "儲值金客", "/booking/stored_value_routine"
+    return "一般客", "/booking/single"
+
+
+def h(value, default="未知"):
+    text = str(value or "").strip()
+    return html.escape(text if text else default)
+
+
+def person_hour_display(person, hour):
+    return f"{person}人{hour}小時" if (person or hour) else "未知"
+
+
+def history_field(label, value):
+    return (
+        '<div class="history-field">'
+        f'<span class="history-label">{h(label, "")}</span>'
+        f'<span class="history-value">{h(value)}</span>'
+        '</div>'
+    )
+
+
+def order_history_row(order):
+    ph_text = person_hour_display(order.get("person"), order.get("hour"))
+    payment_text = payment_invoice_display(order.get("payway"), order.get("invoice_text"))
+    notice = order.get("service_notice") or "無"
+    fare = order.get("fare") or ""
+    fare_part = f'<div>車馬費：{h(fare, "")}</div>' if nonzero_money(fare) else ""
+    return (
+        '<div class="history-order">'
+        f'<div class="history-order-main">{h(order.get("order_no"))}　{h(order.get("date"))} {h(order.get("time"), "")}</div>'
+        '<div class="history-order-meta">'
+        f'<div>人時：{h(ph_text)}</div>'
+        f'<div>服務人員：{h(order.get("staff"))}</div>'
+        f'<div>地址：{h(order.get("address"))}</div>'
+        f'<div>{h(payment_text)}</div>'
+        f'<div>客服備註：{h(notice)}</div>'
+        f'{fare_part}'
+        '</div>'
+        '</div>'
+    )
+
+
+def last_summary_card_html(summary):
+    ph_text = person_hour_display(summary.get("person"), summary.get("hour"))
+    payment_text = payment_invoice_display(summary.get("payway"), summary.get("invoice_text"))
+    fields = [
+        ("訂單", summary.get("order_no")),
+        ("服務時間", f'{summary.get("date") or ""} {summary.get("time") or ""}'.strip()),
+        ("地址", summary.get("address") or "無法判斷地址"),
+        ("類別", summary.get("clean_type")),
+        ("服務人員", summary.get("staff")),
+        ("人時", ph_text),
+        ("付款/發票", payment_text),
+        ("客服備註", summary.get("service_notice") or "無"),
+    ]
+    if nonzero_money(summary.get("fare")):
+        fields.append(("車馬費", summary.get("fare")))
+
+    same_date_orders = summary.get("same_date_orders") or []
+    same_date_html = ""
+    if len(same_date_orders) > 1:
+        same_date_html = (
+            f'<div class="history-subtitle">該日期共有 {len(same_date_orders)} 筆已付款訂單</div>'
+            + "".join(order_history_row(order) for order in same_date_orders)
+        )
+
+    return (
+        '<div class="history-card">'
+        '<div class="history-title">📌 上次（已付款）服務</div>'
+        '<div class="history-grid">'
+        + "".join(history_field(label, value) for label, value in fields)
+        + '</div>'
+        + same_date_html
+        + '<div class="history-note">以上已預設帶入，如有變動請手動調整對應欄位。</div>'
+        + '</div>'
+    )
 
 
 def step(num, title):
@@ -641,54 +806,7 @@ else:
                     st.markdown(f"<br><b>{q_hour} 小時</b>（依時段自動帶出）", unsafe_allow_html=True)
 
                 if last_summary:
-                    last_date = last_summary.get("date") or "未知"
-                    last_time = last_summary.get("time") or ""
-                    last_addr = last_summary.get("address") or "（無法判斷地址）"
-                    last_clean_type = last_summary.get("clean_type") or "未知"
-                    last_staff = last_summary.get("staff") or "未知"
-                    last_person = last_summary.get("person") or ""
-                    last_hour = last_summary.get("hour") or ""
-                    last_payway = last_summary.get("payway") or "未知"
-                    last_invoice = last_summary.get("invoice_text") or ""
-                    last_notice = last_summary.get("service_notice") or "無"
-                    last_fare = last_summary.get("fare") or ""
-                    person_hour_text = (
-                        f"{last_person}人{last_hour}小時" if last_person or last_hour else "未知"
-                    )
-                    payment_text = payment_invoice_display(last_payway, last_invoice)
-                    fare_text = f"　|　<b>車馬費</b>：{last_fare}" if nonzero_money(last_fare) else ""
-
-                    same_date_orders = last_summary.get("same_date_orders") or []
-                    if len(same_date_orders) > 1:
-                        multi_rows = []
-                        for o in same_date_orders:
-                            o_ph_text = f"{o.get('person') or ''}人{o.get('hour') or ''}小時" if (o.get("person") or o.get("hour")) else "未知"
-                            o_payment = payment_invoice_display(o.get("payway"), o.get("invoice_text"))
-                            o_notice = o.get("service_notice") or "無"
-                            o_fare = f"　車馬費：{o.get('fare')}" if nonzero_money(o.get("fare")) else ""
-                            multi_rows.append(
-                                f"・{o['order_no']}　{o.get('date', '')} {o.get('time', '')}　"
-                                f"人時：{o_ph_text}　服務人員：{o.get('staff') or '未知'}　"
-                                f"地址：{o.get('address') or '未知'}　{o_payment}　客服備註：{o_notice}{o_fare}"
-                            )
-                        multi_html = "<br>".join(multi_rows)
-                        multi_block = (
-                            f'<br>⚠️ 該日期共有 <b>{len(same_date_orders)}</b> 筆已付款訂單：<br>{multi_html}'
-                        )
-                    else:
-                        multi_block = ""
-
-                    st.markdown(
-                        f'<div class="hint-box">'
-                        f'📌 <b>上次（已付款）服務</b>　訂單：{last_summary.get("order_no", "")}　'
-                        f'{last_date} {last_time}　|　<b>地址</b>：{last_addr}　|　<b>類別</b>：{last_clean_type}<br>'
-                        f'<b>服務人員</b>：{last_staff}　|　<b>總人時</b>：{person_hour_text}<br>'
-                        f'<b>{payment_text}</b>　|　<b>客服備註</b>：{last_notice}{fare_text}'
-                        f'{multi_block}'
-                        f'　——　以上皆已預設帶入，如有變動請手動調整對應欄位。'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(last_summary_card_html(last_summary), unsafe_allow_html=True)
                 else:
                     st.markdown(
                         '<div class="hint-box">📌 查無此客人任何「已付款」紀錄（可能是新客人，或之前都未完成付款），各欄位請手動確認後再送出。</div>',
@@ -715,6 +833,8 @@ else:
                         "付款方式（查無上次紀錄，請手動指定）",
                         ["信用卡", "ATM", "儲值金"],
                     )
+                route_customer_type, route_path = booking_route_display(q_payway)
+                st.caption(f"建單介面：{route_customer_type}　{route_path}")
 
                 # 區域：直接用服務地址自動判斷（決定 ATM 收款帳戶 / 日曆），不需要手動選。
                 q_region = get_region_by_address(q_address, ACCOUNTS) or "台北"
