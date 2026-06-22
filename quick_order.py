@@ -1816,6 +1816,139 @@ def search_available_service_dates(
     return results
 
 
+
+# =========================================================
+# 優惠券建立（/coupon/add）
+# =========================================================
+
+COUPON_COMPANY_ID_MAP = {
+    "台北": "1",
+    "桃園": "2",
+    "新竹": "3",
+    "台中": "4",
+}
+
+COUPON_SERVICE_ITEM_MAP = {
+    "居家清潔": "1",
+    "辦公室清潔": "2",
+    "裝修細清": "3",
+    "年節大掃除": "4",
+    "冷氣機清潔": "5",
+    "洗衣機清潔": "6",
+    "沙發/床墊清潔": "7",
+    "整理收納": "8",
+}
+
+COUPON_TYPE_MAP = {
+    "不得與其他優惠券重複": "1",
+    "可重複使用，每個帳號限用一次": "2",
+    "可重複使用，不限使用次數": "3",
+}
+
+COUPON_ADD_URL_PATH = "/coupon/add"
+
+
+def create_coupon(
+    env_name,
+    backend_email,
+    backend_password,
+    title,
+    discount,
+    date_s,
+    date_e,
+    prefix,
+    piece="1",
+    regions=None,
+    service_items=None,
+    coupon_type="不得與其他優惠券重複",
+):
+    """
+    建立優惠券。
+
+    參數：
+        title        : 優惠券標題（通常為客人姓名或用途說明）
+        discount     : 面額（整數，元）
+        date_s       : 有效期限起（YYYY-MM-DD）
+        date_e       : 有效期限迄（YYYY-MM-DD）
+        prefix       : 優惠碼前綴（系統會自動在後面加英文字母，例如 tpe0707 → tpe0707K）
+        piece        : 張數（預設 1）
+        regions      : list，例如 ["台北"]；None 則預設台北
+        service_items: list，例如 ["居家清潔"]；None 則預設居家清潔
+        coupon_type  : 優惠券種類（預設「不得與其他優惠券重複」）
+
+    回傳 dict：
+        success      : bool
+        message      : 說明
+        coupon_code  : 猜測的優惠碼（prefix + 第一個大寫字母，實際碼需至後台確認）
+    """
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    # 取得 CSRF token（GET /coupon/add 頁面）
+    coupon_add_url = f"{base_url}{COUPON_ADD_URL_PATH}"
+    get_resp = session.get(coupon_add_url, headers=HEADERS, allow_redirects=True)
+    if get_resp.status_code != 200:
+        raise Exception(f"無法開啟優惠券新增頁面：HTTP {get_resp.status_code}")
+
+    token = ""
+    token_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+    if token_match:
+        token = token_match.group(1)
+    if not token:
+        # fallback：從 hidden input 抓
+        token_match2 = re.search(r'name=\"_token\"\s+value=\"([^\"]+)\"', get_resp.text)
+        if token_match2:
+            token = token_match2.group(1)
+    if not token:
+        raise Exception("無法取得 CSRF token，請確認已登入後台")
+
+    regions = regions or ["台北"]
+    service_items = service_items or ["居家清潔"]
+
+    data = {
+        "coupon_type_id": COUPON_TYPE_MAP.get(coupon_type, "1"),
+        "title": str(title).strip(),
+        "date_s": str(date_s).strip(),
+        "date_e": str(date_e).strip(),
+        "prefix": str(prefix).strip(),
+        "discount": str(int(float(discount))),
+        "piece": str(int(piece)),
+        "_token": token,
+    }
+
+    # multipart/form-data 需用 list of tuples 才能送出多個同名欄位
+    fields = list(data.items())
+    for r in regions:
+        cid = COUPON_COMPANY_ID_MAP.get(r, "1")
+        fields.append(("company_id[]", cid))
+    for s in service_items:
+        sid = COUPON_SERVICE_ITEM_MAP.get(s, "1")
+        fields.append(("service_item[]", sid))
+
+    post_resp = session.post(
+        coupon_add_url,
+        files={k: (None, v) for k, v in fields},
+        headers={k: v for k, v in HEADERS.items() if k.lower() != "content-type"},
+        allow_redirects=True,
+    )
+
+    success = post_resp.status_code in (200, 302) and "優惠券" in (post_resp.text or "")
+    # 若成功後被 redirect 到 /coupon，視為成功
+    if post_resp.url and "/coupon" in post_resp.url and "add" not in post_resp.url:
+        success = True
+
+    return {
+        "success": success,
+        "status_code": post_resp.status_code,
+        "final_url": post_resp.url,
+        "coupon_prefix": prefix,
+        "discount": int(float(discount)),
+        "piece": int(piece),
+        "message": "優惠券建立成功，請至後台確認優惠碼" if success else f"建立可能失敗，請至後台確認（HTTP {post_resp.status_code}）",
+    }
+
 def parse_new_customer_order_text(raw_text):
     """
     將客服貼上的新客制式文字拆解成欄位。
