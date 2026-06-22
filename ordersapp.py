@@ -40,6 +40,10 @@ from quick_order import (
     build_equivalent_plans,
     search_available_service_dates,
     parse_new_customer_order_text,
+    create_coupon,
+    COUPON_COMPANY_ID_MAP,
+    COUPON_SERVICE_ITEM_MAP,
+    COUPON_TYPE_MAP,
 )
 
 st.set_page_config(page_title="服務訂單系統", page_icon="🧹", layout="wide")
@@ -617,7 +621,7 @@ info_panel(
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立"],
     horizontal=True,
 )
 
@@ -775,6 +779,77 @@ if mode == "批次建單（Google Sheet）":
 else:
     single_feature = mode
     step("3", single_feature)
+
+    # -----------------------------------------------------
+    # 優惠券建立
+    # -----------------------------------------------------
+    if single_feature == "優惠券建立":
+        info_panel(
+            "功能說明",
+            [
+                "建立單張優惠券，通常用於訂單異動補差額或退款折抵。",
+                "建立後請至後台『優惠券管理』確認優惠碼（前綴＋自動英文字母）。",
+                "優惠碼建立後不可修改，請確認金額與有效期限後再送出。",
+            ],
+        )
+
+        step("4", "優惠券資料")
+        cv1, cv2 = st.columns(2)
+        with cv1:
+            cp_title = st.text_input("標題（客人姓名或用途）", key="cp_title")
+            cp_prefix = st.text_input("優惠碼前綴", placeholder="例：tpe0707", key="cp_prefix")
+            cp_discount = st.number_input("面額（元）", min_value=1, value=1200, step=100, key="cp_discount")
+            cp_piece = st.number_input("張數", min_value=1, max_value=10, value=1, key="cp_piece")
+        with cv2:
+            cp_date_s = st.date_input("有效期限起", value=date.today(), key="cp_date_s")
+            cp_date_e = st.date_input("有效期限迄", value=date.today() + timedelta(days=30), key="cp_date_e")
+            cp_regions = st.multiselect("適用地區", list(COUPON_COMPANY_ID_MAP.keys()), default=["台北"], key="cp_regions")
+            cp_services = st.multiselect("適用服務", list(COUPON_SERVICE_ITEM_MAP.keys()), default=["居家清潔"], key="cp_services")
+
+        cp_type = st.selectbox("優惠券種類", list(COUPON_TYPE_MAP.keys()), index=0, key="cp_type")
+        st.markdown(
+            '<div class="hint-box">💡 「不得與其他優惠券重複」最常用，適合補差額或一次性折扣。</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("🎟 建立優惠券", use_container_width=True, key="create_coupon_btn"):
+            if not backend_email.strip() or not backend_password.strip():
+                st.error("請先輸入後台帳號密碼")
+            elif not cp_title.strip():
+                st.error("請輸入標題")
+            elif not cp_prefix.strip():
+                st.error("請輸入優惠碼前綴")
+            elif not cp_regions:
+                st.error("請選擇適用地區")
+            elif not cp_services:
+                st.error("請選擇適用服務")
+            else:
+                try:
+                    with st.spinner("建立優惠券中…"):
+                        result = create_coupon(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            title=cp_title.strip(),
+                            discount=cp_discount,
+                            date_s=cp_date_s.strftime("%Y-%m-%d"),
+                            date_e=cp_date_e.strftime("%Y-%m-%d"),
+                            prefix=cp_prefix.strip(),
+                            piece=cp_piece,
+                            regions=cp_regions,
+                            service_items=cp_services,
+                            coupon_type=cp_type,
+                        )
+                    if result["success"]:
+                        st.success(
+                            f"✅ {result['message']}\n"
+                            f"前綴：{result['coupon_prefix']}　面額：{result['discount']}元　張數：{result['piece']}"
+                        )
+                        st.info("請至後台『優惠券管理』查看完整優惠碼（前綴 + 自動英文字母）")
+                    else:
+                        st.warning(result["message"])
+                except Exception as e:
+                    st.error(f"建立失敗：{e}")
 
     # -----------------------------------------------------
     # LINE 通知產生器（v7.3：多筆、移除區域、加 N-J Memo）
