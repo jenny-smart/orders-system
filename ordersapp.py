@@ -622,7 +622,7 @@ info_panel(
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立", "訂單轉換"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立", "訂單轉換", "儲值金補價差"],
     horizontal=True,
 )
 
@@ -1364,12 +1364,14 @@ else:
 
             note_col_a, note_col_b = st.columns(2)
             with note_col_a:
-                st.markdown(f"**原訂單A備註**（含 檸檬人勿動）")
+                note_a_status = "✅ 已自動寫入" if conv_result.get("note_a_ok") else f"⚠️ 需手動貼上（{conv_result.get('note_a_msg','')}）"
+                st.markdown(f"**原訂單A備註** {note_a_status}")
                 st.text_area("原訂單A備註", conv_result["note_a"], height=80, label_visibility="collapsed")
                 copy_button("複製原訂單A備註", conv_result["note_a"], "copy_note_a")
                 st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
             with note_col_b:
-                st.markdown(f"**新訂單B備註**")
+                note_b_status = "✅ 已自動寫入" if conv_result.get("note_b_ok") else f"⚠️ 需手動貼上（{conv_result.get('note_b_msg','')}）"
+                st.markdown(f"**新訂單B備註** {note_b_status}")
                 st.text_area("新訂單B備註", conv_result["note_b"], height=80, label_visibility="collapsed")
                 copy_button("複製新訂單B備註", conv_result["note_b"], "copy_note_b")
 
@@ -1387,6 +1389,125 @@ else:
                 st.markdown("#### 💬 新訂單B LINE 訊息")
                 st.text_area("LINE 訊息", conv_result["line_message"], height=320, label_visibility="collapsed")
                 copy_button("複製 LINE 訊息", conv_result["line_message"], "copy_conv_line")
+
+    # -----------------------------------------------------
+    # 儲值金補價差
+    # -----------------------------------------------------
+    elif single_feature == "儲值金補價差":
+        info_panel(
+            "流程說明",
+            [
+                "客人儲值金尚有餘額，想預約新服務，需補繳差額。",
+                "流程：建優惠券A（差額）→ 儲值訂單消耗舊儲值金 → 建優惠券B（舊儲值金額）→ 建新訂單讓客人補差額。",
+            ],
+        )
+
+        step("4", "輸入資料")
+        sv1, sv2, sv3 = st.columns(3)
+        with sv1:
+            sv_balance = st.number_input("客人儲值金餘額（元）", min_value=1, value=1500, step=100, key="sv_balance")
+        with sv2:
+            sv_service_price = st.number_input("新服務總金額（元）", min_value=1, value=2400, step=100, key="sv_service_price")
+        with sv3:
+            sv_region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="sv_region")
+
+        # 計算
+        sv_balance = int(sv_balance)
+        sv_service_price = int(sv_service_price)
+        customer_pays = sv_service_price - sv_balance
+        coupon_a_amount = customer_pays  # 差額優惠券
+        coupon_b_amount = sv_balance     # 舊儲值金優惠券
+
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("4", "計算結果")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("客人補繳差額", f"{customer_pays} 元")
+        r2.metric("優惠券A（消耗儲值金用）", f"{coupon_a_amount} 元")
+        r3.metric("優惠券B（抵新服務用）", f"{coupon_b_amount} 元")
+
+        if customer_pays <= 0:
+            st.warning("儲值金餘額已足夠支付新服務，不需要補差額。")
+        else:
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("4", "操作步驟")
+
+            st.markdown(f"""
+**步驟1：建優惠券A（差額 {coupon_a_amount} 元）**
+- 面額：**{coupon_a_amount}** 元
+- 用途：讓儲值訂單消耗掉現有儲值金後，餘額剛好為 0
+- 有效期限建議：今天到服務當天
+
+**步驟2：成立儲值訂單，消耗現有 {sv_balance} 元儲值金**
+- 訂單金額：{sv_service_price} 元（需為 600 或 700 的倍數）
+- 套用優惠券A（{coupon_a_amount} 元）→ 實付 {sv_balance} 元（恰好消耗完儲值金）
+
+**步驟3：建優惠券B（舊儲值金額 {coupon_b_amount} 元）**
+- 面額：**{coupon_b_amount}** 元
+- 用途：折抵新服務，讓客人只需補繳差額
+
+**步驟4：成立新服務訂單（{sv_service_price} 元）**
+- 套用優惠券B（{coupon_b_amount} 元）→ 客人實付 **{customer_pays} 元**
+""")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("4", "快速建立優惠券")
+            info_panel("說明", [
+                "輸入前綴後可直接建立優惠券A與B，建立後請至後台確認實際優惠碼。",
+                "步驟2（儲值訂單）與步驟4（新服務訂單）需在舊客快速建單功能操作。",
+            ])
+
+            pref_col1, pref_col2 = st.columns(2)
+            with pref_col1:
+                sv_prefix_a = st.text_input("優惠券A前綴", placeholder="例：svA0623", key="sv_prefix_a")
+            with pref_col2:
+                sv_prefix_b = st.text_input("優惠券B前綴", placeholder="例：svB0623", key="sv_prefix_b")
+
+            sv_date_s = st.date_input("有效期限起", value=date.today(), key="sv_date_s")
+            sv_date_e = st.date_input("有效期限迄", value=date.today() + timedelta(days=60), key="sv_date_e")
+
+            if st.button("🎟 建立優惠券A與B", use_container_width=True, key="create_sv_coupons"):
+                if not backend_email.strip() or not backend_password.strip():
+                    st.error("請先輸入後台帳號密碼")
+                elif not sv_prefix_a.strip() or not sv_prefix_b.strip():
+                    st.error("請輸入兩張優惠券的前綴")
+                else:
+                    errors = []
+                    results_sv = {}
+                    for label, prefix, amount in [
+                        ("A", sv_prefix_a.strip(), coupon_a_amount),
+                        ("B", sv_prefix_b.strip(), coupon_b_amount),
+                    ]:
+                        try:
+                            with st.spinner(f"建立優惠券{label}（{amount}元）…"):
+                                r = create_coupon(
+                                    env_name=env,
+                                    backend_email=backend_email.strip(),
+                                    backend_password=backend_password.strip(),
+                                    title=f"儲值補差額-{label}",
+                                    discount=amount,
+                                    date_s=sv_date_s.strftime("%Y-%m-%d"),
+                                    date_e=sv_date_e.strftime("%Y-%m-%d"),
+                                    prefix=prefix,
+                                    piece="1",
+                                    regions=[sv_region],
+                                    service_items=["居家清潔"],
+                                )
+                            results_sv[label] = r
+                        except Exception as e:
+                            errors.append(f"優惠券{label}：{e}")
+
+                    st.session_state.sv_coupon_results = results_sv
+                    if errors:
+                        for err in errors:
+                            st.error(err)
+
+            sv_coupon_results = st.session_state.get("sv_coupon_results", {})
+            for label, r in sv_coupon_results.items():
+                amount = coupon_a_amount if label == "A" else coupon_b_amount
+                if r.get("success"):
+                    st.success(f"✅ 優惠券{label}（{amount}元）建立成功，前綴：{r['coupon_prefix']}，請至後台確認完整優惠碼")
+                else:
+                    st.warning(f"優惠券{label}：{r.get('message')}")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
