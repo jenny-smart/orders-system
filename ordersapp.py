@@ -779,26 +779,23 @@ else:
     # LINE 通知產生器（v7.3：多筆、移除區域、加 N-J Memo）
     # -----------------------------------------------------
     if single_feature == "LINE 通知產生器":
-        info_panel(
-            "使用說明",
-            [
-                "輸入已成立訂單編號，每行一個，可一次輸入多筆。",
-                "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。",
-                "LINE 訊息與 N-J Memo 各有複製按鈕，可分開複製。",
-            ],
-        )
+        col_left, col_right = st.columns([3, 1])
 
-        line_order_nos_input = st.text_area(
-            "訂單編號（每行一個）",
-            value="",
-            height=130,
-            placeholder="LC00211537\nLC00211538",
-            key="line_order_nos",
-        )
-
-        # N-J Memo 固定顯示，不需要等待查詢結果
-        col_btn, col_memo_fixed = st.columns([3, 1])
-        with col_btn:
+        with col_left:
+            info_panel(
+                "使用說明",
+                [
+                    "輸入已成立訂單編號，每行一個，可一次輸入多筆。",
+                    "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。",
+                ],
+            )
+            line_order_nos_input = st.text_area(
+                "訂單編號（每行一個）",
+                value="",
+                height=120,
+                placeholder="LC00211537\nLC00211538",
+                key="line_order_nos",
+            )
             if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
                 if not backend_email.strip() or not backend_password.strip():
                     st.error("請先輸入後台帳號密碼")
@@ -831,11 +828,13 @@ else:
                                     "error": str(e),
                                 })
                         st.session_state.line_from_order_nos_results = results_list
-        with col_memo_fixed:
+
+        with col_right:
+            st.markdown('<div class="sec-label">N-J Memo</div>', unsafe_allow_html=True)
             st.text_area(
                 "N-J Memo",
                 NJ_MEMO,
-                height=160,
+                height=220,
                 key="nj_memo_fixed",
                 label_visibility="collapsed",
             )
