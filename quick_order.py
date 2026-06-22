@@ -1671,7 +1671,6 @@ def convert_order(
     if not csrf:
         raise Exception("無法取得 CSRF token")
 
-    company_id = COUPON_COMPANY_ID_MAP.get(region_a, "1")
     coupon_fields = [
         ("coupon_type_id", "1"),
         ("title", f"訂單轉換-{order_no_a}"),
@@ -1680,10 +1679,14 @@ def convert_order(
         ("prefix", coupon_prefix),
         ("discount", str(coupon_discount)),
         ("piece", "1"),
-        ("company_id[]", company_id),
-        ("service_item[]", COUPON_SERVICE_ITEM_MAP.get("居家清潔", "1")),
         ("_token", csrf),
     ]
+    # 全選地區
+    for cid in COUPON_COMPANY_ID_MAP.values():
+        coupon_fields.append(("company_id[]", cid))
+    # 全選服務項目
+    for sid in COUPON_SERVICE_ITEM_MAP.values():
+        coupon_fields.append(("service_item[]", sid))
     # multipart/form-data（list of tuples 保留重複 key）
     coupon_files = [(k, (None, v)) for k, v in coupon_fields]
     post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
