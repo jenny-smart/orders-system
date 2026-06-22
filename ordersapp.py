@@ -41,6 +41,7 @@ from quick_order import (
     search_available_service_dates,
     parse_new_customer_order_text,
     create_coupon,
+    convert_order,
     COUPON_COMPANY_ID_MAP,
     COUPON_SERVICE_ITEM_MAP,
     COUPON_TYPE_MAP,
@@ -621,7 +622,7 @@ info_panel(
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立", "訂單轉換"],
     horizontal=True,
 )
 
@@ -1285,6 +1286,107 @@ else:
         ])
 
         st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
+
+    # -----------------------------------------------------
+    # 訂單轉換
+    # -----------------------------------------------------
+    elif single_feature == "訂單轉換":
+        info_panel(
+            "功能說明",
+            [
+                "將原訂單A的人力改為檸檬人（學員），並建立同日期新規格訂單B。",
+                "系統自動：建折價券（面額=A金額）→ 建新訂單B（套用折價券）→ 產生備註文字。",
+                "需手動：進原訂單A後台，把服務人員改為檸檬人，並貼上備註。",
+            ],
+        )
+
+        step("4", "原訂單A")
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            conv_order_no_a = st.text_input("原訂單A編號", placeholder="LC002115551", key="conv_order_no_a")
+        with col_a2:
+            conv_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="conv_clean_type")
+
+        step("4", "新訂單B規格")
+        info_panel("說明", ["日期與時段：若與原訂單相同則照填；若需改日期請修改。", "人數與時數：新的服務規格，例如 3人4小時。"])
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            conv_date = st.date_input("新服務日期", value=date.today() + timedelta(days=1), key="conv_date")
+        with b2:
+            conv_period = st.selectbox("新時段", PERIOD_OPTIONS, key="conv_period")
+        with b3:
+            conv_person = st.number_input("新人數", min_value=1, max_value=8, value=3, key="conv_person")
+        with b4:
+            conv_hour = PERIOD_HOUR_MAP.get(conv_period, 4)
+            st.markdown(f"<br><b>{conv_hour} 小時</b>（依時段自動帶出）", unsafe_allow_html=True)
+
+        if st.button("🔄 執行訂單轉換", use_container_width=True, key="run_convert_btn"):
+            if not backend_email.strip() or not backend_password.strip():
+                st.error("請先輸入後台帳號密碼")
+            elif not conv_order_no_a.strip():
+                st.error("請輸入原訂單A編號")
+            else:
+                try:
+                    with st.spinner("執行中：查訂單 → 建折價券 → 建新訂單…"):
+                        conv_result = convert_order(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            order_no_a=conv_order_no_a.strip(),
+                            new_person=str(int(conv_person)),
+                            new_hour=str(conv_hour),
+                            new_date_s=conv_date.strftime("%Y-%m-%d"),
+                            new_period_s=conv_period,
+                            clean_type_id=CLEAN_TYPE_ID_MAP[conv_clean_type],
+                        )
+                    st.session_state.conv_result = conv_result
+                except Exception as e:
+                    st.session_state.conv_result = None
+                    st.error(f"轉換失敗：{e}")
+
+        conv_result = st.session_state.get("conv_result")
+        if conv_result:
+            st.success(f"✅ 完成！原訂單 {conv_result['order_no_a']} → 新訂單 {conv_result['order_no_b']}")
+            st.markdown("<hr>", unsafe_allow_html=True)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("原訂單A", conv_result["order_no_a"])
+            c2.metric("新訂單B", conv_result["order_no_b"])
+            c3.metric("折價券面額", f"{conv_result['coupon_discount']}元")
+
+            st.markdown(
+                f'<div class="hint-box">折價券優惠碼：<b>{conv_result["coupon_code"]}</b>（請至後台優惠券管理確認）</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("#### 📋 備註文字（請複製貼至各訂單）")
+
+            note_col_a, note_col_b = st.columns(2)
+            with note_col_a:
+                st.markdown(f"**原訂單A備註**（含 檸檬人勿動）")
+                st.text_area("原訂單A備註", conv_result["note_a"], height=80, label_visibility="collapsed")
+                copy_button("複製原訂單A備註", conv_result["note_a"], "copy_note_a")
+                st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
+            with note_col_b:
+                st.markdown(f"**新訂單B備註**")
+                st.text_area("新訂單B備註", conv_result["note_b"], height=80, label_visibility="collapsed")
+                copy_button("複製新訂單B備註", conv_result["note_b"], "copy_note_b")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("#### ⚠️ 請手動完成")
+            st.markdown(
+                "1. 點上方連結進入原訂單A後台 \\n"
+                "2. 把服務人員全部改為 **檸檬人** \\n"
+                "3. 在原訂單A客服備註貼上上方備註文字 \\n"
+                "4. 在新訂單B客服備註貼上上方備註文字"
+            )
+
+            if conv_result.get("line_message"):
+                st.markdown("<hr>", unsafe_allow_html=True)
+                st.markdown("#### 💬 新訂單B LINE 訊息")
+                st.text_area("LINE 訊息", conv_result["line_message"], height=320, label_visibility="collapsed")
+                copy_button("複製 LINE 訊息", conv_result["line_message"], "copy_conv_line")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
