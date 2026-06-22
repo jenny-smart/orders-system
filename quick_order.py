@@ -1506,29 +1506,107 @@ def quick_create_order(
 
 def _fetch_coupon_code_after_create(session, base_url, prefix, discount):
     """
-    建立優惠券後，到列表第一頁找最新的那筆，進 detail 頁抓實際優惠碼。
-    找不到時回傳 prefix+"K"（經驗值，piece=1 時後台通常產生此碼）。
+    建立優惠券後，到列表前幾頁找符合前綴與面額的最新優惠券，
+    進 detail 頁抓實際優惠碼。
+    找不到才退而求其次回傳 prefix+"K"（piece=1 時後台常見格式）。
     """
     try:
-        resp = session.get(f"{base_url}/coupon", headers=HEADERS, allow_redirects=True)
-        if resp.status_code != 200:
+        list_resp = session.get(f"{base_url}/coupon", headers=HEADERS, allow_redirects=True)
+        if list_resp.status_code != 200:
             return prefix + "K"
-        # 找所有 detail 連結
-        ids = re.findall(r'/coupon/detail/(\d+)', resp.text)
+
+        # 找所有 detail 連結（最新的排最前）
+        ids = re.findall(r"/coupon/detail/(\d+)", list_resp.text)
         if not ids:
             return prefix + "K"
-        # 取最新一筆（第一個）
-        detail_resp = session.get(f"{base_url}/coupon/detail/{ids[0]}", headers=HEADERS)
-        if detail_resp.status_code != 200:
-            return prefix + "K"
-        # 從 detail 頁抓優惠碼（通常是 prefix + 大寫字母）
-        codes = re.findall(
-            rf"{re.escape(prefix)}[A-Z]+",
-            detail_resp.text,
-        )
-        return codes[0] if codes else prefix + "K"
+
+        # 掃前 10 筆，找面額符合的那張
+        prefix_esc = re.escape(prefix)
+        for cid in ids[:10]:
+            detail_resp = session.get(f"{base_url}/coupon/detail/{cid}", headers=HEADERS)
+            if detail_resp.status_code != 200:
+                continue
+            # 頁面裡應有 prefix 開頭的優惠碼
+            codes = re.findall(rf"\b{prefix_esc}[A-Z0-9]*\b", detail_resp.text)
+            if codes:
+                return codes[0]
+            # 也確認是否面額相符（避免抓到別張）
+            if str(int(float(discount))) in detail_resp.text and prefix in detail_resp.text:
+                # 嘗試更寬鬆抓
+                codes2 = re.findall(rf"{prefix_esc}\w+", detail_resp.text)
+                if codes2:
+                    return codes2[0]
+
+        return prefix + "K"
     except Exception:
         return prefix + "K"
+
+
+def _fetch_order_edit_id(session, order_no):
+    """
+    從訂單查詢頁面抓取該訂單的後台編輯 ID（/purchase/edit/{id} 裡的數字 ID）。
+    """
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["orderNo"] = str(order_no).strip()
+    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return None
+    m = re.search(r"/purchase/edit/(\d+)", resp.text)
+    return m.group(1) if m else None
+
+
+def _update_order_note(session, base_url, order_no, note):
+    """
+    更新訂單的「客服備註」（memoProcess 欄位）。
+
+    流程：
+    1. 查訂單取得後台編輯 ID
+    2. GET 編輯頁面取 CSRF token 與現有表單值
+    3. POST 更新（保留其他欄位，只改 memoProcess）
+
+    回傳 (成功bool, 訊息str)。
+    """
+    try:
+        edit_id = _fetch_order_edit_id(session, order_no)
+        if not edit_id:
+            return False, f"找不到訂單 {order_no} 的編輯 ID"
+
+        edit_url = f"{base_url}/purchase/edit/{edit_id}"
+        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        if get_resp.status_code != 200:
+            return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+
+        # 取 CSRF token
+        token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+        csrf = token_m.group(1) if token_m else ""
+        if not csrf:
+            return False, "無法取得 CSRF token"
+
+        # 從現有頁面抓所有 input/textarea 值，避免 POST 時清空其他欄位
+        existing = {}
+        for m2 in re.finditer(
+            r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>', get_resp.text
+        ):
+            existing[m2.group(1)] = m2.group(2)
+        for m2 in re.finditer(
+            r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text
+        ):
+            existing[m2.group(1)] = m2.group(2).strip()
+
+        existing["_token"] = csrf
+        existing["_method"] = "PUT"
+        existing["memoProcess"] = note  # 客服備註欄位
+
+        post_resp = session.post(
+            edit_url,
+            data=existing,
+            headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=True,
+        )
+        success = post_resp.status_code in (200, 302)
+        return success, f"HTTP {post_resp.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 
 def convert_order(
@@ -1655,10 +1733,14 @@ def convert_order(
     )
     order_no_b = order_b_result["order_no"]
 
-    # ── Step 5: 備註文字 ────────────────────────────────────────────
+    # ── Step 5: 備註文字 + 自動寫入 ────────────────────────────────
     combo_desc = f"{new_person}人{new_hour}小時"
     note_b = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務"
     note_a = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務，檸檬人勿動"
+
+    # 自動寫備註（失敗不阻斷主流程，錯誤訊息回傳供畫面顯示）
+    note_a_ok, note_a_msg = _update_order_note(session, base_url, order_no_a, note_a)
+    note_b_ok, note_b_msg = _update_order_note(session, base_url, order_no_b, note_b)
 
     # 新訂單 B 的 LINE 訊息
     line_msg = build_line_message(order_b_result)
@@ -1672,6 +1754,10 @@ def convert_order(
         "combo_desc": combo_desc,
         "note_a": note_a,
         "note_b": note_b,
+        "note_a_ok": note_a_ok,
+        "note_a_msg": note_a_msg,
+        "note_b_ok": note_b_ok,
+        "note_b_msg": note_b_msg,
         "edit_url_a": f"{base_url}/purchase/edit/{order_no_a.replace('LC00', '')}",
         "purchase_url_a": f"{base_url}/purchase?orderNo={order_no_a}",
         "line_message": line_msg,
