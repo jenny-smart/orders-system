@@ -32,6 +32,7 @@ from quick_order import (
     send_confirmation,
     build_line_message,
     build_line_message_from_order_no,
+    build_combined_line_message_from_order_nos,
     get_last_paid_summary,
     get_last_paid_per_address,
     get_unserved_paid_orders,
@@ -800,33 +801,41 @@ else:
                 if not backend_email.strip() or not backend_password.strip():
                     st.error("請先輸入後台帳號密碼")
                 else:
-                    order_nos = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
-                    if not order_nos:
+                    # 每行 = 一則 LINE 訊息；同行用 , 分隔 = 合併成一則
+                    raw_lines = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
+                    order_groups = []
+                    for line in raw_lines:
+                        nos = [n.strip() for n in line.split(",") if n.strip()]
+                        if nos:
+                            order_groups.append(nos)
+
+                    if not order_groups:
                         st.error("請輸入至少一個訂單編號")
                     else:
                         # 先清空舊結果，避免 Streamlit re-run 期間殘留上一次資料
                         st.session_state.line_from_order_nos_results = []
                         results_list = []
-                        for ono in order_nos:
+                        for nos in order_groups:
+                            label = "、".join(nos)
                             try:
-                                with st.spinner(f"查詢訂單 {ono}…"):
-                                    line_result, line_text = build_line_message_from_order_no(
+                                with st.spinner(f"查詢訂單 {label}…"):
+                                    line_result, line_text = build_combined_line_message_from_order_nos(
                                         env_name=env,
                                         backend_email=backend_email.strip(),
                                         backend_password=backend_password.strip(),
-                                        order_no=ono,
+                                        order_nos=nos,
                                     )
                                 # session 物件不存入 session_state（避免序列化問題）
                                 safe_result = {k: v for k, v in line_result.items() if k != "session"}
                                 results_list.append({
-                                    "order_no": ono,
+                                    "order_no": label,
                                     "result": safe_result,
                                     "text": line_text,
                                     "error": None,
                                 })
                             except Exception as e:
                                 results_list.append({
-                                    "order_no": ono,
+                                    "order_no": label,
                                     "result": None,
                                     "text": "",
                                     "error": str(e),
