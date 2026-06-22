@@ -91,22 +91,49 @@ PERIOD_DISPLAY_INFO = {
 }
 
 
-def _format_period_display(period_raw, person=""):
+def _format_period_display(period_raw, person="", display_override=""):
     """
     格式化服務時段顯示，含小時數、中間休息備註與人數。
-    例：08:30-12:30 → 08:30-12:30(4小時)-2人
-        09:00-16:00 → 09:00-16:00(6小時,中間休息1小時)-3人
-    找不到對應資料時，只補人數（或不補）。
+
+    period_raw      : 原始預約時段（用來查 PERIOD_DISPLAY_INFO 取得時數與休息備註）
+    display_override: 若有「簡訊實際服務時間」，用這個字串當顯示時間，但小時/休息備註
+                      仍依 period_raw 的對照表決定，確保資訊一致。
+    例：
+      period_raw=09:00-18:00, display_override=08:30-17:30
+      → 08:30-17:30(8小時,中間休息1小時)-2人
     """
     compact = str(period_raw or "").replace(" ", "")
+    display = str(display_override or "").replace(" ", "") or compact
     info = PERIOD_DISPLAY_INFO.get(compact)
     person_str = str(person or "").strip()
     person_part = f"-{person_str}人" if person_str and person_str != "0" else ""
     if info:
         hour_str, has_break = info
         break_note = ",中間休息1小時" if has_break else ""
-        return f"{compact}({hour_str}{break_note}){person_part}"
-    return f"{compact}{person_part}"
+        return f"{display}({hour_str}{break_note}){person_part}"
+    return f"{display}{person_part}"
+
+
+def _extract_actual_service_time(joined_text):
+    """
+    從訂單區塊文字抓「簡訊實際服務時間」。
+
+    後台部分訂單會記錄實際到離場時間，格式為：
+      簡訊實際服務時間\n08:30-17:30
+    或
+      簡訊實際服務時間 08:30 - 17:30
+
+    找到時回傳正規化後的 "HH:MM - HH:MM" 字串（與 _parse_service_date_time_loose
+    回傳格式一致）；找不到回傳空字串。
+    """
+    m = re.search(
+        r"簡訊實際服務時間\s*[：:]?\s*(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})",
+        joined_text,
+    )
+    if m:
+        start, end = m.groups()
+        return f"{start} - {end}"
+    return ""
 
 
 def _configure_environment(env_name):
@@ -484,6 +511,8 @@ def build_line_message_from_order_no(
     joined = "\n".join(lines)
 
     service_date, service_time = _parse_service_date_time_loose(joined)
+    # v7.4: 若有「簡訊實際服務時間」，優先用於 LINE 訊息顯示
+    actual_time = _extract_actual_service_time(joined)
     # v7.3: 從訂單區塊抓人數，供 _format_period_display() 使用
     person_extracted, _ = _extract_person_hour_line(joined)
     address = _extract_address_line(lines)
@@ -506,7 +535,8 @@ def build_line_message_from_order_no(
         "address": address,
         "date": service_date,
         "period": service_time,
-        "period_s": service_time,       # v7.3: 供 _format_period_display() 用
+        "period_s": service_time,       # v7.3: 供 _format_period_display() 用（原預約時段，查小時/休息）
+        "actual_period": actual_time,    # v7.4: 簡訊實際服務時間（有值時覆蓋顯示）
         "person": person_extracted,      # v7.3: 供 _format_period_display() 用
         "service_amount": service_amount,
         "price_with_tax": service_amount,
@@ -1261,12 +1291,14 @@ def build_line_message(order_result):
     region = order_result["region"]
     date_disp = order_result["date"].replace("-", "/")
 
-    # v7.3: 用 period_s（原始時段字串）查 PERIOD_DISPLAY_INFO，格式化後帶人數
+    # v7.3: 用 period_s（原始預約時段）查 PERIOD_DISPLAY_INFO，格式化後帶人數
+    # v7.4: 若有 actual_period（簡訊實際服務時間），顯示用它覆蓋，小時/休息備註仍查原預約時段
     period_raw = str(
         order_result.get("period_s") or order_result.get("period", "")
     ).replace(" ", "")
+    actual_period = str(order_result.get("actual_period", "") or "")
     person_cnt = str(order_result.get("person", "") or "")
-    period = _format_period_display(period_raw, person_cnt)
+    period = _format_period_display(period_raw, person_cnt, display_override=actual_period)
 
     price = order_result.get("service_amount") or order_result.get("price_with_tax", order_result.get("price"))
     fare = order_result["fare"]
