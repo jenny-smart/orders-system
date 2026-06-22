@@ -93,25 +93,29 @@ PERIOD_DISPLAY_INFO = {
 
 def _format_period_display(period_raw, person="", display_override=""):
     """
-    格式化服務時段顯示，含小時數、中間休息備註與人數。
+    格式化服務時段顯示。
 
-    period_raw      : 原始預約時段（用來查 PERIOD_DISPLAY_INFO 取得時數與休息備註）
-    display_override: 若有「簡訊實際服務時間」，用這個字串當顯示時間，但小時/休息備註
-                      仍依 period_raw 的對照表決定，確保資訊一致。
-    例：
-      period_raw=09:00-18:00, display_override=08:30-17:30
-      → 08:30-17:30(8小時,中間休息1小時)-2人
+    輸出格式：HH:MM-HH:MM（N人M小時）或 HH:MM-HH:MM（N人M小時，中間休息1小時）
+    例：14:00-17:00 + 2人 → 14:00-17:00（2人3小時）
+        09:00-18:00 + 3人 → 09:00-18:00（3人8小時，中間休息1小時）
+        08:30-17:30（簡訊實際時間）+ 09:00-18:00（查對照表）→ 08:30-17:30（2人8小時，中間休息1小時）
     """
     compact = str(period_raw or "").replace(" ", "")
     display = str(display_override or "").replace(" ", "") or compact
     info = PERIOD_DISPLAY_INFO.get(compact)
     person_str = str(person or "").strip()
-    person_part = f"-{person_str}人" if person_str and person_str != "0" else ""
     if info:
         hour_str, has_break = info
-        break_note = ",中間休息1小時" if has_break else ""
-        return f"{display}({hour_str}{break_note}){person_part}"
-    return f"{display}{person_part}"
+        break_note = "，中間休息1小時" if has_break else ""
+        if person_str and person_str != "0":
+            inner = f"{person_str}人{hour_str}{break_note}"
+        else:
+            inner = f"{hour_str}{break_note}"
+        return f"{display}（{inner}）"
+    # 找不到對照表：只顯示時段與人數
+    if person_str and person_str != "0":
+        return f"{display}（{person_str}人）"
+    return display
 
 
 def _extract_actual_service_time(joined_text):
@@ -180,29 +184,24 @@ def _build_combined_period_display(orders_data):
         person        人數
 
     回傳格式範例：
-        2人4小時（08:30-12:30）＋2人8小時（08:30-17:30，中間休息1小時），共24人時
+        14:00-17:00（2人3小時）＋08:30-12:30（2人4小時），共14人時
     """
     parts = []
     total_ph = 0
     for o in sorted(orders_data, key=lambda x: str(x.get("period_s") or "").replace(" ", "")):
         period_raw = str(o.get("period_s") or "").replace(" ", "")
         actual = str(o.get("actual_period") or "").replace(" ", "")
-        display = actual or period_raw
         person_str = str(o.get("person") or "").strip()
-
+        p_str = _format_period_display(period_raw, person_str, display_override=actual)
+        parts.append(p_str)
         info = PERIOD_DISPLAY_INFO.get(period_raw)
         if info:
-            hour_str, has_break = info
-            break_note = "，中間休息1小時" if has_break else ""
-            parts.append(f"{person_str}人{hour_str}（{display}{break_note}）")
-            # 累計人時
             try:
-                ph = int(person_str) * int(float(hour_str.replace("小時", "")))
-                total_ph += ph
+                h = int(float(info[0].replace("小時", "")))
+                p = int(person_str) if person_str else 0
+                total_ph += h * p
             except Exception:
                 pass
-        else:
-            parts.append(f"{person_str}人（{display}）")
 
     combined = "＋".join(parts)
     if total_ph:
@@ -632,9 +631,7 @@ def build_combined_line_message_from_order_nos(
 
     # ── 服務時間顯示：三種組合 ─────────────────────────────────────────
     unique_dates = sorted({o["service_date"] for o in orders_info})
-    unique_periods = {str(o["period_s"] or "").replace(" ", "") for o in orders_info}
     all_same_date = len(unique_dates) == 1
-    all_same_time = len(unique_periods) == 1
 
     if all_same_date:
         # 同日不同時段 → 日期由模板帶，時段合併一行
@@ -644,17 +641,6 @@ def build_combined_line_message_from_order_nos(
         ]
         combined_period = _build_combined_period_display(period_data)
         multi_date = False
-
-    elif all_same_time:
-        # 不同日期、相同時段 → 日期並列，時段只寫一次
-        dates_str = "、".join(d.replace("-", "/") for d in unique_dates)
-        ref = orders_info[0]
-        p_raw = str(ref["period_s"] or "").replace(" ", "")
-        p_actual = str(ref["actual_period"] or "").replace(" ", "")
-        p_person = str(ref["person"] or "")
-        p_str = _format_period_display(p_raw, p_person, display_override=p_actual)
-        combined_period = f"{dates_str}\n{p_str}"
-        multi_date = True
 
     else:
         # 不同日期、不同時段 → 每行各自列日期＋時段
