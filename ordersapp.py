@@ -812,8 +812,11 @@ else:
                     if not order_groups:
                         st.error("請輸入至少一個訂單編號")
                     else:
-                        # 先清空舊結果，避免 Streamlit re-run 期間殘留上一次資料
+                        # 先清空舊結果與相關 widget 快取，避免殘留舊值
                         st.session_state.line_from_order_nos_results = []
+                        for _k in list(st.session_state.keys()):
+                            if _k.startswith("line_text_") or _k.startswith("nj_memo_"):
+                                del st.session_state[_k]
                         results_list = []
                         for nos in order_groups:
                             label = "、".join(nos)
@@ -866,7 +869,13 @@ else:
             all_nos = line_result.get("all_order_nos") or [line_result.get("order_no")]
             order_no_display = "、".join(str(n) for n in all_nos if n)
             is_combined = len(all_nos) > 1
-            combined_note = "　⚠️ 同日合併單" if is_combined else ""
+            is_multi_date = line_result.get("multi_date", False)
+            if is_combined and is_multi_date:
+                combined_note = "　⚠️ 跨日合併單"
+            elif is_combined:
+                combined_note = "　⚠️ 同日合併單"
+            else:
+                combined_note = ""
             st.caption(
                 f"訂單：{order_no_display}{combined_note}　"
                 f"付款方式：{line_result.get('payway')}　"
@@ -879,7 +888,6 @@ else:
                 f"LINE 訊息（{line_result.get('order_no')}）",
                 line_text,
                 height=380,
-                key=f"line_text_{idx}",
                 label_visibility="collapsed",
             )
             copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
