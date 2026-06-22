@@ -622,7 +622,7 @@ info_panel(
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "優惠券建立", "訂單轉換", "儲值金補價差"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "訂單轉換", "儲值金補價差"],
     horizontal=True,
 )
 
