@@ -1504,43 +1504,37 @@ def quick_create_order(
     }
 
 
-def _fetch_coupon_code_after_create(session, base_url, prefix, discount):
+def _get_newest_coupon_code(session, base_url, prefix):
     """
-    建立優惠券後，到列表前幾頁找符合前綴與面額的最新優惠券，
-    進 detail 頁抓實際優惠碼。
-    找不到才退而求其次回傳 prefix+"K"（piece=1 時後台常見格式）。
+    建立優惠券後，取「最新建立的那張」的實際優惠碼。
+
+    做法：
+    1. GET /coupon 列表，抓第一筆（剛建的那張）的 detail ID
+    2. GET /coupon/detail/{id}，從頁面抓 prefix 開頭的優惠碼
+
+    若抓不到，回傳 prefix（讓客服自行至後台確認）。
     """
     try:
         list_resp = session.get(f"{base_url}/coupon", headers=HEADERS, allow_redirects=True)
         if list_resp.status_code != 200:
-            return prefix + "K"
+            return prefix
 
-        # 找所有 detail 連結（最新的排最前）
         ids = re.findall(r"/coupon/detail/(\d+)", list_resp.text)
         if not ids:
-            return prefix + "K"
+            return prefix
 
-        # 掃前 10 筆，找面額符合的那張
+        # 只看第一筆（最新）
+        detail_resp = session.get(f"{base_url}/coupon/detail/{ids[0]}", headers=HEADERS)
+        if detail_resp.status_code != 200:
+            return prefix
+
         prefix_esc = re.escape(prefix)
-        for cid in ids[:10]:
-            detail_resp = session.get(f"{base_url}/coupon/detail/{cid}", headers=HEADERS)
-            if detail_resp.status_code != 200:
-                continue
-            # 頁面裡應有 prefix 開頭的優惠碼
-            codes = re.findall(rf"\b{prefix_esc}[A-Z0-9]*\b", detail_resp.text)
-            if codes:
-                return codes[0]
-            # 也確認是否面額相符（避免抓到別張）
-            if str(int(float(discount))) in detail_resp.text and prefix in detail_resp.text:
-                # 嘗試更寬鬆抓
-                codes2 = re.findall(rf"{prefix_esc}\w+", detail_resp.text)
-                if codes2:
-                    return codes2[0]
-
-        return prefix + "K"
+        codes = re.findall(rf"\b{prefix_esc}[A-Za-z0-9]*\b", detail_resp.text)
+        # 過濾掉只剩前綴本身（要有後綴字母）
+        codes = [c for c in codes if len(c) > len(prefix)]
+        return codes[0] if codes else prefix
     except Exception:
-        return prefix + "K"
-
+        return prefix
 
 def _fetch_order_edit_id(session, order_no):
     """
@@ -1701,7 +1695,7 @@ def convert_order(
         raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}")
 
     # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
-    coupon_code = _fetch_coupon_code_after_create(session, base_url, coupon_prefix, coupon_discount)
+    coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
 
     # ── Step 4: 查會員 → 建新訂單 B ─────────────────────────────────
     token_booking = get_csrf_token(session)
@@ -2181,35 +2175,44 @@ def create_coupon(
         "_token": token,
     }
 
-    # multipart/form-data 需用 list of tuples 才能送出多個同名欄位
-    fields = list(data.items())
-    for r in regions:
-        cid = COUPON_COMPANY_ID_MAP.get(r, "1")
-        fields.append(("company_id[]", cid))
-    for s in service_items:
-        sid = COUPON_SERVICE_ITEM_MAP.get(s, "1")
-        fields.append(("service_item[]", sid))
+    # list of tuples 保留重複 key（company_id[], service_item[]）
+    fields = [
+        ("coupon_type_id", COUPON_TYPE_MAP.get(coupon_type, "1")),
+        ("title", str(title).strip()),
+        ("date_s", str(date_s).strip()),
+        ("date_e", str(date_e).strip()),
+        ("prefix", str(prefix).strip()),
+        ("discount", str(int(float(discount)))),
+        ("piece", str(int(piece))),
+        ("_token", csrf),
+    ]
+    for r in (regions or ["台北"]):
+        fields.append(("company_id[]", COUPON_COMPANY_ID_MAP.get(r, "1")))
+    for s in (service_items or ["居家清潔"]):
+        fields.append(("service_item[]", COUPON_SERVICE_ITEM_MAP.get(s, "1")))
 
     post_resp = session.post(
         coupon_add_url,
-        files={k: (None, v) for k, v in fields},
-        headers={k: v for k, v in HEADERS.items() if k.lower() != "content-type"},
+        data=fields,
+        headers=HEADERS,
         allow_redirects=True,
     )
 
-    success = post_resp.status_code in (200, 302) and "優惠券" in (post_resp.text or "")
-    # 若成功後被 redirect 到 /coupon，視為成功
-    if post_resp.url and "/coupon" in post_resp.url and "add" not in post_resp.url:
-        success = True
+    if post_resp.status_code not in (200, 302):
+        raise Exception(f"優惠券建立失敗：HTTP {post_resp.status_code}")
+    if post_resp.url and "add" in post_resp.url:
+        raise Exception("優惠券建立失敗：未跳轉，請確認欄位是否填寫正確")
+
+    # 建完後取剛建的那張優惠碼
+    coupon_code = _get_newest_coupon_code(session, base_url, str(prefix).strip())
 
     return {
-        "success": success,
-        "status_code": post_resp.status_code,
-        "final_url": post_resp.url,
+        "success": True,
         "coupon_prefix": prefix,
+        "coupon_code": coupon_code,
         "discount": int(float(discount)),
         "piece": int(piece),
-        "message": "優惠券建立成功，請至後台確認優惠碼" if success else f"建立可能失敗，請至後台確認（HTTP {post_resp.status_code}）",
+        "message": f"優惠券建立成功，優惠碼：{coupon_code}",
     }
 
 def parse_new_customer_order_text(raw_text):
