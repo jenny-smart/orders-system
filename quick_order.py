@@ -1696,16 +1696,16 @@ def convert_order(
         headers=post_headers,
         allow_redirects=True,
     )
-    if coupon_resp.status_code not in (200, 302):
+    # 後台建券成功後 redirect 可能回 500，但券實際上已建立
+    # 不依賴 status_code，直接去找剛建的那張優惠碼
+    time.sleep(1)
+    coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
+    if not coupon_code or coupon_code == coupon_prefix:
+        # 真的沒建到才報錯
         err_text = coupon_resp.text
         title_m = re.search(r"<title>([^<]+)</title>", err_text)
-        detail_str = title_m.group(1)[:150] if title_m else err_text[:300].replace("\n", " ")
-        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}｜{detail_str}")
-    if coupon_resp.url and "add" in coupon_resp.url:
-        snippet = coupon_resp.text[400:700].replace("\n", " ")
-        raise Exception(f"折價券後台驗證未通過｜{snippet}")
-    # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
-    coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
+        detail = title_m.group(1)[:100] if title_m else f"HTTP {coupon_resp.status_code}"
+        raise Exception(f"折價券建立失敗，請至後台確認：{detail}")
 
     # ── Step 4: 查會員 → 建新訂單 B ─────────────────────────────────
     token_booking = get_csrf_token(session)
