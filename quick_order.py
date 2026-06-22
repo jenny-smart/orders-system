@@ -1258,6 +1258,7 @@ def quick_create_order(
     hour,
     person="2",
     fallback_fare="0",
+    discount_code="",
 ):
     """
     建立單筆訂單。流程完全比照人工在後台操作：
@@ -1397,7 +1398,7 @@ def quick_create_order(
         "fare": "",
         "memo": "",
         "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
-        "discount_code": "",
+        "discount_code": str(discount_code or ""),
         "payway": PAYWAY_MAP.get(payway, "2"),
         "invoice_type": invoice_type,
         "carrier_type_id": carrier_type_id,
@@ -1500,6 +1501,182 @@ def quick_create_order(
         "service_status": meta.get("服務狀態", "未處理"),
         "env_name": env_name,
         "session": session,
+    }
+
+
+def _fetch_coupon_code_after_create(session, base_url, prefix, discount):
+    """
+    建立優惠券後，到列表第一頁找最新的那筆，進 detail 頁抓實際優惠碼。
+    找不到時回傳 prefix+"K"（經驗值，piece=1 時後台通常產生此碼）。
+    """
+    try:
+        resp = session.get(f"{base_url}/coupon", headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            return prefix + "K"
+        # 找所有 detail 連結
+        ids = re.findall(r'/coupon/detail/(\d+)', resp.text)
+        if not ids:
+            return prefix + "K"
+        # 取最新一筆（第一個）
+        detail_resp = session.get(f"{base_url}/coupon/detail/{ids[0]}", headers=HEADERS)
+        if detail_resp.status_code != 200:
+            return prefix + "K"
+        # 從 detail 頁抓優惠碼（通常是 prefix + 大寫字母）
+        codes = re.findall(
+            rf"{re.escape(prefix)}[A-Z]+",
+            detail_resp.text,
+        )
+        return codes[0] if codes else prefix + "K"
+    except Exception:
+        return prefix + "K"
+
+
+def convert_order(
+    env_name,
+    backend_email,
+    backend_password,
+    order_no_a,
+    new_person,
+    new_hour,
+    new_date_s,
+    new_period_s,
+    clean_type_id="1",
+):
+    """
+    訂單轉換：原訂單 A → 建折價券 → 建新訂單 B。
+
+    流程：
+    1. 查原訂單 A：取金額/日期/電話/地址/付款方式/區域
+    2. 建折價券（面額=A金額，有效期=今天到A服務日，prefix=convXXXX）
+    3. 從後台確認實際優惠碼
+    4. 查會員（A的電話）→ 建新訂單 B（套折價券）
+    5. 回傳備註文字 + 操作指引（勾檸檬人需手動）
+
+    回傳 dict：
+        order_no_a / order_no_b / coupon_code / note_a / note_b
+        edit_url_a（原訂單A後台連結，用來手動勾檸檬人）
+        line_message（新訂單B的 LINE 通知）
+    """
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    # ── Step 1: 查原訂單 A ──────────────────────────────────────────
+    block_a = _fetch_purchase_block_for_order_no(session, order_no_a)
+    lines_a = block_a.get("lines", [])
+    joined_a = "\n".join(lines_a)
+
+    service_date_a, _ = _parse_service_date_time_loose(joined_a)
+    address_a = _extract_address_line(lines_a)
+    payway_a = _extract_payway_line(joined_a)
+    fare_a = _extract_fare_line(joined_a) or "0"
+    service_amount_a = _service_amount_from_block(joined_a, fare_a)
+    phone_a = _extract_phone_from_block_lines(lines_a)
+    region_a = get_region_by_address(address_a, ACCOUNTS) or "台北"
+
+    if not phone_a:
+        raise Exception(f"無法從訂單 {order_no_a} 取得客人電話，請手動確認")
+    if not service_amount_a or service_amount_a == "0":
+        raise Exception(f"訂單 {order_no_a} 金額為 0 或無法取得，請確認訂單付款狀態")
+    if not service_date_a:
+        raise Exception(f"訂單 {order_no_a} 無法取得服務日期")
+    if not address_a:
+        raise Exception(f"訂單 {order_no_a} 無法取得服務地址")
+
+    # ── Step 2: 建折價券 ────────────────────────────────────────────
+    today_str = date.today().strftime("%Y-%m-%d")
+    coupon_prefix = f"conv{order_no_a[-4:]}"  # e.g., conv1537
+    coupon_discount = int(float(str(service_amount_a).replace(",", "")))
+
+    # 取 CSRF token（GET /coupon/add）
+    coupon_add_url = f"{base_url}/coupon/add"
+    get_resp = session.get(coupon_add_url, headers=HEADERS, allow_redirects=True)
+    if get_resp.status_code != 200:
+        raise Exception("無法開啟優惠券新增頁面")
+    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf:
+        raise Exception("無法取得 CSRF token")
+
+    company_id = COUPON_COMPANY_ID_MAP.get(region_a, "1")
+    coupon_fields = [
+        ("coupon_type_id", "1"),
+        ("title", f"訂單轉換-{order_no_a}"),
+        ("date_s", today_str),
+        ("date_e", service_date_a),
+        ("prefix", coupon_prefix),
+        ("discount", str(coupon_discount)),
+        ("piece", "1"),
+        ("company_id[]", company_id),
+        ("service_item[]", COUPON_SERVICE_ITEM_MAP.get("居家清潔", "1")),
+        ("_token", csrf),
+    ]
+    post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
+    coupon_resp = session.post(
+        coupon_add_url,
+        files={k: (None, v) for k, v in coupon_fields},
+        headers=post_headers,
+        allow_redirects=True,
+    )
+    if coupon_resp.status_code not in (200, 302):
+        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}")
+
+    # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
+    coupon_code = _fetch_coupon_code_after_create(session, base_url, coupon_prefix, coupon_discount)
+
+    # ── Step 4: 查會員 → 建新訂單 B ─────────────────────────────────
+    token_booking = get_csrf_token(session)
+    member_payload = get_member(session, phone_a, token_booking, clean_type_id)
+    if not member_payload:
+        raise Exception(f"電話 {phone_a} 查無會員資料")
+
+    lookup_result = {
+        "session": session,
+        "token": token_booking,
+        "phone": phone_a,
+        "member_payload": member_payload,
+        "base_url": base_url,
+        "env_name": env_name,
+    }
+
+    order_b_result = quick_create_order(
+        env_name=env_name,
+        payway=payway_a,
+        region=region_a,
+        lookup_result=lookup_result,
+        address=address_a,
+        clean_type_id=clean_type_id,
+        date_s=new_date_s,
+        period_s=new_period_s,
+        hour=new_hour,
+        person=new_person,
+        discount_code=coupon_code,
+    )
+    order_no_b = order_b_result["order_no"]
+
+    # ── Step 5: 備註文字 ────────────────────────────────────────────
+    combo_desc = f"{new_person}人{new_hour}小時"
+    note_b = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務"
+    note_a = f"{order_no_a}+{order_no_b} 合併{combo_desc}服務，檸檬人勿動"
+
+    # 新訂單 B 的 LINE 訊息
+    line_msg = build_line_message(order_b_result)
+
+    return {
+        "order_no_a": order_no_a,
+        "order_no_b": order_no_b,
+        "coupon_code": coupon_code,
+        "coupon_discount": coupon_discount,
+        "service_date_a": service_date_a,
+        "combo_desc": combo_desc,
+        "note_a": note_a,
+        "note_b": note_b,
+        "edit_url_a": f"{base_url}/purchase/edit/{order_no_a.replace('LC00', '')}",
+        "purchase_url_a": f"{base_url}/purchase?orderNo={order_no_a}",
+        "line_message": line_msg,
+        "order_b_result": order_b_result,
+        "region": region_a,
     }
 
 
