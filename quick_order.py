@@ -523,23 +523,18 @@ def _extract_person_hour_line(joined_text):
 
 def _count_staff_from_lines(lines):
     """
-    從訂單區塊的服務人員行數人頭，作為人數的備用來源。
+    從訂單區塊數服務人員人數，作為人數欄位的備用來源。
 
-    後台訂單卡片顯示格式：嚴慶隆(3) X 林岱羽(2)
-    用大寫 X 分隔人名，排除「檸檬人」（學員）。
-    抓到幾個非檸檬人的名字就是幾人。
+    使用 _extract_staff_line() 取得人員字串（格式：嚴慶隆 X 林岱羽 X 塗敏捷），
+    以空白+X+空白分隔，計算非「檸檬人」的人數。
     """
-    joined = "\n".join(lines)
-    # 找有「(數字) X」或「X (數字)」形態的服務人員行
-    staff_line_match = re.search(
-        r"[^\n]*\(\d+\)(?:\s*X\s*[^\n]*\(\d+\))+",
-        joined,
-    )
-    if not staff_line_match:
+    staff_str = _extract_staff_line(lines)
+    if not staff_str:
         return ""
-    staff_line = staff_line_match.group(0)
-    parts = [p.strip() for p in re.split(r"\bX\b", staff_line) if p.strip()]
-    count = sum(1 for p in parts if "檸檬人" not in p and re.search(r"\(\d+\)", p))
+    # 以 X（前後可能有空白）分隔
+    parts = [p.strip() for p in re.split(r"\s*X\s*", staff_str) if p.strip()]
+    # 排除檸檬人（學員）
+    count = sum(1 for p in parts if "檸檬人" not in p)
     return str(count) if count > 0 else ""
 
 
