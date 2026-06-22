@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：ordersapp_7_2.py
-# 版本：v7.2
+# 檔名：ordersapp_7_3.py
+# 版本：v7.3
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
+# v7.3
+# - LINE 通知產生器：訂單編號改多筆輸入（text_area，每行一個）
+# - LINE 通知產生器：移除區域選擇欄位，由地址自動判斷
+# - LINE 通知產生器：每筆訊息旁增加 N-J Memo 欄位 + 複製按鈕
 # v7.2
 # - 新客資料拆解電話欄位統一只保留數字
 # - 新增發票抬頭與統編拆解欄位
@@ -217,7 +221,6 @@ html, body, [class*="css"] {
     padding: 12px 16px !important;
 }
 
-/* 執行過程拉高 + 保留換行 */
 [data-testid="stCode"] {
     font-size: 13px !important;
     border-radius: 0 0 12px 12px !important;
@@ -371,6 +374,15 @@ PERIOD_HOUR_MAP = {
     "09:00-18:00": 8,
 }
 
+# N-J Memo 固定文案
+NJ_MEMO = (
+    "**N-J**\n"
+    "請現場跟客戶溝通清潔優先順序,並請回報以下內容\n"
+    "*工作項目+時間分配\n"
+    "*特別注意事項\n"
+    "*服務小貼心"
+)
+
 
 def compact_period(value):
     return str(value or "").replace(" ", "")
@@ -485,7 +497,7 @@ def copy_button(label, text, key):
             font-size: 15px;
             font-weight: 700;
             cursor: pointer;
-        ">複製 LINE 訊息</button>
+        ">{html.escape(label)}</button>
         <script>
         const btn = document.getElementById({json.dumps(key)});
         const text = {payload};
@@ -599,7 +611,7 @@ info_panel(
         "批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步 Google 日曆。",
         "舊客快速建單：用電話查會員，帶入歷史已付款服務資料後建單；需求搜尋整合在此流程內。",
         "新客資料拆解：貼上客人提供的制式文字，系統拆成欄位供客服修改與複製，不直接送單。",
-        "LINE 通知產生器：用已成立訂單編號補產生通知訊息。",
+        "LINE 通知產生器：用已成立訂單編號補產生通知訊息，支援多筆同時產生。",
     ],
 )
 mode = st.radio(
@@ -764,43 +776,98 @@ else:
     step("3", single_feature)
 
     # -----------------------------------------------------
-    # LINE 通知產生器
+    # LINE 通知產生器（v7.3：多筆、移除區域、加 N-J Memo）
     # -----------------------------------------------------
     if single_feature == "LINE 通知產生器":
-        info_panel("使用說明", ["輸入已成立訂單編號。", "系統讀取訂單日期、地址、付款方式與金額。", "確認內容後複製貼到 LINE。"])
-        line_order_no = st.text_input("訂單編號", placeholder="", key="line_order_no")
+        info_panel(
+            "使用說明",
+            [
+                "輸入已成立訂單編號，每行一個，可一次輸入多筆。",
+                "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。",
+                "LINE 訊息與 N-J Memo 各有複製按鈕，可分開複製。",
+            ],
+        )
+
+        line_order_nos_input = st.text_area(
+            "訂單編號（每行一個）",
+            value="",
+            height=130,
+            placeholder="LC00211537\nLC00211538",
+            key="line_order_nos",
+        )
 
         if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
-            elif not line_order_no.strip():
-                st.error("請輸入訂單編號")
             else:
-                try:
-                    with st.spinner("查詢訂單並產生訊息中…"):
-                        line_result, line_text = build_line_message_from_order_no(
-                            env_name=env,
-                            backend_email=backend_email.strip(),
-                            backend_password=backend_password.strip(),
-                            order_no=line_order_no.strip(),
-                        )
-                    st.session_state.line_from_order_no_result = line_result
-                    st.session_state.line_from_order_no_text = line_text
-                except Exception as e:
-                    st.session_state.line_from_order_no_result = None
-                    st.session_state.line_from_order_no_text = ""
-                    st.error(f"產生失敗：{e}")
+                order_nos = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
+                if not order_nos:
+                    st.error("請輸入至少一個訂單編號")
+                else:
+                    results_list = []
+                    for ono in order_nos:
+                        try:
+                            with st.spinner(f"查詢訂單 {ono}…"):
+                                line_result, line_text = build_line_message_from_order_no(
+                                    env_name=env,
+                                    backend_email=backend_email.strip(),
+                                    backend_password=backend_password.strip(),
+                                    order_no=ono,
+                                )
+                            results_list.append({
+                                "order_no": ono,
+                                "result": line_result,
+                                "text": line_text,
+                                "error": None,
+                            })
+                        except Exception as e:
+                            results_list.append({
+                                "order_no": ono,
+                                "result": None,
+                                "text": "",
+                                "error": str(e),
+                            })
+                    st.session_state.line_from_order_nos_results = results_list
 
-        line_text = st.session_state.get("line_from_order_no_text", "")
-        line_result = st.session_state.get("line_from_order_no_result")
-        if line_text and line_result:
+        results_list = st.session_state.get("line_from_order_nos_results", [])
+        for idx, item in enumerate(results_list):
+            if item["error"]:
+                st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
+                continue
+
+            line_result = item["result"]
+            line_text = item["text"]
+
             st.caption(
-                f"訂單：{line_result.get('order_no')}　付款方式：{line_result.get('payway')}　"
-                f"區域：{line_result.get('region')}　金額：{line_result.get('service_amount') or '—'}　"
+                f"訂單：{line_result.get('order_no')}　"
+                f"付款方式：{line_result.get('payway')}　"
+                f"區域：{line_result.get('region')}　"
+                f"金額：{line_result.get('service_amount') or '—'}　"
                 f"車馬費：{line_result.get('fare') or '0'}"
             )
-            st.text_area("訂單 LINE 訊息內容", line_text, height=420, label_visibility="collapsed")
-            copy_button("複製 LINE 訊息", line_text, "copy-line-message-from-order-no")
+
+            col_msg, col_memo = st.columns([3, 1])
+            with col_msg:
+                st.text_area(
+                    f"LINE 訊息（{line_result.get('order_no')}）",
+                    line_text,
+                    height=380,
+                    key=f"line_text_{idx}",
+                    label_visibility="collapsed",
+                )
+                copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
+            with col_memo:
+                st.text_area(
+                    "N-J Memo",
+                    NJ_MEMO,
+                    height=200,
+                    key=f"nj_memo_{idx}",
+                    label_visibility="collapsed",
+                )
+                copy_button("複製 N-J Memo", NJ_MEMO, f"copy-nj-memo-{idx}")
+
+            if idx < len(results_list) - 1:
+                st.markdown("<hr>", unsafe_allow_html=True)
 
     # -----------------------------------------------------
     # 舊客快速建單
@@ -919,7 +986,7 @@ else:
                     date_mode = st.radio("日期/班表查詢方式", ["已知日期", "依需求搜尋可服務日期"], horizontal=True, key="old_date_mode")
 
                     if date_mode == "已知日期":
-                        info_panel("已知日期使用說明", ["客人已指定某一天時使用。", "此模式才需要選服務日期與時段。", "若客人只說平日、週末、不限或幾小時，請改選『依需求搜尋可服務日期』。", "人時 = 人數 × 服務時數；09:00-16:00 為 6 小時，09:00-18:00 為 8 小時。"] )
+                        info_panel("已知日期使用說明", ["客人已指定某一天時使用。", "此模式才需要選服務日期與時段。", "若客人只說平日、週末、不限或幾小時，請改選『依需求搜尋可服務日期』。", "人時 = 人數 × 服務時數；09:00-16:00 為 6 小時，09:00-18:00 為 8 小時。"])
                         d1, d2, d3, d4 = st.columns(4)
                         with d1:
                             q_date = st.date_input("服務日期", value=date.today(), key="old_known_date")
@@ -982,7 +1049,7 @@ else:
                                 st.error(f"建單失敗：{e}")
 
                     else:
-                        info_panel("依需求搜尋使用說明", ["客人尚未指定日期時使用，例如只說平日、週末或不限。", "此模式先選日期類型與時段偏好，不需要先選單一日期。", "可選平日 / 週末 / 不限，也可選上午 / 下午 / 不限。", "人時 = 人數 × 服務時數；系統會列出等效方案，例如 2人6小時 = 12人時 = 3人4小時。"] )
+                        info_panel("依需求搜尋使用說明", ["客人尚未指定日期時使用，例如只說平日、週末或不限。", "此模式先選日期類型與時段偏好，不需要先選單一日期。", "可選平日 / 週末 / 不限，也可選上午 / 下午 / 不限。", "人時 = 人數 × 服務時數；系統會列出等效方案，例如 2人6小時 = 12人時 = 3人4小時。"])
                         a1, a2, a3, a4 = st.columns(4)
                         with a1:
                             day_type = st.selectbox("日期類型", ["平日", "週末", "不限"], key="old_day_type")
@@ -1132,5 +1199,10 @@ else:
         else:
             st.warning(f"確認信發送失敗：{order_result.get('mail_msg', '')}")
         line_message = build_line_message(order_result)
-        st.text_area("LINE 訊息內容", line_message, height=420, label_visibility="collapsed")
-        copy_button("複製 LINE 訊息", line_message, "copy-line-message")
+        col_msg, col_memo = st.columns([3, 1])
+        with col_msg:
+            st.text_area("LINE 訊息內容", line_message, height=420, label_visibility="collapsed")
+            copy_button("複製 LINE 訊息", line_message, "copy-line-message")
+        with col_memo:
+            st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_order_result")
+            copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-order-result")
