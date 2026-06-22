@@ -1,1234 +1,1943 @@
 # ============================================================
-# 檔名：ordersapp_7_3.py
+# 檔名：quick_order.py
 # 版本：v7.3
-# 模組：服務訂單系統主畫面
+# 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
 # v7.3
-# - LINE 通知產生器：訂單編號改多筆輸入（text_area，每行一個）
-# - LINE 通知產生器：移除區域選擇欄位，由地址自動判斷
-# - LINE 通知產生器：每筆訊息旁增加 N-J Memo 欄位 + 複製按鈕
+# - 新增 PERIOD_DISPLAY_INFO / _format_period_display()
+# - build_line_message 服務時間加入時數/休息備註/人數
+# - build_line_message_from_order_no 補 person / period_s
+# - quick_create_order return dict 補 person / period_s
 # v7.2
-# - 新客資料拆解電話欄位統一只保留數字
-# - 新增發票抬頭與統編拆解欄位
-# - 整理後文字同步輸出抬頭/統編，方便貼到後台
-# - LINE通知移除區域選擇，由訂單資料自動判斷
+# - 新客資料拆解電話統一轉純數字
+# - 新增發票抬頭與統編解析
+# - 保留載具/統編資訊相容欄位
 # ============================================================
 # -*- coding: utf-8 -*-
-import html
-import json
-import streamlit as st
-import streamlit.components.v1 as components
-from datetime import date, timedelta
+"""
+單筆快速建單模組（信用卡 / ATM / 儲值金）
 
-from orders import run_process_web, get_region_by_address
+設計目的：
+非定期、單次客人，不需要先把整列資料填進 Google Sheet。
+電話查會員 → 帶出上次地址/服務內容/付款方式 → 算時數 → 直接建單 → 產生 LINE 文案。
+
+直接 reuse orders.py 既有的後台互動 function，避免重複邏輯/重複維護。
+"""
+import time
+import re
+from datetime import date, datetime, timedelta
+
+import requests
+
+import orders  # 直接 import 模組本身，才能在執行前覆寫它的環境變數
+from orders import (
+    login,
+    get_csrf_token,
+    get_member,
+    pick_best_address_info,
+    geocode_address,
+    check_contain,
+    calculate_hour,
+    extract_calc_fields,
+    get_section_raw,
+    slot_exists_in_section_response,
+    extract_cleaners_from_section_response,
+    format_staff_from_cleaners,
+    fetch_order_meta_by_order_no,
+    extract_order_cards_from_purchase_html,
+    _extract_staff_line,
+    send_confirmation_mail,
+    normalize_phone,
+    normalize_addr_for_match,
+    display_period_text,
+    first_nonzero,
+    find_nested_value,
+    get_region_by_address,
+    HEADERS,
+)
 from accounts import ACCOUNTS
-from quick_order import (
-    quick_lookup_member,
-    quick_create_order,
-    quick_check_available_slots,
-    send_confirmation,
-    build_line_message,
-    build_line_message_from_order_no,
-    build_combined_line_message_from_order_nos,
-    get_last_paid_summary,
-    get_last_paid_per_address,
-    get_unserved_paid_orders,
-    get_last_purchase_fetch_debug,
-    build_equivalent_plans,
-    search_available_service_dates,
-    parse_new_customer_order_text,
-)
+from env import BASE_URL_DEV, BASE_URL_PROD, ORDER_PREFIX_DEV, ORDER_PREFIX_PROD
 
-st.set_page_config(page_title="服務訂單系統", page_icon="🧹", layout="wide")
-
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
-
-:root {
-    --lemon: #F5C518;
-    --lemon-dark: #D4A017;
-    --lemon-soft: #FFFBEA;
-    --lemon-mid: #FFF3C4;
-    --charcoal: #1C1C1E;
-    --ink: #3A3A3C;
-    --muted: #8E8E93;
-    --border: #E5E5EA;
-    --surface: #FFFFFF;
-    --success: #34C759;
-    --danger: #FF3B30;
-    --radius: 14px;
+# 後台 payway 欄位對照（沿用代客預訂單次表單的 select option value）
+PAYWAY_MAP = {
+    "信用卡": "1",
+    "ATM": "2",
+    "儲值金": "4",
 }
 
-html, body, [class*="css"] {
-    font-family: 'Noto Sans TC', sans-serif;
-    color: var(--charcoal);
+# 不同付款方式對應的後台建單路徑
+BOOKING_ENDPOINT_MAP = {
+    "信用卡": "/booking/single",
+    "ATM": "/booking/single",
+    "儲值金": "/booking/stored_value_routine",
 }
 
-#MainMenu, footer, header {
-    visibility: hidden;
+TAX_RATE = 1.05  # 服務費未稅 → 含稅
+
+# 服務時段對應時數與中間休息備註
+# has_break=True 的時段，LINE 訊息顯示「X小時,中間休息1小時」
+PERIOD_DISPLAY_INFO = {
+    "08:30-12:30": ("4小時", False),
+    "09:00-11:00": ("2小時", False),
+    "09:00-12:00": ("3小時", False),
+    "14:00-16:00": ("2小時", False),
+    "14:00-17:00": ("3小時", False),
+    "14:00-18:00": ("4小時", False),
+    "09:00-16:00": ("6小時", True),
+    "09:00-18:00": ("8小時", True),
 }
 
-[data-testid="stAppViewContainer"] {
-    background: #FAFAFA;
-}
 
-.block-container {
-    padding-top: 2rem !important;
-    padding-bottom: 2rem !important;
-    max-width: 1180px !important;
-}
+def _format_period_display(period_raw, person="", display_override=""):
+    """
+    格式化服務時段顯示。
 
-.hero {
-    background: linear-gradient(135deg, #FFFDF0 0%, #FFFBEA 100%);
-    border: 1.5px solid var(--lemon-mid);
-    border-radius: var(--radius);
-    padding: 2rem 2.5rem 1.6rem;
-    margin-bottom: 2rem;
-    display: flex;
-    align-items: center;
-    gap: 1.2rem;
-    box-shadow: 0 2px 12px rgba(245,197,24,0.10);
-}
+    輸出格式：HH:MM-HH:MM（N人M小時）或 HH:MM-HH:MM（N人M小時，中間休息1小時）
+    例：14:00-17:00 + 2人 → 14:00-17:00（2人3小時）
+        09:00-18:00 + 3人 → 09:00-18:00（3人8小時，中間休息1小時）
+        08:30-17:30（簡訊實際時間）+ 09:00-18:00（查對照表）→ 08:30-17:30（2人8小時，中間休息1小時）
+    """
+    compact = str(period_raw or "").replace(" ", "")
+    display = str(display_override or "").replace(" ", "") or compact
+    info = PERIOD_DISPLAY_INFO.get(compact)
+    person_str = str(person or "").strip()
+    if info:
+        hour_str, has_break = info
+        break_note = "，中間休息1小時" if has_break else ""
+        if person_str and person_str != "0":
+            inner = f"{person_str}人{hour_str}{break_note}"
+        else:
+            inner = f"{hour_str}{break_note}"
+        return f"{display}（{inner}）"
+    # 找不到對照表：只顯示時段與人數
+    if person_str and person_str != "0":
+        return f"{display}（{person_str}人）"
+    return display
 
-.hero-emoji {
-    font-size: 3rem;
-    line-height: 1;
-}
 
-.hero-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.9rem;
-    font-weight: 700;
-    color: var(--charcoal);
-    letter-spacing: -0.5px;
-}
+def _extract_actual_service_time(joined_text):
+    """
+    從訂單區塊文字抓「簡訊實際服務時間」。
 
-.hero-sub {
-    color: var(--ink);
-    font-size: 0.92rem;
-    margin-top: 0.3rem;
-    opacity: 0.78;
-}
+    後台部分訂單會記錄實際到離場時間，格式為：
+      簡訊實際服務時間\n08:30-17:30
+    或
+      簡訊實際服務時間 08:30 - 17:30
 
-.step-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: var(--lemon-mid);
-    border: 1.5px solid var(--lemon);
-    border-radius: 30px;
-    padding: 0.28rem 0.9rem;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--charcoal);
-    margin-bottom: 0.9rem;
-    letter-spacing: 0.02em;
-}
+    找到時回傳正規化後的 "HH:MM - HH:MM" 字串（與 _parse_service_date_time_loose
+    回傳格式一致）；找不到回傳空字串。
+    """
+    m = re.search(
+        r"簡訊實際服務時間\s*[：:]?\s*(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})",
+        joined_text,
+    )
 
-.step-num {
-    background: var(--lemon);
-    border-radius: 50%;
-    width: 20px;
-    height: 20px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.72rem;
-    font-weight: 700;
-}
+    if m:
+        start, end = m.groups()
+        return f"{start} - {end}"
+    return ""
 
-.sec-label {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--muted);
-    letter-spacing: .04em;
-    margin-bottom: 8px;
-}
 
-.hint-box {
-    background: var(--lemon-soft);
-    border-left: 4px solid var(--lemon);
-    border-radius: 0 8px 8px 0;
-    padding: 0.75rem 1rem;
-    font-size: 0.9rem;
-    color: var(--ink);
-    margin-top: 0.6rem;
-}
+def _extract_phone_from_block_lines(lines):
+    """
+    從訂單區塊行列表抓電話號碼（台灣手機格式）。
+    用於同日多筆訂單偵測時反查電話。
+    """
+    joined = "\n".join(lines)
+    m = re.search(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,10}", joined)
+    if m:
+        return normalize_phone(m.group(0))
+    return ""
 
-[data-testid="stTextInput"] label,
-[data-testid="stNumberInput"] label,
-[data-testid="stSelectbox"] label,
-[data-testid="stMultiSelect"] label,
-[data-testid="stDateInput"] label,
-[data-testid="stRadio"] label {
-    font-size: 13px !important;
-    color: var(--ink) !important;
-    font-weight: 700 !important;
-}
 
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input,
-[data-testid="stSelectbox"] > div > div,
-[data-testid="stMultiSelect"] > div > div,
-[data-testid="stDateInput"] input {
-    border-radius: 10px !important;
-    border: 1.5px solid var(--border) !important;
-    background: white !important;
-    font-size: 15px !important;
-}
+def _fetch_same_date_order_blocks(session, phone, target_date):
+    """
+    用電話搜尋「同一服務日期」的所有訂單區塊（不限付款狀態）。
 
-[data-testid="stTextInput"] input:focus {
-    border-color: var(--lemon-dark) !important;
-    box-shadow: 0 0 0 2px rgba(245,197,24,0.22) !important;
-}
+    用途：輸入任一訂單號後，自動偵測同一客人同一天是否有其他訂單，
+    若有則合併顯示服務時間，避免通知只寫其中一筆。
 
-[data-testid="stButton"] > button {
-    background: var(--lemon) !important;
-    color: var(--charcoal) !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-size: 15px !important;
-    font-weight: 700 !important;
-    padding: 0.55rem 1.2rem !important;
-    box-shadow: 0 2px 10px rgba(245,197,24,0.28) !important;
-}
+    注意：客人可能在不同日期都有待付款訂單，這個函式嚴格比對
+    service_date == target_date，不會跨日合併。
+    """
+    blocks = _fetch_purchase_blocks_for_phone(session, phone)
+    same_date = []
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+        service_date, _ = _parse_service_date_time_loose(joined)
+        if service_date == target_date:
+            same_date.append(block)
+    return same_date
 
-[data-testid="stButton"] > button:hover {
-    background: var(--lemon-dark) !important;
-    transform: translateY(-1px) !important;
-}
 
-[data-testid="stButton"] > button:disabled {
-    background: #D1D5DB !important;
-    color: #777 !important;
-}
+def _build_combined_period_display(orders_data):
+    """
+    將同日多筆訂單的服務時段合併成一段描述字串。
 
-[data-testid="stExpander"] {
-    border: 1px solid #ececec !important;
-    border-radius: 14px !important;
-    background: white !important;
-    overflow: hidden !important;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
-}
+    orders_data: list of dicts，每筆包含：
+        period_s      原始預約時段（查 PERIOD_DISPLAY_INFO）
+        actual_period 簡訊實際服務時間（有值時覆蓋顯示）
+        person        人數
 
-[data-testid="stExpander"] summary {
-    font-size: 14px !important;
-    font-weight: 700 !important;
-    color: var(--charcoal) !important;
-    padding: 12px 16px !important;
-}
+    回傳格式範例：
+        14:00-17:00（2人3小時）＋08:30-12:30（2人4小時），共14人時
+    """
+    parts = []
+    total_ph = 0
+    for o in sorted(orders_data, key=lambda x: str(x.get("period_s") or "").replace(" ", "")):
+        period_raw = str(o.get("period_s") or "").replace(" ", "")
+        actual = str(o.get("actual_period") or "").replace(" ", "")
+        person_str = str(o.get("person") or "").strip()
+        p_str = _format_period_display(period_raw, person_str, display_override=actual)
+        parts.append(p_str)
+        info = PERIOD_DISPLAY_INFO.get(period_raw)
+        if info:
+            try:
+                h = int(float(info[0].replace("小時", "")))
+                p = int(person_str) if person_str else 0
+                total_ph += h * p
+            except Exception:
+                pass
 
-[data-testid="stCode"] {
-    font-size: 13px !important;
-    border-radius: 0 0 12px 12px !important;
-    min-height: 420px !important;
-    max-height: 560px !important;
-    overflow-y: auto !important;
-    background: #1C1C1E !important;
-    margin: 0 !important;
-    white-space: pre-wrap !important;
-}
+    combined = "＋".join(parts)
+    if total_ph:
+        combined += f"，共{total_ph}人時"
+    return combined
 
-[data-testid="stMetric"] {
-    background: white !important;
-    border: 1px solid #ececec !important;
-    border-radius: 14px !important;
-    padding: 14px 16px !important;
-    text-align: center !important;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
-}
 
-[data-testid="stMetricLabel"] {
-    font-size: 12px !important;
-    color: var(--muted) !important;
-    font-weight: 700 !important;
-}
+def _configure_environment(env_name):
+    """
+    重要修正：
+    orders.py 裡 login()/get_member()/check_contain() 等 function，
+    內部用的是 orders.py 模組層級的 LOGIN_URL / GET_MEMBER_URL ... 全域變數，
+    只有 run_process_web() 會重新賦值。
 
-[data-testid="stMetricValue"] {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 32px !important;
-    font-weight: 700 !important;
-    color: var(--charcoal) !important;
-}
+    單筆建單流程完全沒有呼叫 run_process_web()，
+    所以一直打的是「import 當下 env.py 設定的環境」，跟畫面選的 dev/prod 無關。
 
-[data-testid="stAlert"] {
-    border-radius: 10px !important;
-    font-size: 14px !important;
-}
+    這裡直接覆寫 orders 模組的全域變數，確保 dev/prod 真的會切換。
+    """
+    base_url = BASE_URL_DEV if env_name == "dev" else BASE_URL_PROD
+    order_prefix = ORDER_PREFIX_DEV if env_name == "dev" else ORDER_PREFIX_PROD
 
-hr {
-    border-color: #e8e8e8 !important;
-    margin: 1.4rem 0 !important;
-}
+    orders.BASE_URL = base_url
+    orders.ORDER_PREFIX = order_prefix
+    orders.LOGIN_URL = f"{base_url}/login"
+    orders.BOOKING_URL = f"{base_url}/booking/stored_value_routine"
+    orders.PURCHASE_URL = f"{base_url}/purchase"
+    orders.GET_MEMBER_URL = f"{base_url}/ajax/get_member"
+    orders.CHECK_CONTAIN_URL = f"{base_url}/ajax/check_contain"
+    orders.CALCULATE_HOUR_URL = f"{base_url}/ajax/calculate_hour"
+    orders.GET_SECTION_URL = f"{base_url}/ajax/get_section"
+    orders.MAIL_SUCCESS_URL = f"{base_url}/purchase/mail_success/{{order_no}}"
 
-.history-card {
-    background: var(--lemon-soft);
-    border-left: 4px solid var(--lemon);
-    border-radius: 0 10px 10px 0;
-    padding: 1rem 1.1rem;
-    margin-top: 0.85rem;
-    font-size: 0.94rem;
-    color: var(--ink);
-}
+    return base_url
 
-.history-title {
-    font-size: 1rem;
-    font-weight: 800;
-    color: var(--charcoal);
-    margin-bottom: 0.75rem;
-}
 
-.history-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.45rem 1.2rem;
-}
+def _booking_url_for_payway(base_url, payway):
+    return f"{base_url}{BOOKING_ENDPOINT_MAP.get(payway, '/booking/single')}"
 
-.history-field {
-    display: grid;
-    grid-template-columns: 5.5rem minmax(0, 1fr);
-    gap: 0.35rem;
-    align-items: start;
-}
 
-.history-label {
-    color: var(--muted);
-    font-weight: 700;
-    white-space: nowrap;
-}
+def _get_booking_token_for_payway(session, base_url, payway):
+    orders.BOOKING_URL = _booking_url_for_payway(base_url, payway)
+    return get_csrf_token(session)
 
-.history-value {
-    color: var(--charcoal);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
 
-.history-subtitle {
-    margin-top: 0.9rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid var(--lemon-mid);
-    font-weight: 800;
-    color: var(--charcoal);
-}
+def _build_booking_submit_data(base_data, token, payway, slot):
+    data = {**base_data, "_token": token}
+    if payway in ("信用卡", "ATM"):
+        data["date_s"] = ""
+        data["datePeriod"] = slot
+    else:
+        data["date_list[]"] = [slot]
+    return data
 
-.history-order {
-    margin-top: 0.55rem;
-    padding: 0.65rem 0.75rem;
-    background: rgba(255,255,255,0.58);
-    border: 1px solid var(--lemon-mid);
-    border-radius: 8px;
-}
 
-.history-order-main {
-    font-weight: 800;
-    color: var(--charcoal);
-    margin-bottom: 0.35rem;
-}
+def quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id="1"):
+    """
+    電話查會員。回傳 session/token 給後續單筆建單共用，
+    避免每個步驟都重新登入。
 
-.history-order-meta {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.25rem 1rem;
-    color: var(--ink);
-}
+    member_payload 為 None 代表查無此會員（新客人），
+    呼叫端應該改走「新客人資訊收集」流程，不能呼叫 quick_create_order。
+    """
+    base_url = _configure_environment(env_name)
 
-.history-note {
-    margin-top: 0.75rem;
-    color: var(--muted);
-}
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
 
-@media (max-width: 720px) {
-    .history-grid,
-    .history-order-meta {
-        grid-template-columns: 1fr;
+    token = get_csrf_token(session)
+
+    phone = normalize_phone(phone)
+    member_payload = get_member(session, phone, token, clean_type_id)
+
+    return {
+        "session": session,
+        "token": token,
+        "phone": phone,
+        "member_payload": member_payload,
+        "base_url": base_url,
+        "env_name": env_name,
     }
-}
-</style>
-""", unsafe_allow_html=True)
 
 
-CLEAN_TYPE_ID_MAP = {"居家清潔": "1", "辦公室清潔": "2", "裝修細清": "3"}
-
-PERIOD_OPTIONS = [
-    "08:30-12:30",
-    "09:00-11:00",
-    "09:00-12:00",
-    "14:00-16:00",
-    "14:00-17:00",
-    "14:00-18:00",
-    "09:00-16:00",
-    "09:00-18:00",
-]
-
-PERIOD_HOUR_MAP = {
-    "08:30-12:30": 4,
-    "09:00-11:00": 2,
-    "09:00-12:00": 3,
-    "14:00-16:00": 2,
-    "14:00-17:00": 3,
-    "14:00-18:00": 4,
-    "09:00-16:00": 6,
-    "09:00-18:00": 8,
+PURCHASE_FILTER_PARAMS_TEMPLATE = {
+    "keyword": "",
+    "name": "",
+    "phone": "",
+    "orderNo": "",
+    "date_s": "",
+    "date_e": "",
+    "clean_date_s": "",
+    "clean_date_e": "",
+    "paid_at_s": "",
+    "paid_at_e": "",
+    "refundDateS": "",
+    "refundDateE": "",
+    "buy": "",
+    "area_id": "",
+    "isCharge": "",
+    "isRefund": "",
+    "payway": "",
+    "purchase_status": "",
+    "progress_status": "",
+    "invoiceStatus": "",
+    "otherFee": "",
+    "orderBy": "",
 }
 
-# N-J Memo 固定文案
-NJ_MEMO = (
-    "**N-J**\n"
-    "請現場跟客戶溝通清潔優先順序,並請回報以下內容\n"
-    "*工作項目+時間分配\n"
-    "*特別注意事項\n"
-    "*服務小貼心"
-)
+
+_LAST_PURCHASE_FETCH_DEBUG = {}
+PURCHASE_STATUS_PAID = "1"
 
 
-def compact_period(value):
-    return str(value or "").replace(" ", "")
+def get_last_purchase_fetch_debug():
+    """取得最近一次 _fetch_purchase_blocks_for_phone 的診斷資訊，供畫面顯示除錯用。"""
+    return dict(_LAST_PURCHASE_FETCH_DEBUG)
 
 
-def nonzero_money(value):
+def _block_matches_phone_filter(block, phone_norm):
+    """
+    後台已用 phone= 篩選時，列表文字不一定會完整顯示電話。
+    若卡片內有電話文字就二次確認；若沒有電話文字，信任後台篩選結果。
+    """
+    if not phone_norm:
+        return True
+
+    joined = "\n".join(block.get("lines", []))
+    compact = joined.replace("-", "").replace(" ", "")
+    if phone_norm in compact:
+        return True
+
+    visible_phones = {
+        normalize_phone(m.group(0))
+        for m in re.finditer(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,12}", joined)
+    }
+    visible_phones.discard("")
+    if visible_phones:
+        return phone_norm in visible_phones
+
+    return True
+
+
+def _fetch_purchase_blocks_for_phone(session, phone, name="", purchase_status=""):
+    """
+    比照後台「訂單管理」篩選列搜尋的實際請求格式。
+    """
+    global _LAST_PURCHASE_FETCH_DEBUG
+
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["phone"] = normalize_phone(phone)
+    if purchase_status:
+        params["purchase_status"] = purchase_status
+    if name and not params["phone"]:
+        params["name"] = name
+
+    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+
+    raw_blocks = []
+    if resp.status_code == 200:
+        raw_blocks = extract_order_cards_from_purchase_html(resp.text)
+
+    looks_like_login_page = "login" in resp.url.lower() or (
+        len(raw_blocks) == 0 and "password" in resp.text.lower()
+    )
+    effective_purchase_status = purchase_status
+    fallback_info = {}
+
+    if purchase_status and resp.status_code == 200 and not raw_blocks and not looks_like_login_page:
+        fallback_params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        fallback_params["phone"] = normalize_phone(phone)
+        if name and not fallback_params["phone"]:
+            fallback_params["name"] = name
+
+        fallback_resp = session.get(
+            orders.PURCHASE_URL,
+            params=fallback_params,
+            headers=HEADERS,
+            allow_redirects=True,
+        )
+        fallback_blocks = []
+        if fallback_resp.status_code == 200:
+            fallback_blocks = extract_order_cards_from_purchase_html(fallback_resp.text)
+
+        fallback_info = {
+            "fallback_request_url": getattr(fallback_resp.request, "url", ""),
+            "fallback_status_code": fallback_resp.status_code,
+            "fallback_raw_block_count": len(fallback_blocks),
+        }
+
+        if fallback_blocks:
+            resp = fallback_resp
+            raw_blocks = fallback_blocks
+            effective_purchase_status = ""
+            looks_like_login_page = "login" in resp.url.lower()
+
+    _LAST_PURCHASE_FETCH_DEBUG = {
+        "request_url": getattr(resp.request, "url", ""),
+        "final_url": resp.url,
+        "status_code": resp.status_code,
+        "purchase_status_filter": purchase_status,
+        "effective_purchase_status_filter": effective_purchase_status,
+        "raw_block_count": len(raw_blocks),
+        "looks_like_login_page": looks_like_login_page,
+        "snippet": resp.text[:300].replace("\n", " ").strip() if resp.status_code == 200 else "",
+        **fallback_info,
+    }
+
+    if resp.status_code != 200:
+        return []
+
+    phone_norm = normalize_phone(phone)
+    if not phone_norm:
+        _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(raw_blocks)
+        return raw_blocks
+
+    filtered = []
+    for block in raw_blocks:
+        if _block_matches_phone_filter(block, phone_norm):
+            filtered.append(block)
+
+    _LAST_PURCHASE_FETCH_DEBUG["filtered_block_count"] = len(filtered)
+    return filtered
+
+
+def list_order_numbers_for_phone(session, phone, name=""):
+    """
+    取得「這支電話」目前所有訂單編號集合。
+    用於送出建單前後比對，確認真的有新訂單產生。
+    """
+    blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
+    return {block["order_no"] for block in blocks if block.get("order_no")}
+
+
+def _fetch_purchase_block_for_order_no(session, order_no):
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["orderNo"] = str(order_no or "").strip()
+    resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        raise Exception(f"查詢訂單失敗：HTTP {resp.status_code}")
+
+    target = str(order_no or "").strip()
+    for block in extract_order_cards_from_purchase_html(resp.text):
+        if block.get("order_no") == target:
+            return block
+
+    raise Exception(f"查無訂單：{target}")
+
+
+def _parse_service_date_time_loose(joined_text):
+    """
+    從訂單區塊文字解析「服務日期」與「服務時段」。
+    回傳 (日期, "起 - 迄" 時段字串)，抓不到回傳 ("", "")。
+    """
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})\s*[（(][一二三四五六日][）)]", joined_text)
+
+    if not date_match:
+        for m in re.finditer(r"(\d{4}-\d{2}-\d{2})", joined_text):
+            tail = joined_text[m.end():m.end() + 12]
+            if not re.match(r"\s*\d{1,2}:\d{2}:\d{2}", tail):
+                date_match = m
+                break
+
+    if not date_match:
+        return "", ""
+
+    service_date = date_match.group(1)
+
+    tail = joined_text[date_match.end():date_match.end() + 600]
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", tail)
+    if not time_match:
+        time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", joined_text)
+    if not time_match:
+        return service_date, ""
+
+    start, end = time_match.groups()
+    return service_date, f"{start} - {end}"
+
+
+def _extract_money_line(joined_text, labels):
+    text = str(joined_text or "").replace(",", "")
+    for label in labels:
+        m = re.search(rf"{re.escape(label)}\s*[：:]?\s*\$?\s*(-?\d+(?:\.\d+)?)", text)
+        if m:
+            value = m.group(1)
+            try:
+                number = float(value)
+                return str(int(number)) if number.is_integer() else str(number)
+            except Exception:
+                return value
+    return ""
+
+
+def _extract_total_amount_line(joined_text):
+    return _extract_money_line(joined_text, ["訂單總金額", "總金額", "合計", "總計"])
+
+
+def _extract_fare_line(joined_text):
+    return _extract_money_line(joined_text, ["車馬費"])
+
+
+def _extract_person_hour_line(joined_text):
+    text = str(joined_text or "")
+
+    compact_match = re.search(r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*(?:小時|時)", text)
+    if compact_match:
+        return compact_match.group(1), compact_match.group(2)
+
+    person = ""
+    hour = ""
+    person_match = re.search(r"(?:服務人數|人數|專員人數)\s*[：:]?\s*(\d+)", text)
+    hour_match = re.search(r"(?:服務時數|時數)\s*[：:]?\s*(\d+(?:\.\d+)?)", text)
+    if person_match:
+        person = person_match.group(1)
+    if hour_match:
+        hour = hour_match.group(1)
+    return person, hour
+
+
+def _count_staff_from_lines(lines):
+    """
+    從訂單區塊數服務人員人數，作為人數欄位的備用來源。
+
+    使用 _extract_staff_line() 取得人員字串（格式：嚴慶隆 X 林岱羽 X 塗敏捷），
+    以空白+X+空白分隔，計算非「檸檬人」的人數。
+    """
+    staff_str = _extract_staff_line(lines)
+    if not staff_str:
+        return ""
+    # 以 X（前後可能有空白）分隔
+    parts = [p.strip() for p in re.split(r"\s*X\s*", staff_str) if p.strip()]
+    # 排除檸檬人（學員）
+    count = sum(1 for p in parts if "檸檬人" not in p)
+    return str(count) if count > 0 else ""
+
+
+def _extract_address_line(lines):
+    for line in lines:
+        text = str(line or "").strip()
+        if not text or "@" in text or text.upper() == "LINE":
+            continue
+        if re.search(r"(台|臺|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|嘉義|苗栗|彰化|南投|雲林|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江).*(市|縣).*(區|鄉|鎮|市)", text):
+            return text
+    return ""
+
+
+def _date_not_after_today(date_text):
     try:
-        return float(str(value or "0").replace(",", "")) != 0
+        return datetime.strptime(str(date_text), "%Y-%m-%d").date() <= date.today()
     except Exception:
-        return bool(str(value or "").strip())
+        return False
 
 
-def payment_invoice_display(payway, invoice_text):
-    if payway == "儲值金":
-        return "儲值金客（無付款方式/發票資訊）"
-    return f"付款：{payway or '未知'}　發票：{invoice_text or '未知'}"
+def _extract_payway_line(joined_text):
+    """
+    從訂單區塊文字解析「付款方式」。
+    """
+    m = re.search(r"付款方式[：:]\s*([^\s\n]+)", joined_text)
+    if m:
+        value = m.group(1).strip()
+        if value in ("信用卡", "ATM"):
+            return value
+    if "儲值金" in joined_text:
+        return "儲值金"
+    if _extract_total_amount_line(joined_text) == "0" and not _extract_invoice_line(joined_text):
+        return "儲值金"
+    return ""
 
 
-def booking_route_display(payway):
-    if payway == "儲值金":
-        return "儲值金客", "/booking/stored_value_routine"
-    return "一般客", "/booking/single"
+def _service_amount_from_block(joined_text, fare):
+    total = _extract_total_amount_line(joined_text)
+    if not total:
+        return ""
+    try:
+        total_num = int(round(float(str(total).replace(",", ""))))
+        fare_num = int(round(float(str(fare or "0").replace(",", ""))))
+        amount = total_num - fare_num if fare_num and total_num > fare_num else total_num
+        return str(amount)
+    except Exception:
+        return total
 
 
-def h(value, default="未知"):
-    text = str(value or "").strip()
-    return html.escape(text if text else default)
+def build_combined_line_message_from_order_nos(
+    env_name,
+    backend_email,
+    backend_password,
+    order_nos,
+    fallback_region="台北",
+):
+    """
+    多筆訂單合併成一則 LINE 通知。
 
+    用於客服在輸入框以「+」分隔指定同日合併單的情況，
+    例如：LC002115751+LC002115741 → 合併成一則含累計金額與合併時段的訊息。
 
-def person_hour_display(person, hour):
-    return f"{person}人{hour}小時" if (person or hour) else "未知"
+    驗證：所有訂單需同一服務日期、同一付款方式，否則拋出說明例外。
+    """
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
 
+    orders_info = []
+    for ono in order_nos:
+        block = _fetch_purchase_block_for_order_no(session, ono)
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
 
-def history_field(label, value):
-    return (
-        '<div class="history-field">'
-        f'<span class="history-label">{h(label, "")}</span>'
-        f'<span class="history-value">{h(value)}</span>'
-        '</div>'
-    )
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        actual_time = _extract_actual_service_time(joined)
+        person_extracted, _ = _extract_person_hour_line(joined)
+        if not person_extracted:
+            person_extracted = _count_staff_from_lines(lines)
+        address = _extract_address_line(lines)
+        fare = _extract_fare_line(joined) or "0"
+        payway = _extract_payway_line(joined)
+        service_amount = _service_amount_from_block(joined, fare)
+        region = get_region_by_address(address, ACCOUNTS) or fallback_region
 
+        if not service_date or not service_time:
+            raise Exception(f"訂單 {ono} 缺少服務日期或時段，無法合併")
+        if not address:
+            raise Exception(f"訂單 {ono} 缺少服務地址，無法合併")
+        if not payway:
+            raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
 
-def order_history_row(order):
-    ph_text = person_hour_display(order.get("person"), order.get("hour"))
-    payment_text = payment_invoice_display(order.get("payway"), order.get("invoice_text"))
-    notice = order.get("service_notice") or "無"
-    fare = order.get("fare") or ""
-    fare_part = f'<div>車馬費：{h(fare, "")}</div>' if nonzero_money(fare) else ""
-    return (
-        '<div class="history-order">'
-        f'<div class="history-order-main">{h(order.get("order_no"))}　{h(order.get("date"))} {h(order.get("time"), "")}</div>'
-        '<div class="history-order-meta">'
-        f'<div>人時：{h(ph_text)}</div>'
-        f'<div>服務人員：{h(order.get("staff"))}</div>'
-        f'<div>地址：{h(order.get("address"))}</div>'
-        f'<div>{h(payment_text)}</div>'
-        f'<div>客服備註：{h(notice)}</div>'
-        f'{fare_part}'
-        '</div>'
-        '</div>'
-    )
+        orders_info.append({
+            "order_no": ono,
+            "service_date": service_date,
+            "period_s": service_time,
+            "actual_period": actual_time,
+            "person": person_extracted,
+            "address": address,
+            "fare": fare,
+            "payway": payway,
+            "service_amount": service_amount,
+            "region": region,
+        })
 
-
-def last_summary_card_html(summary):
-    ph_text = person_hour_display(summary.get("person"), summary.get("hour"))
-    payment_text = payment_invoice_display(summary.get("payway"), summary.get("invoice_text"))
-    fields = [
-        ("訂單", summary.get("order_no")),
-        ("服務時間", f'{summary.get("date") or ""} {summary.get("time") or ""}'.strip()),
-        ("地址", summary.get("address") or "無法判斷地址"),
-        ("類別", summary.get("clean_type")),
-        ("服務人員", summary.get("staff")),
-        ("人時", ph_text),
-        ("付款/發票", payment_text),
-        ("客服備註", summary.get("service_notice") or "無"),
-    ]
-    if nonzero_money(summary.get("fare")):
-        fields.append(("車馬費", summary.get("fare")))
-
-    same_date_orders = summary.get("same_date_orders") or []
-    same_date_html = ""
-    if len(same_date_orders) > 1:
-        same_date_html = (
-            f'<div class="history-subtitle">該日期共有 {len(same_date_orders)} 筆已付款訂單</div>'
-            + "".join(order_history_row(order) for order in same_date_orders)
+    # 付款方式驗證（不同付款方式不允許合併）
+    payways = {o["payway"] for o in orders_info if o["payway"]}
+    if len(payways) > 1:
+        raise Exception(
+            f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。"
         )
 
-    return (
-        '<div class="history-card">'
-        '<div class="history-title">📌 上次（已付款）服務</div>'
-        '<div class="history-grid">'
-        + "".join(history_field(label, value) for label, value in fields)
-        + '</div>'
-        + same_date_html
-        + '<div class="history-note">以上已預設帶入，如有變動請手動調整對應欄位。</div>'
-        + '</div>'
+    # ── 服務時間顯示：三種組合 ─────────────────────────────────────────
+    unique_dates = sorted({o["service_date"] for o in orders_info})
+    all_same_date = len(unique_dates) == 1
+
+    if all_same_date:
+        # 同日不同時段 → 日期由模板帶，時段合併一行
+        period_data = [
+            {"period_s": o["period_s"], "actual_period": o["actual_period"], "person": o["person"]}
+            for o in orders_info
+        ]
+        combined_period = _build_combined_period_display(period_data)
+        multi_date = False
+
+    else:
+        # 不同日期、不同時段 → 每行各自列日期＋時段
+        period_lines = []
+        for o in orders_info:
+            d = o["service_date"].replace("-", "/")
+            p_raw = str(o["period_s"] or "").replace(" ", "")
+            p_actual = str(o["actual_period"] or "").replace(" ", "")
+            p_person = str(o["person"] or "")
+            p_str = _format_period_display(p_raw, p_person, display_override=p_actual)
+            period_lines.append(f"{d} {p_str}")
+        combined_period = "\n".join(period_lines)
+        multi_date = True
+
+    # ── 金額：A＋B＝總計 ──────────────────────────────────────────────
+    amount_parts = []
+    total_amount = 0
+    for o in orders_info:
+        try:
+            v = int(str(o["service_amount"] or "0").replace(",", ""))
+            amount_parts.append(str(v))
+            total_amount += v
+        except Exception:
+            pass
+    if len(amount_parts) > 1:
+        amount_display = "＋".join(amount_parts) + "＝" + str(total_amount)
+    else:
+        amount_display = str(total_amount) if total_amount else ""
+
+    # ── 車馬費加總 ────────────────────────────────────────────────────
+    total_fare = 0
+    for o in orders_info:
+        try:
+            total_fare += int(str(o["fare"] or "0").replace(",", ""))
+        except Exception:
+            pass
+
+    first = orders_info[0]
+    result = {
+        "order_no": first["order_no"],
+        "all_order_nos": order_nos,
+        "address": first["address"],
+        "date": first["service_date"],
+        "period": first["period_s"],
+        "period_s": first["period_s"],
+        "actual_period": first["actual_period"],
+        "combined_period": combined_period,
+        "multi_date": multi_date,
+        "person": first["person"],
+        "service_amount": amount_display,
+        "price_with_tax": str(total_amount),
+        "fare": str(total_fare) if total_fare else "0",
+        "payway": first["payway"],
+        "region": first["region"],
+        "env_name": env_name,
+        "session": session,
+        "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
+    }
+    return result, build_line_message(result)
+
+
+def build_line_message_from_order_no(
+    env_name,
+    backend_email,
+    backend_password,
+    order_no,
+    fallback_region="台北",
+):
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    block = _fetch_purchase_block_for_order_no(session, order_no)
+    lines = block.get("lines", [])
+    joined = "\n".join(lines)
+
+    service_date, service_time = _parse_service_date_time_loose(joined)
+    # v7.4: 若有「簡訊實際服務時間」，優先用於 LINE 訊息顯示
+    actual_time = _extract_actual_service_time(joined)
+    # v7.3: 從訂單區塊抓人數；若文字中無「X人Y小時」，改從服務人員名單數人頭
+    person_extracted, _ = _extract_person_hour_line(joined)
+    if not person_extracted:
+        person_extracted = _count_staff_from_lines(lines)
+    address = _extract_address_line(lines)
+    fare = _extract_fare_line(joined) or "0"
+    payway = _extract_payway_line(joined)
+    region = get_region_by_address(address, ACCOUNTS) or fallback_region
+    service_amount = _service_amount_from_block(joined, fare)
+
+    if not service_date or not service_time:
+        raise Exception(f"訂單 {order_no} 缺少服務日期或時段，無法產生通知")
+    if not address:
+        raise Exception(f"訂單 {order_no} 缺少服務地址，無法產生通知")
+    if not payway:
+        raise Exception(f"訂單 {order_no} 無法判斷付款方式（信用卡/ATM/儲值金），請至後台『訂單管理』確認後手動處理，不要使用本功能猜測。")
+    if payway != "儲值金" and not service_amount:
+        raise Exception(f"訂單 {order_no} 缺少服務金額，無法產生通知")
+
+    result = {
+        "order_no": block["order_no"],
+        "all_order_nos": [block["order_no"]],
+        "address": address,
+        "date": service_date,
+        "period": service_time,
+        "period_s": service_time,
+        "actual_period": actual_time,
+        "combined_period": "",
+        "person": person_extracted,
+        "service_amount": service_amount,
+        "price_with_tax": service_amount,
+        "fare": fare,
+        "payway": payway,
+        "region": region,
+        "env_name": env_name,
+        "session": session,
+        "source_url": f"{base_url}/purchase?orderNo={block['order_no']}",
+    }
+    return result, build_line_message(result)
+
+
+def quick_check_available_slots(
+    env_name,
+    payway,
+    lookup_result,
+    address,
+    clean_type_id,
+    date_s,
+    hour,
+    person="2",
+    periods=None,
+    period_hours=None,
+):
+    """
+    用目前單筆建單表單資料向後台查班表，但不建立訂單。
+    回傳每個時段是否有班表與可解析到的服務人員。
+    """
+    base_url = _configure_environment(env_name)
+    session = lookup_result["session"]
+    token = _get_booking_token_for_payway(session, base_url, payway)
+    member_payload = lookup_result["member_payload"]
+
+    if not member_payload:
+        raise Exception("此電話查無會員資料，請先查詢會員")
+
+    member = member_payload.get("member", {})
+    best_addr = pick_best_address_info(member_payload, address)
+    if not best_addr:
+        raise Exception(f"找不到對應地址資料：{address}")
+
+    selected_address = str(best_addr.get("address") or address).strip()
+    geo_lat, geo_lng = geocode_address(selected_address)
+    if geo_lat and geo_lng:
+        best_addr["lat"] = geo_lat
+        best_addr["lng"] = geo_lng
+
+    addr_check = check_contain(
+        session,
+        member.get("member_id", ""),
+        selected_address,
+        best_addr.get("lat", ""),
+        best_addr.get("lng", ""),
+        token,
+        clean_type_id,
+    )
+    if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
+        addr_check = check_contain(
+            session,
+            member.get("member_id", ""),
+            selected_address,
+            best_addr.get("lat", ""),
+            best_addr.get("lng", ""),
+            lookup_result["token"],
+            clean_type_id,
+        )
+    if not addr_check:
+        raise Exception(f"查詢地址/地區失敗：{selected_address}")
+
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    if area_info:
+        best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
+        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
+        best_addr["country_id"] = area_info.get("country_id", best_addr.get("country_id"))
+
+    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
+
+    def pick(key, default=""):
+        value = old_purchase.get(key)
+        return value if value not in (None, "") else default
+
+    base_data = {
+        "clean_type_id": clean_type_id,
+        "phone": lookup_result.get("phone", ""),
+        "name": str(member.get("name") or "").strip(),
+        "email": str(member.get("email") or "").strip(),
+        "tel": str(member.get("tel") or lookup_result.get("phone", "")),
+        "line": str(member.get("line") or ""),
+        "fbName": str(member.get("fb_name") or ""),
+        "fb": str(member.get("fb") or ""),
+        "memoProcess": str(member.get("memo_process") or ""),
+        "memoFinance": str(member.get("memo_finance") or ""),
+        "addressId": str(best_addr.get("addressId") or ""),
+        "country_id": str(best_addr.get("country_id") or pick("country_id", "12")),
+        "address": selected_address,
+        "ping": str(pick("ping", "4")),
+        "room": str(pick("room", "0")),
+        "bathroom": str(pick("bathroom", "0")),
+        "balcony": str(pick("balcony", "0")),
+        "livingroom": str(pick("livingroom", "0")),
+        "kitchen": str(pick("kitchen", "0")),
+        "window": str(pick("window", "")),
+        "shutter": str(pick("shutter", "")),
+        "clothes": str(pick("clothes", "0")),
+        "dyson": str(pick("dyson", "0")),
+        "refrigerator": str(pick("refrigerator", "0")),
+        "disinfection": str(pick("disinfection", "0")),
+        "go_abord": str(pick("go_abord", "0")),
+        "home_move": str(pick("home_move", "0")),
+        "storage": str(pick("storage", "0")),
+        "cabinet": str(pick("cabinet", "0")),
+        "quintuple": str(pick("quintuple", "0")),
+        "hour": str(int(float(hour))),
+        "price": "",
+        "price_vvip": "",
+        "person": str(person),
+        "date_s": date_s,
+        "period_s": "",
+        "period": "",
+        "cycle": "1",
+        "fare": "",
+        "memo": "",
+        "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
+        "discount_code": "",
+        "payway": PAYWAY_MAP.get(payway, "2"),
+        "invoice_type": "2",
+        "carrier_type_id": "1",
+        "carrier_info": str(member.get("email") or ""),
+        "company_title": "",
+        "company_no": "",
+        "donate_code": "8585",
+        "is_backend": "477",
+        "member_id": str(member.get("member_id") or ""),
+        "company_id": str(best_addr.get("company_id") or pick("company_id", "1")),
+        "area_id": str(best_addr.get("area_id") or pick("area_id", "25")),
+        "lat": str(best_addr.get("lat") or pick("lat", "")),
+        "lng": str(best_addr.get("lng") or pick("lng", "")),
+    }
+
+    rows = []
+    for period in periods or []:
+        slot = f"{date_s}_{period}"
+        data = base_data.copy()
+        data["period_s"] = period
+        data["hour"] = str(int(float((period_hours or {}).get(period, hour))))
+        calc_result = calculate_hour(session, data, token)
+        if not calc_result:
+            rows.append({
+                "date": date_s,
+                "period": period,
+                "available": False,
+                "staff": "",
+                "error": "計算時數失敗",
+            })
+            continue
+        calc_fields = extract_calc_fields(calc_result, fallback_hours=data["hour"], fallback_fare="0")
+        data["price"] = str(calc_fields.get("price") or "0")
+        data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
+        data["fare"] = str(calc_fields.get("fare") or "0")
+        raw_section = get_section_raw(session, data, token, slot)
+        available = slot_exists_in_section_response(raw_section, slot)
+        cleaners = extract_cleaners_from_section_response(raw_section, slot) if available else []
+        rows.append({
+            "date": date_s,
+            "period": period,
+            "available": available,
+            "staff": format_staff_from_cleaners(cleaners, people=person) if available else "",
+        })
+    return rows
+
+
+def _is_paid_order_text(joined_text, trusted_paid_filter=False):
+    if "已取消" in joined_text or "已退款" in joined_text:
+        return False
+    if trusted_paid_filter:
+        return True
+    compact = re.sub(r"\s+", "", str(joined_text or ""))
+    if "待付款" in compact or "未付款" in compact:
+        return False
+    if "已付款" in compact:
+        return True
+    if "儲值金" in compact and (
+        _extract_total_amount_line(joined_text) == "0"
+        or "扣儲值金" in compact
+        or "儲值金扣款" in compact
+    ):
+        return True
+    if re.search(r"付款.{0,12}(完成|成功)", compact):
+        return True
+    return False
+
+
+def _extract_invoice_line(joined_text):
+    """從訂單區塊文字解析發票顯示文字（二聯式/三聯式/捐贈發票那一行），純文字顯示用。"""
+    m = re.search(r"((?:二聯式|三聯式|捐贈發票)[：:][^\n]*)", joined_text)
+    return m.group(1).strip() if m else ""
+
+
+CLEAN_TYPE_LABELS = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除"]
+
+
+def _extract_clean_type_line(joined_text):
+    """從訂單區塊文字解析服務類別（居家清潔/辦公室清潔/裝修細清/大掃除）。"""
+    for label in CLEAN_TYPE_LABELS:
+        if label in joined_text:
+            return label
+    return ""
+
+
+def _extract_label_value(lines, label, stop_labels):
+    """
+    抓「標籤」獨立一行、值接在後面（可能空白）的欄位，例如客服備註/財務備註。
+    抓不到或值為空白都回傳空字串。
+    """
+    try:
+        idx = lines.index(label)
+    except ValueError:
+        return ""
+    value_lines = []
+    for line in lines[idx + 1:]:
+        if line in stop_labels or line in CLEAN_TYPE_LABELS:
+            break
+        value_lines.append(line)
+    return " ".join(value_lines).strip()
+
+
+def get_customer_paid_orders(session, phone, known_addresses=None, name=""):
+    """
+    抓這支電話「所有已付款」訂單，不限地址、不限服務類別、不限付款方式。
+    由新到舊排序。
+    """
+    known_addresses = known_addresses or []
+    blocks = _fetch_purchase_blocks_for_phone(
+        session,
+        phone,
+        name=name,
+        purchase_status=PURCHASE_STATUS_PAID,
+    )
+    trusted_paid_filter = (
+        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
     )
 
+    results = []
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
 
-def copy_button(label, text, key):
-    payload = json.dumps(text, ensure_ascii=False)
-    label_payload = json.dumps(label, ensure_ascii=False)
-    components.html(
-        f"""
-        <button id="{key}" style="
-            width: 100%;
-            padding: 0.65rem 1rem;
-            border: 0;
-            border-radius: 10px;
-            background: #F5C518;
-            color: #1C1C1E;
-            font-size: 15px;
-            font-weight: 700;
-            cursor: pointer;
-        ">{html.escape(label)}</button>
-        <script>
-        const btn = document.getElementById({json.dumps(key)});
-        const text = {payload};
-        const label = {label_payload};
-        btn.addEventListener("click", async () => {{
-            try {{
-                await navigator.clipboard.writeText(text);
-                btn.textContent = "已複製";
-            }} catch (err) {{
-                const ta = document.createElement("textarea");
-                ta.value = text;
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand("copy");
-                document.body.removeChild(ta);
-                btn.textContent = "已複製";
-            }}
-            setTimeout(() => {{ btn.textContent = label; }}, 1600);
-        }});
-        </script>
-        """,
-        height=54,
+        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
+            continue
+
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        if not service_date:
+            continue
+
+        joined_norm = normalize_addr_for_match(joined)
+        matched_addr = ""
+        for addr in known_addresses:
+            if addr and normalize_addr_for_match(addr) in joined_norm:
+                matched_addr = addr
+                break
+        person, hour = _extract_person_hour_line(joined)
+        payway = _extract_payway_line(joined)
+        invoice_text = "" if payway == "儲值金" else _extract_invoice_line(joined)
+
+        results.append({
+            "order_no": block["order_no"],
+            "date": service_date,
+            "time": service_time,
+            "address": matched_addr,
+            "clean_type": _extract_clean_type_line(joined),
+            "staff": _extract_staff_line(lines),
+            "payway": payway,
+            "invoice_text": invoice_text,
+            "service_notice": _extract_label_value(lines, "客服備註", ["財務備註", "客人備註"]),
+            "person": person,
+            "hour": hour,
+            "total_amount": _extract_total_amount_line(joined),
+            "fare": _extract_fare_line(joined),
+        })
+
+    results.sort(key=lambda x: (x["date"], x.get("time", "")), reverse=True)
+    return results
+
+
+def _order_person_hour(member_payload, order):
+    person, hour = _match_person_hour(member_payload, order.get("order_no", ""), order.get("address", ""))
+    return person or order.get("person", ""), hour or order.get("hour", "")
+
+
+def _match_person_hour(member_payload, order_no, address):
+    """
+    人數/時數訂單列表頁面本身不會顯示，要去會員 JSON
+    （lastPurchase / 該地址的 purchase 物件）配對 order_no 才抓得到。
+    """
+    if not isinstance(member_payload, dict):
+        return "", ""
+
+    last_purchase = member_payload.get("lastPurchase", {}) or {}
+    member = member_payload.get("member", {}) or {}
+    addr_list = member.get("memberAddressList", []) or []
+
+    candidates = []
+    if last_purchase:
+        candidates.append(last_purchase)
+
+    target_norm = normalize_addr_for_match(address) if address else ""
+    for item in addr_list:
+        if target_norm and normalize_addr_for_match(item.get("address", "")) == target_norm:
+            item_purchase = item.get("purchase", {})
+            if isinstance(item_purchase, dict) and item_purchase:
+                candidates.append(item_purchase)
+
+    for c in candidates:
+        if str(c.get("order_no", "")).strip() == str(order_no).strip():
+            return c.get("person", ""), c.get("hour", "")
+
+    return "", ""
+
+
+def get_last_paid_per_address(session, phone, member_payload, known_addresses, within_days=365):
+    """
+    客人有多個地址時，每個地址各自找「近一年內」最近一次已付款服務。
+    """
+    cutoff = date.today() - timedelta(days=within_days)
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
+
+    by_address = {}
+    for o in paid_orders:
+        addr = o.get("address", "")
+        if not addr:
+            continue
+        if addr in by_address:
+            continue
+        try:
+            d = datetime.strptime(o["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if d > date.today():
+            continue
+        if d < cutoff:
+            continue
+        by_address[addr] = o
+
+    result = {}
+    for addr in known_addresses:
+        order = by_address.get(addr)
+        if not order:
+            result[addr] = None
+            continue
+        person, hour = _order_person_hour(member_payload, order)
+        result[addr] = {
+            "order_no": order["order_no"],
+            "date": order["date"],
+            "time": order["time"],
+            "clean_type": order["clean_type"],
+            "staff": order["staff"],
+            "payway": order["payway"],
+            "invoice_text": order["invoice_text"],
+            "service_notice": order["service_notice"],
+            "person": person,
+            "hour": hour,
+            "fare": order.get("fare", ""),
+        }
+    return result
+
+
+def get_last_paid_summary(session, phone, member_payload, known_addresses):
+    """
+    取得「這支電話」全部地址、全部服務類別中，最近一次已付款服務的完整摘要。
+    """
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
+    paid_orders = [
+        o for o in paid_orders
+        if _date_not_after_today(o.get("date", ""))
+    ]
+    if not paid_orders:
+        return None
+
+    latest = paid_orders[0]
+    same_date_orders = []
+    for order in paid_orders:
+        if order["date"] != latest["date"]:
+            continue
+        person, hour = _order_person_hour(member_payload, order)
+        enriched = dict(order)
+        enriched["person"] = person
+        enriched["hour"] = hour
+        same_date_orders.append(enriched)
+
+    person, hour = _order_person_hour(member_payload, latest)
+
+    return {
+        "order_no": latest["order_no"],
+        "date": latest["date"],
+        "time": latest["time"],
+        "address": latest["address"],
+        "clean_type": latest["clean_type"],
+        "staff": latest["staff"],
+        "payway": latest["payway"],
+        "invoice_text": latest["invoice_text"],
+        "service_notice": latest["service_notice"],
+        "person": person,
+        "hour": hour,
+        "fare": latest.get("fare", ""),
+        "same_date_orders": same_date_orders,
+    }
+
+
+def get_unserved_paid_orders(session, phone, member_payload, known_addresses, today_value=None):
+    """
+    「已付款但服務日期還沒到」的訂單清單（排除已取消）。
+    """
+    today_value = today_value or date.today()
+    name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
+    blocks = _fetch_purchase_blocks_for_phone(
+        session,
+        phone,
+        name=name,
+        purchase_status=PURCHASE_STATUS_PAID,
+    )
+    trusted_paid_filter = (
+        get_last_purchase_fetch_debug().get("effective_purchase_status_filter") == PURCHASE_STATUS_PAID
     )
 
+    upcoming = []
+    for block in blocks:
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
 
-def step(num, title):
-    st.markdown(
-        f'<div class="step-pill"><span class="step-num">{num}</span>{title}</div>',
-        unsafe_allow_html=True
-    )
+        if not _is_paid_order_text(joined, trusted_paid_filter=trusted_paid_filter):
+            continue
 
-
-def info_panel(title, bullets):
-    items = "".join(f"<li>{html.escape(str(item))}</li>" for item in bullets)
-    st.markdown(
-        f'<div class="hint-box"><b>{html.escape(str(title))}</b><ul style="margin:0.45rem 0 0 1.1rem; padding:0;">{items}</ul></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def parse_row_input(row_text: str):
-    if not row_text or not row_text.strip():
-        raise ValueError("請輸入列號，例如：2,3,5-7")
-
-    rows = set()
-
-    for part in [p.strip() for p in row_text.split(",") if p.strip()]:
-        if "-" in part:
-            s, e = part.split("-", 1)
-            s, e = int(s.strip()), int(e.strip())
-
-            if s <= 0 or e <= 0:
-                raise ValueError("列號必須大於 0")
-            if s > e:
-                raise ValueError(f"區間錯誤：{part}")
-
-            rows.update(range(s, e + 1))
-        else:
-            n = int(part)
-            if n <= 0:
-                raise ValueError("列號必須大於 0")
-            rows.add(n)
-
-    return sorted(rows)
-
-
-def format_log_message(msg):
-    text = str(msg)
-
-    text = text.replace("\\n", "\n")
-    text = text.replace("目前環境：", "\n目前環境：")
-    text = text.replace("BASE_URL：", "\nBASE_URL：")
-    text = text.replace("執行區域：", "\n執行區域：")
-    text = text.replace("執行工作表：", "\n執行工作表：")
-    text = text.replace("執行列範圍：", "\n執行列範圍：")
-    text = text.replace("處理第", "\n處理第")
-    text = text.replace("已回填 Google Sheet。", "\n已回填 Google Sheet。")
-
-    if text.startswith("▶"):
-        text = "\n" + text
-
-    return text.strip()
-
-
-st.markdown("""
-<div class="hero">
-  <div class="hero-emoji">🧹</div>
-  <div>
-    <div class="hero-title">服務訂單系統</div>
-    <div class="hero-sub">支援批次建單、舊客快速建單、新客資料拆解、LINE 通知、確認信與 Google 日曆同步。</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-step("1", "登入與環境設定")
-
-col_e, col_p, col_env = st.columns([3.2, 3.2, 1.2])
-with col_e:
-    backend_email = st.text_input("後台帳號")
-with col_p:
-    backend_password = st.text_input("後台密碼", type="password")
-with col_env:
-    env = st.selectbox("環境", ["prod", "dev"], index=0)
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-step("2", "功能選單")
-info_panel(
-    "功能說明",
-    [
-        "批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步 Google 日曆。",
-        "舊客快速建單：用電話查會員，帶入歷史已付款服務資料後建單；需求搜尋整合在此流程內。",
-        "新客資料拆解：貼上客人提供的制式文字，系統拆成欄位供客服修改與複製，不直接送單。",
-        "LINE 通知產生器：用已成立訂單編號補產生通知訊息，支援多筆同時產生。",
-    ],
-)
-mode = st.radio(
-    "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器"],
-    horizontal=True,
-)
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-
-# =========================================================
-# 模式一：批次建單（Google Sheet）
-# =========================================================
-if mode == "批次建單（Google Sheet）":
-
-    step("3", "批次建單")
-    info_panel(
-        "功能說明",
-        [
-            "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
-            "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        ],
-    )
-    info_panel(
-        "使用說明",
-        [
-            "先選擇執行區域與工作表名稱。",
-            "輸入要執行的列號，例如 2、2,3,5 或 5-10。",
-            "勾選要執行的項目後按開始執行。",
-        ],
-    )
-
-    step("4", "執行設定")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        region = st.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
-    with c2:
-        sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604")
-    with c3:
-        row_input = st.text_input("執行列號", value="", placeholder="例：2,3,5-7")
-
-    st.markdown(
-        '<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code></div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-
-    step("3", "執行項目")
-
-    default_actions = (
-        ["建單", "寄確認信", "改 Google 日曆"]
-        if env == "prod"
-        else ["建單"]
-    )
-
-    selected_actions = st.multiselect(
-        "執行項目",
-        options=["建單", "寄確認信", "改 Google 日曆"],
-        default=default_actions,
-        label_visibility="collapsed",
-    )
-
-    st.markdown(
-        '<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-
-    run_clicked = st.button("🚀  開始執行", use_container_width=True)
-
-    with st.expander("📄  執行過程", expanded=True):
-        log_box = st.empty()
-        log_box.code("尚未執行")
-
-    result_container = st.container()
-
-    if run_clicked:
-        if not backend_email.strip():
-            st.error("請輸入後台帳號")
-            st.stop()
-        if not backend_password.strip():
-            st.error("請輸入後台密碼")
-            st.stop()
-        if not sheet_name.strip():
-            st.error("請輸入工作表名稱")
-            st.stop()
-        if not selected_actions:
-            st.error("請至少選擇一個執行項目")
-            st.stop()
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        if not service_date:
+            continue
 
         try:
-            target_rows = parse_row_input(row_input)
-        except Exception as e:
-            st.error(f"列號格式錯誤：{e}")
-            st.stop()
+            d = datetime.strptime(service_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
 
-        logs = []
+        if d < today_value:
+            continue
 
-        def ui_log(msg):
-            logs.append(format_log_message(msg))
-            display_text = "\n\n".join(logs[-120:])
-            log_box.code(display_text)
+        joined_norm = normalize_addr_for_match(joined)
+        matched_addr = ""
+        for addr in known_addresses or []:
+            if addr and normalize_addr_for_match(addr) in joined_norm:
+                matched_addr = addr
+                break
 
-        total_success = 0
-        total_fail = 0
-        total_processed = 0
+        payway = _extract_payway_line(joined)
+        parsed_person, parsed_hour = _extract_person_hour_line(joined)
+        person, hour = _match_person_hour(member_payload, block["order_no"], matched_addr)
+        person = person or parsed_person
+        hour = hour or parsed_hour
 
-        with st.spinner("執行中，請稍候…"):
-            for row_no in target_rows:
-                ui_log(f"▶ 開始執行第 {row_no} 列…")
+        upcoming.append({
+            "order_no": block["order_no"],
+            "date": service_date,
+            "time": service_time,
+            "address": matched_addr,
+            "clean_type": _extract_clean_type_line(joined),
+            "staff": _extract_staff_line(lines),
+            "payway": payway,
+            "invoice_text": "" if payway == "儲值金" else _extract_invoice_line(joined),
+            "person": person,
+            "hour": hour,
+            "fare": _extract_fare_line(joined),
+        })
 
-                try:
-                    result = run_process_web(
-                        env_name=env,
-                        region=region,
-                        backend_email=backend_email.strip(),
-                        backend_password=backend_password.strip(),
-                        sheet_name=sheet_name.strip(),
-                        start_row=row_no,
-                        end_row=row_no,
-                        selected_actions=selected_actions,
-                        logger=ui_log,
-                    )
-
-                    if isinstance(result, dict):
-                        total_success += result.get("success_count", 0)
-                        total_fail += result.get("fail_count", 0)
-                        total_processed += result.get("total_processed", 0)
-
-                except Exception as e:
-                    total_fail += 1
-                    ui_log(f"❌ 第 {row_no} 列失敗：{e}")
-
-        ui_log("===== 執行完成 =====")
-
-        with result_container:
-            st.markdown("<hr>", unsafe_allow_html=True)
-            step("4", "執行結果")
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("執行筆數", total_processed)
-            c2.metric("成功", total_success)
-            c3.metric("失敗", total_fail)
-
-            if total_fail == 0 and total_processed > 0:
-                st.success(f"✅ 全部完成，共處理 **{total_processed}** 筆，成功 **{total_success}** 筆。")
-            elif total_fail > 0:
-                st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
-            else:
-                st.info("執行完成，無資料被處理。")
+    upcoming.sort(key=lambda x: x["date"])
+    return upcoming
 
 
-# =========================================================
-# 功能：單筆服務訂單
-# =========================================================
-else:
-    single_feature = mode
-    step("3", single_feature)
+def quick_create_order(
+    env_name,
+    payway,
+    region,
+    lookup_result,
+    address,
+    clean_type_id,
+    date_s,
+    period_s,
+    hour,
+    person="2",
+    fallback_fare="0",
+):
+    """
+    建立單筆訂單。流程完全比照人工在後台操作：
+    查地址 → 算時數 → 查班表 → 送出 → 抓訂單編號 → 抓服務人員/狀態。
+    """
+    base_url = _configure_environment(env_name)
 
-    # -----------------------------------------------------
-    # LINE 通知產生器（v7.3：多筆、移除區域、加 N-J Memo）
-    # -----------------------------------------------------
-    if single_feature == "LINE 通知產生器":
-        col_left, col_right = st.columns([3, 1])
+    session = lookup_result["session"]
+    token = _get_booking_token_for_payway(session, base_url, payway)
+    member_payload = lookup_result["member_payload"]
+    phone = lookup_result["phone"]
+    member_name = (member_payload.get("member", {}) or {}).get("name", "") if member_payload else ""
 
-        with col_left:
-            info_panel(
-                "使用說明",
-                [
-                    "輸入已成立訂單編號，每行一個，可一次輸入多筆。",
-                    "系統讀取訂單日期、地址、付款方式與金額，區域由地址自動判斷。",
-                ],
-            )
-            line_order_nos_input = st.text_area(
-                "訂單編號（每行一個）",
-                value="",
-                height=120,
-                placeholder="LC00211537\nLC00211538",
-                key="line_order_nos",
-            )
-            if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
-                if not backend_email.strip() or not backend_password.strip():
-                    st.error("請先輸入後台帳號密碼")
-                else:
-                    # 每行 = 一則 LINE 訊息；同行用 , 分隔 = 合併成一則
-                    raw_lines = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
-                    order_groups = []
-                    for line in raw_lines:
-                        nos = [n.strip() for n in line.split(",") if n.strip()]
-                        if nos:
-                            order_groups.append(nos)
+    if not member_payload:
+        raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
 
-                    if not order_groups:
-                        st.error("請輸入至少一個訂單編號")
-                    else:
-                        # 先清空舊結果與相關 widget 快取，避免殘留舊值
-                        st.session_state.line_from_order_nos_results = []
-                        for _k in list(st.session_state.keys()):
-                            if _k.startswith("line_text_") or _k.startswith("nj_memo_"):
-                                del st.session_state[_k]
-                        results_list = []
-                        for nos in order_groups:
-                            label = "、".join(nos)
-                            try:
-                                with st.spinner(f"查詢訂單 {label}…"):
-                                    line_result, line_text = build_combined_line_message_from_order_nos(
-                                        env_name=env,
-                                        backend_email=backend_email.strip(),
-                                        backend_password=backend_password.strip(),
-                                        order_nos=nos,
-                                    )
-                                # session 物件不存入 session_state（避免序列化問題）
-                                safe_result = {k: v for k, v in line_result.items() if k != "session"}
-                                results_list.append({
-                                    "order_no": label,
-                                    "result": safe_result,
-                                    "text": line_text,
-                                    "error": None,
-                                })
-                            except Exception as e:
-                                results_list.append({
-                                    "order_no": label,
-                                    "result": None,
-                                    "text": "",
-                                    "error": str(e),
-                                })
-                        st.session_state.line_from_order_nos_results = results_list
-                        st.rerun()
+    member = member_payload.get("member", {})
+    best_addr = pick_best_address_info(member_payload, address)
+    if not best_addr:
+        raise Exception(f"找不到對應地址資料：{address}（地址需與會員留存地址一致，或請手動輸入完整地址重新比對）")
 
-        with col_right:
-            st.markdown('<div class="sec-label">N-J Memo</div>', unsafe_allow_html=True)
-            st.text_area(
-                "N-J Memo",
-                NJ_MEMO,
-                height=220,
-                key="nj_memo_fixed",
-                label_visibility="collapsed",
-            )
-            copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-fixed")
+    selected_address = str(best_addr.get("address") or address).strip()
 
-        results_list = st.session_state.get("line_from_order_nos_results", [])
-        for idx, item in enumerate(results_list):
-            if item["error"]:
-                st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
-                continue
+    geo_lat, geo_lng = geocode_address(selected_address)
+    if geo_lat and geo_lng:
+        best_addr["lat"] = geo_lat
+        best_addr["lng"] = geo_lng
 
-            line_result = item["result"]
-            line_text = item["text"]
+    addr_check = check_contain(
+        session,
+        member.get("member_id", ""),
+        selected_address,
+        best_addr.get("lat", ""),
+        best_addr.get("lng", ""),
+        token,
+        clean_type_id,
+    )
+    if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
+        addr_check = check_contain(
+            session,
+            member.get("member_id", ""),
+            selected_address,
+            best_addr.get("lat", ""),
+            best_addr.get("lng", ""),
+            lookup_result["token"],
+            clean_type_id,
+        )
+    if not addr_check:
+        route = BOOKING_ENDPOINT_MAP.get(payway, "/booking/single")
+        raise Exception(f"查詢地址/地區失敗（{payway}：{route}）：{selected_address}")
 
-            all_nos = line_result.get("all_order_nos") or [line_result.get("order_no")]
-            order_no_display = "、".join(str(n) for n in all_nos if n)
-            is_combined = len(all_nos) > 1
-            is_multi_date = line_result.get("multi_date", False)
-            if is_combined and is_multi_date:
-                combined_note = "　⚠️ 跨日合併單"
-            elif is_combined:
-                combined_note = "　⚠️ 同日合併單"
-            else:
-                combined_note = ""
-            st.caption(
-                f"訂單：{order_no_display}{combined_note}　"
-                f"付款方式：{line_result.get('payway')}　"
-                f"區域：{line_result.get('region')}　"
-                f"金額：{line_result.get('service_amount') or '—'}　"
-                f"車馬費：{line_result.get('fare') or '0'}"
-            )
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    if area_info:
+        best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
+        best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
+        best_addr["country_id"] = area_info.get("country_id", best_addr.get("country_id"))
 
-            st.text_area(
-                f"LINE 訊息（{line_result.get('order_no')}）",
-                line_text,
-                height=380,
-                label_visibility="collapsed",
-            )
-            copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
+    purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
+    fare_from_check = first_nonzero(
+        purchase_info.get("fare") if purchase_info else "",
+        purchase_info.get("car_fare") if purchase_info else "",
+        purchase_info.get("traffic_fee") if purchase_info else "",
+        area_info.get("fare") if area_info else "",
+        area_info.get("car_fare") if area_info else "",
+        area_info.get("traffic_fee") if area_info else "",
+        find_nested_value(addr_check, ["fare", "car_fare", "traffic_fee", "trafficFee", "車馬費"]),
+        best_addr.get("fare", ""),
+        default=str(fallback_fare or "0"),
+    )
+    best_addr["fare"] = fare_from_check
 
-            if idx < len(results_list) - 1:
-                st.markdown("<hr>", unsafe_allow_html=True)
+    invoice_type = str(
+        first_nonzero(
+            purchase_info.get("invoiceType") if purchase_info else "",
+            find_nested_value(addr_check, ["invoiceType", "invoice_type"]),
+            default="2",
+        )
+    )
+    carrier_type_id = str(
+        first_nonzero(
+            purchase_info.get("carrierTypeId") if purchase_info else "",
+            default="1",
+        )
+    )
+    carrier_info = str(
+        purchase_info.get("carrierInfo") if purchase_info and purchase_info.get("carrierInfo") else (member.get("email") or "")
+    )
+    company_title = str(purchase_info.get("companyTitle", "") if purchase_info else "")
+    company_no = str(purchase_info.get("companyNo", "") if purchase_info else "")
+    donate_code = str(purchase_info.get("donateCode", "8585") if purchase_info else "8585")
 
-    # -----------------------------------------------------
-    # 舊客快速建單
-    # -----------------------------------------------------
-    elif single_feature == "舊客快速建單":
-        info_panel("功能說明", ["用電話查詢會員與歷史已付款服務。", "多地址客人會顯示各地址近一年紀錄，請先跟客人確認地址。", "可選已知日期查班表，也可依客人需求搜尋可服務日期。"])
+    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
 
-        q1, q2 = st.columns(2)
-        with q1:
-            q_phone = st.text_input("客人電話", key="old_phone")
-        with q2:
-            q_clean_type = st.selectbox("購買項目", list(CLEAN_TYPE_ID_MAP.keys()), key="old_clean_type")
+    def pick(key, default=""):
+        value = old_purchase.get(key)
+        return value if value not in (None, "") else default
 
-        if st.button("🔍  查詢會員", use_container_width=True, key="old_lookup_btn"):
-            if not backend_email.strip() or not backend_password.strip():
-                st.error("請先輸入後台帳號密碼")
-                st.stop()
-            if not q_phone.strip():
-                st.error("請輸入客人電話")
-                st.stop()
-            try:
-                with st.spinner("查詢中…"):
-                    st.session_state.q_lookup = quick_lookup_member(
-                        env_name=env,
-                        backend_email=backend_email.strip(),
-                        backend_password=backend_password.strip(),
-                        phone=q_phone.strip(),
-                        clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type],
-                    )
-                st.session_state.q_order_result = None
-            except Exception as e:
-                st.error(f"查詢失敗：{e}")
-                st.session_state.q_lookup = None
+    base_data = {
+        "clean_type_id": clean_type_id,
+        "phone": phone,
+        "name": str(member.get("name") or "").strip(),
+        "email": str(member.get("email") or "").strip(),
+        "tel": str(member.get("tel") or phone),
+        "line": str(member.get("line") or ""),
+        "fbName": str(member.get("fb_name") or ""),
+        "fb": str(member.get("fb") or ""),
+        "memoProcess": str(member.get("memo_process") or ""),
+        "memoFinance": str(member.get("memo_finance") or ""),
+        "addressId": str(best_addr.get("addressId") or ""),
+        "country_id": str(best_addr.get("country_id") or pick("country_id", "12")),
+        "address": selected_address,
+        "ping": str(pick("ping", "4")),
+        "room": str(pick("room", "0")),
+        "bathroom": str(pick("bathroom", "0")),
+        "balcony": str(pick("balcony", "0")),
+        "livingroom": str(pick("livingroom", "0")),
+        "kitchen": str(pick("kitchen", "0")),
+        "window": str(pick("window", "")),
+        "shutter": str(pick("shutter", "")),
+        "clothes": str(pick("clothes", "0")),
+        "dyson": str(pick("dyson", "0")),
+        "refrigerator": str(pick("refrigerator", "0")),
+        "disinfection": str(pick("disinfection", "0")),
+        "go_abord": str(pick("go_abord", "0")),
+        "home_move": str(pick("home_move", "0")),
+        "storage": str(pick("storage", "0")),
+        "cabinet": str(pick("cabinet", "0")),
+        "quintuple": str(pick("quintuple", "0")),
+        "hour": str(int(float(hour))),
+        "price": "",
+        "price_vvip": "",
+        "person": str(person),
+        "date_s": date_s,
+        "period_s": period_s,
+        "period": "",
+        "cycle": "1",
+        "fare": "",
+        "memo": "",
+        "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
+        "discount_code": "",
+        "payway": PAYWAY_MAP.get(payway, "2"),
+        "invoice_type": invoice_type,
+        "carrier_type_id": carrier_type_id,
+        "carrier_info": carrier_info,
+        "company_title": company_title,
+        "company_no": company_no,
+        "donate_code": donate_code,
+        "is_backend": "477",
+        "member_id": str(member.get("member_id") or ""),
+        "company_id": str(best_addr.get("company_id") or pick("company_id", "1")),
+        "area_id": str(best_addr.get("area_id") or pick("area_id", "25")),
+        "lat": str(best_addr.get("lat") or pick("lat", "")),
+        "lng": str(best_addr.get("lng") or pick("lng", "")),
+    }
 
-        lookup = st.session_state.get("q_lookup")
-        if lookup is not None:
-            member_payload = lookup.get("member_payload")
-            st.markdown("<hr>", unsafe_allow_html=True)
-            if not member_payload:
-                st.warning("查無此會員。請改用上方『新客資料拆解』功能，直接輸入訂購人資料、服務地址、付款方式與載具資料。")
-            else:
-                member = member_payload.get("member", {})
-                addr_list = member_payload.get("member", {}).get("memberAddressList", [])
-                addr_options = [a.get("address", "") for a in addr_list if a.get("address")]
-                st.markdown(f"**會員姓名：** {member.get('name', '')}　|　**會員電話：** {lookup.get('phone', '')}")
+    calc_result = calculate_hour(session, base_data, token)
+    if not calc_result:
+        raise Exception("計算時數失敗")
 
-                step("3", "舊客服務資訊")
-                info_panel("使用說明", ["先確認服務地址。", "確認服務類別、付款方式與區域。", "依客人狀況選擇『已知日期』或『依需求搜尋』。"])
+    calc_fields = extract_calc_fields(
+        calc_result,
+        fallback_hours=base_data["hour"],
+        fallback_fare=best_addr.get("fare", "0"),
+    )
+    base_data["price"] = str(calc_fields.get("price") or "0")
+    base_data["price_vvip"] = str(calc_fields.get("price_vvip") or "0")
+    base_data["fare"] = first_nonzero(calc_fields.get("fare"), best_addr.get("fare"), default="0")
 
-                if not addr_options:
-                    st.error("此會員沒有留存地址，請改用新客建單或先至後台補會員地址。")
-                else:
-                    last_summary = get_last_paid_summary(lookup["session"], lookup["phone"], member_payload, addr_options)
-                    default_addr_index = addr_options.index(last_summary["address"]) if last_summary and last_summary.get("address") in addr_options else 0
-                    q_address = st.selectbox("服務地址", addr_options, index=default_addr_index, key="old_address")
+    if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
+        raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
 
-                    if len(addr_options) > 1:
-                        st.caption(f"⚠️ 此客人留存 {len(addr_options)} 個地址，請務必跟客人確認本次地點是否正確。")
-                        per_addr_summary = get_last_paid_per_address(lookup["session"], lookup["phone"], member_payload, addr_options, within_days=365)
-                        addr_rows = []
-                        for addr in addr_options:
-                            info = per_addr_summary.get(addr)
-                            if not info:
-                                addr_rows.append(f"・{addr}　——　近一年內查無已付款服務紀錄")
-                            else:
-                                ph_text = f"{info['person']}人{info['hour']}小時" if (info["person"] or info["hour"]) else "未知"
-                                payment_text = payment_invoice_display(info.get("payway"), info.get("invoice_text"))
-                                addr_rows.append(f"・{addr}　——　{info['date']} {info['time']}　類別：{info['clean_type'] or '未知'}　人時：{ph_text}　{payment_text}")
-                        st.markdown('<div class="hint-box">📍 <b>各地址近一年內最近一次已付款服務</b>：<br>' + "<br>".join(addr_rows) + '</div>', unsafe_allow_html=True)
+    slot = f"{date_s}_{period_s}"
+    raw_section = get_section_raw(session, base_data, token, slot)
+    if not slot_exists_in_section_response(raw_section, slot):
+        raise Exception(f"該時段無班表：{slot}")
 
-                    default_clean_type = last_summary["clean_type"] if last_summary and last_summary.get("clean_type") in CLEAN_TYPE_ID_MAP else "居家清潔"
-                    default_person = int(last_summary["person"]) if last_summary and str(last_summary.get("person", "")).isdigit() else 2
-                    q_clean_type_confirm = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), index=list(CLEAN_TYPE_ID_MAP.keys()).index(default_clean_type), key="old_clean_confirm")
-                    q_payway = last_summary.get("payway") if last_summary and last_summary.get("payway") else st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"], key="old_payway")
-                    q_region = get_region_by_address(q_address, ACCOUNTS) or "台北"
-                    st.caption(f"建單介面：{booking_route_display(q_payway)[0]}　｜　區域：{q_region}")
+    cleaners = extract_cleaners_from_section_response(raw_section, slot)
+    staff_display = format_staff_from_cleaners(cleaners, people=person)
 
-                    if last_summary:
-                        st.markdown(last_summary_card_html(last_summary), unsafe_allow_html=True)
+    booking_url = _booking_url_for_payway(base_url, payway)
 
-                    upcoming_orders = get_unserved_paid_orders(
-                        lookup["session"],
-                        lookup["phone"],
-                        member_payload,
-                        addr_options,
-                        today_value=date.today(),
-                    )
-                    if upcoming_orders:
-                        st.markdown(
-                            '<div class="hint-box"><b>⚠️ 目前已付款但尚未服務訂單</b><br>'
-                            '請先確認客人是否要異動既有訂單，避免重複建單。</div>',
-                            unsafe_allow_html=True,
-                        )
-                        for idx, order in enumerate(upcoming_orders, start=1):
-                            ph_text = person_hour_display(order.get("person"), order.get("hour"))
-                            payment_text = payment_invoice_display(order.get("payway"), order.get("invoice_text"))
-                            address_text = order.get("address") or "未能對應留存地址，請至後台確認"
-                            staff_text = order.get("staff") or "待確認"
-                            fare_text = f"｜車馬費：{order.get('fare')}" if nonzero_money(order.get("fare")) else ""
-                            st.markdown(
-                                f"""
-                                <div class="history-order">
-                                  <div class="history-order-main">{idx}. {h(order.get('order_no'))}　{h(order.get('date'))} {h(order.get('time'), '')}</div>
-                                  <div class="history-order-meta">
-                                    <div>地址：{h(address_text)}</div>
-                                    <div>類別：{h(order.get('clean_type'))}</div>
-                                    <div>服務人員：{h(staff_text)}</div>
-                                    <div>人時：{h(ph_text)}{h(fare_text, '')}</div>
-                                    <div>{h(payment_text)}</div>
-                                  </div>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
+    before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
 
-                    date_mode = st.radio("日期/班表查詢方式", ["已知日期", "依需求搜尋可服務日期"], horizontal=True, key="old_date_mode")
+    booking_resp = session.post(
+        booking_url,
+        data=_build_booking_submit_data(base_data, token, payway, slot),
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    time.sleep(1)
 
-                    if date_mode == "已知日期":
-                        info_panel("已知日期使用說明", ["客人已指定某一天時使用。", "此模式才需要選服務日期與時段。", "若客人只說平日、週末、不限或幾小時，請改選『依需求搜尋可服務日期』。", "人時 = 人數 × 服務時數；09:00-16:00 為 6 小時，09:00-18:00 為 8 小時。"])
-                        d1, d2, d3, d4 = st.columns(4)
-                        with d1:
-                            q_date = st.date_input("服務日期", value=date.today(), key="old_known_date")
-                        with d2:
-                            q_period = st.selectbox("時段", PERIOD_OPTIONS, key="old_known_period")
-                        with d3:
-                            q_person = st.number_input("人數", min_value=1, max_value=8, value=default_person, key="old_known_person")
-                        with d4:
-                            q_hour = PERIOD_HOUR_MAP.get(q_period, 3)
-                            st.markdown(f'<br><b>{q_hour} 小時</b>（依時段自動帶出）<br><span style="color:#8E8E93;font-size:13px;">人時：{int(q_person) * int(q_hour)}</span>', unsafe_allow_html=True)
+    after_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
+    new_order_nos = after_order_nos - before_order_nos
 
-                        if st.button("🔎 查詢該日班表", use_container_width=True, key="old_check_known"):
-                            try:
-                                with st.spinner("查詢班表中…"):
-                                    rows = quick_check_available_slots(
-                                        env_name=env,
-                                        payway=q_payway,
-                                        lookup_result=lookup,
-                                        address=q_address,
-                                        clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
-                                        date_s=q_date.strftime("%Y-%m-%d"),
-                                        hour=q_hour,
-                                        person=q_person,
-                                        periods=[q_period],
-                                        period_hours=PERIOD_HOUR_MAP,
-                                    )
-                                st.session_state.old_known_slots = rows
-                            except Exception as e:
-                                st.session_state.old_known_slots = []
-                                st.error(f"查詢班表失敗：{e}")
+    display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
 
-                        rows = st.session_state.get("old_known_slots")
-                        if rows:
-                            if any(r.get("available") for r in rows):
-                                for r in rows:
-                                    st.success(f"{r.get('date')} {r.get('period')} 可安排　服務人員：{r.get('staff') or '待確認'}")
-                            else:
-                                st.warning("此日期/時段目前無可安排班表。建議改用『依需求搜尋可服務日期』，讓系統依平日/週末/不限條件往後找可服務日期。")
-
-                        if st.button("🚀 建立訂單", use_container_width=True, key="old_create_known"):
-                            try:
-                                with st.spinner("建單中，請稍候…"):
-                                    result = quick_create_order(
-                                        env_name=env,
-                                        payway=q_payway,
-                                        region=q_region,
-                                        lookup_result=lookup,
-                                        address=q_address,
-                                        clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
-                                        date_s=q_date.strftime("%Y-%m-%d"),
-                                        period_s=q_period,
-                                        hour=q_hour,
-                                        person=q_person,
-                                    )
-                                    ok, mail_msg = send_confirmation(result)
-                                    result["mail_sent"] = ok
-                                    result["mail_msg"] = mail_msg
-                                st.session_state.q_order_result = result
-                            except Exception as e:
-                                st.error(f"建單失敗：{e}")
-
-                    else:
-                        info_panel("依需求搜尋使用說明", ["客人尚未指定日期時使用，例如只說平日、週末或不限。", "此模式先選日期類型與時段偏好，不需要先選單一日期。", "可選平日 / 週末 / 不限，也可選上午 / 下午 / 不限。", "人時 = 人數 × 服務時數；系統會列出等效方案，例如 2人6小時 = 12人時 = 3人4小時。"])
-                        a1, a2, a3, a4 = st.columns(4)
-                        with a1:
-                            day_type = st.selectbox("日期類型", ["平日", "週末", "不限"], key="old_day_type")
-                        with a2:
-                            time_pref = st.selectbox("時段偏好", ["上午", "下午", "不限"], key="old_time_pref")
-                        with a3:
-                            base_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="old_search_person")
-                        with a4:
-                            base_hour = st.number_input("每人時數", min_value=2, max_value=8, value=4, key="old_search_hour")
-                        search_days = st.slider("往後搜尋天數", min_value=7, max_value=60, value=30, step=1, key="old_search_days")
-                        plans = build_equivalent_plans(base_person, base_hour)
-                        total_ph = int(base_person) * int(base_hour)
-                        st.caption(f"人時 = {int(base_person)} 人 × {int(base_hour)} 小時 = {total_ph} 人時")
-                        st.caption("將查詢方案：" + "、".join([f"{p['person']}人{p['hour']}小時" for p in plans]))
-
-                        if st.button("🔎 搜尋可服務日期", use_container_width=True, key="old_search_dates"):
-                            try:
-                                with st.spinner("搜尋可服務日期中…"):
-                                    rows = search_available_service_dates(
-                                        env_name=env,
-                                        payway=q_payway,
-                                        lookup_result=lookup,
-                                        address=q_address,
-                                        clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm],
-                                        start_date=date.today(),
-                                        days=search_days,
-                                        day_type=day_type,
-                                        time_preference=time_pref,
-                                        plans=plans,
-                                        periods=PERIOD_OPTIONS,
-                                        period_hours=PERIOD_HOUR_MAP,
-                                    )
-                                st.session_state.old_search_results = rows
-                            except Exception as e:
-                                st.session_state.old_search_results = []
-                                st.error(f"搜尋失敗：{e}")
-
-                        rows = st.session_state.get("old_search_results")
-                        if rows is not None:
-                            if rows:
-                                st.markdown("**可服務日期搜尋結果**")
-                                for idx, r in enumerate(rows[:20]):
-                                    st.write(f"{idx+1}. 方案：{r['person']}人{r['hour']}小時　{r['date']} {r['period']}　服務人員：{r.get('staff') or '待確認'}")
-                            else:
-                                st.warning("目前依條件搜尋不到可服務日期，請放寬日期類型、時段偏好或延長搜尋天數。")
-
-    # -----------------------------------------------------
-    # 新客資料拆解
-    # -----------------------------------------------------
-    elif single_feature == "新客資料拆解":
-        info_panel(
-            "功能說明",
-            [
-                "此功能不直接建立訂單，避免與後台新客建單流程重複。",
-                "客服貼上客人提供的制式文字後，系統會拆成欄位，方便檢查、修改與複製到後台。",
-                "畫面不預設任何個人姓名、電話、Email、地址或載具資料，避免個資外洩。",
-            ],
+    if not new_order_nos:
+        debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
+        raise Exception(
+            "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在、後台拒絕重複預約，"
+            "或表單缺少必填欄位導致後台驗證沒過）。請至後台『訂單管理』手動確認，不要直接使用畫面上顯示的舊訂單資訊。\n"
+            f"［除錯資訊］回應狀態：{booking_resp.status_code}，回應網址：{booking_resp.url}\n"
+            f"回應片段：{debug_snippet}"
         )
 
-        step("4", "貼上新客制式資料")
-        raw_new_customer_text = st.text_area(
-            "請貼上客人提供的訂購資料",
-            value="",
-            height=220,
-            placeholder="請貼上完整文字，例如：訂購人姓名、電話、Email、服務地址、坪數、付款方式、發票載具、服務需求等",
-            key="new_customer_raw_text",
-        )
+    if len(new_order_nos) == 1:
+        order_no = next(iter(new_order_nos))
+    else:
+        order_no = None
+        for candidate in new_order_nos:
+            meta = fetch_order_meta_by_order_no(session, candidate)
+            if meta.get("服務日期") == date_s and display_period.replace(" ", "") in str(meta.get("服務時間", "")).replace(" ", ""):
+                order_no = candidate
+                break
+        if not order_no:
+            order_no = sorted(new_order_nos)[-1]
 
-        parsed_customer = parse_new_customer_order_text(raw_new_customer_text)
+    meta = fetch_order_meta_by_order_no(session, order_no)
 
-        if st.button("拆解資料", use_container_width=True, key="parse_new_customer_text_btn"):
-            st.session_state.parsed_new_customer = parsed_customer
-            st.session_state.parsed_new_name = parsed_customer.get("name", "")
-            st.session_state.parsed_new_phone = parsed_customer.get("phone", "")
-            st.session_state.parsed_new_email = parsed_customer.get("email", "")
-            st.session_state.parsed_new_address = parsed_customer.get("address", "")
-            st.session_state.parsed_new_ping = parsed_customer.get("ping", "")
-            st.session_state.parsed_new_payway = parsed_customer.get("payway", "")
-            st.session_state.parsed_new_invoice = parsed_customer.get("invoice_type", "")
-            st.session_state.parsed_new_invoice_title = parsed_customer.get("invoice_title", "")
-            st.session_state.parsed_new_tax_id = parsed_customer.get("tax_id", "")
-            st.session_state.parsed_new_carrier = parsed_customer.get("carrier", "")
-            st.session_state.parsed_new_requirement = parsed_customer.get("requirement", "")
-            st.session_state.parsed_new_note = parsed_customer.get("note", "")
-            st.success("已拆解資料，請檢查下方欄位。")
+    price_no_tax = base_data["price"]
+    try:
+        price_with_tax = int(round(float(price_no_tax) * TAX_RATE))
+    except Exception:
+        price_with_tax = price_no_tax
 
-        parsed_customer = st.session_state.get("parsed_new_customer", parsed_customer)
+    return {
+        "order_no": order_no,
+        "address": selected_address,
+        "date": date_s,
+        "period": display_period,
+        "period_s": period_s,            # v7.3: 供 _format_period_display() 用
+        "person": str(person),           # v7.3: 供 _format_period_display() 用
+        "price": price_no_tax,
+        "price_with_tax": price_with_tax,
+        "service_amount": price_with_tax,
+        "fare": base_data["fare"],
+        "payway": payway,
+        "region": region,
+        "staff": meta.get("服務人員") or staff_display,
+        "service_status": meta.get("服務狀態", "未處理"),
+        "env_name": env_name,
+        "session": session,
+    }
 
-        step("5", "拆解後欄位（可修改）")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            parsed_name = st.text_input("訂購人姓名", value=parsed_customer.get("name", ""), key="parsed_new_name")
-        with c2:
-            parsed_phone = st.text_input("訂購人電話", value=parsed_customer.get("phone", ""), key="parsed_new_phone")
-        with c3:
-            parsed_email = st.text_input("訂購人 Email", value=parsed_customer.get("email", ""), key="parsed_new_email")
 
-        parsed_address = st.text_input("服務地址", value=parsed_customer.get("address", ""), key="parsed_new_address")
+def send_confirmation(order_result):
+    """送出後寄確認信，回傳 (是否成功, 訊息)"""
+    session = order_result["session"]
+    order_no = order_result["order_no"]
+    return send_confirmation_mail(session, order_no)
 
-        p1, p2, p3, p4 = st.columns(4)
-        with p1:
-            parsed_ping = st.text_input("室內坪數", value=parsed_customer.get("ping", ""), key="parsed_new_ping")
-        with p2:
-            parsed_payway = st.text_input("付款方式", value=parsed_customer.get("payway", ""), key="parsed_new_payway")
-        with p3:
-            parsed_invoice = st.text_input("發票/載具類型", value=parsed_customer.get("invoice_type", ""), key="parsed_new_invoice")
-        with p4:
-            parsed_carrier = st.text_input("載具號碼", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
 
-        i1, i2 = st.columns(2)
-        with i1:
-            parsed_invoice_title = st.text_input("發票抬頭", value=parsed_customer.get("invoice_title", ""), key="parsed_new_invoice_title")
-        with i2:
-            parsed_tax_id = st.text_input("統一編號", value=parsed_customer.get("tax_id", ""), key="parsed_new_tax_id")
+def build_line_message(order_result):
+    """
+    依訂單的 payway + region 自動挑選對應的 LINE 通知樣板。
+    回傳純文字，方便前端直接複製貼上 LINE。
 
-        parsed_requirement = st.text_input("服務需求", value=parsed_customer.get("requirement", ""), key="parsed_new_requirement")
-        parsed_note = st.text_area("其他備註", value=parsed_customer.get("note", ""), height=100, key="parsed_new_note")
+    金額一律使用含稅金額（price_with_tax）。
+    服務時間格式：HH:MM-HH:MM(X小時[,中間休息1小時])-N人
+    """
+    payway = order_result["payway"]
+    region = order_result["region"]
+    date_disp = order_result["date"].replace("-", "/")
 
-        formatted_text = "\\n".join([
-            f"訂購人姓名：{parsed_name}",
-            f"訂購人電話：{parsed_phone}",
-            f"訂購人Email：{parsed_email}",
-            f"服務地址：{parsed_address}",
-            f"室內坪數：{parsed_ping}",
-            f"付款方式：{parsed_payway}",
-            f"發票/載具：{parsed_invoice}",
-            f"發票抬頭：{parsed_invoice_title}",
-            f"統一編號：{parsed_tax_id}",
-            f"載具號碼：{parsed_carrier}",
-            f"服務需求：{parsed_requirement}",
-            f"其他備註：{parsed_note}",
-        ])
+    # v7.5: 同日多筆時用 combined_period（已含完整人數/時數/休息說明）
+    # v7.4: 單筆時若有 actual_period（簡訊實際服務時間），覆蓋顯示時間
+    # v7.3: 一般單筆用 period_s 查 PERIOD_DISPLAY_INFO 格式化
+    combined_period = str(order_result.get("combined_period", "") or "")
+    if combined_period:
+        period = combined_period
+    else:
+        period_raw = str(
+            order_result.get("period_s") or order_result.get("period", "")
+        ).replace(" ", "")
+        actual_period = str(order_result.get("actual_period", "") or "")
+        person_cnt = str(order_result.get("person", "") or "")
+        period = _format_period_display(period_raw, person_cnt, display_override=actual_period)
 
-        st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
+    price = order_result.get("service_amount") or order_result.get("price_with_tax", order_result.get("price"))
+    fare = order_result["fare"]
+    address = order_result["address"]
+    order_no = order_result["order_no"]
+    # 多日期合併時，combined_period 已含各自日期，不再加 date_disp 前綴
+    multi_date = order_result.get("multi_date", False)
+    if multi_date and combined_period:
+        service_time_line = f"服務時間 :\n{period}"
+    else:
+        service_time_line = f"服務時間 : {date_disp}  {period}"
+    order_last6 = order_no[-6:] if len(order_no) >= 6 else order_no
+    try:
+        has_fare = float(str(fare or "0").replace(",", "")) != 0
+    except Exception:
+        has_fare = bool(str(fare or "").strip())
+    vip_fare_line = f"車馬費：{fare}\n" if has_fare else ""
+    card_fare_line = f"車馬費： {fare}   (服務完後收取)\n" if has_fare else ""
+    taipei_atm_fare_line = f"車馬費：{fare}\n" if has_fare else ""
+    taichung_atm_fare_line = f"\n車馬費:{fare}" if has_fare else ""
 
-    order_result = st.session_state.get("q_order_result")
-    if order_result:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        step("5", "執行結果")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("訂單編號", order_result["order_no"])
-        c2.metric("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
-        c3.metric("車馬費", order_result.get("fare") or "0")
-        c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "失敗")
-        if order_result.get("mail_sent"):
-            st.success("✅ 訂單建立成功，確認信已發送。")
+    common_footer = """**當您完成付款後即表示服務已完成預約，
+預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
+請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+＊若現場溝通時確認無法於服務時間內完成服務需求，會請您排優先順序，以時間內可以完成的區域為主。
+＊窗戶獨立於各區域單獨計算，拆紗窗不拆玻璃，含窗溝及窗框及內側，若外側無法安全站立則以手能擦拭範圍為主。
+＊夏季天氣炎熱，若情況充許請提供電扇或冷氣供專員使用，謝謝。
+＊若超過服務時間，則會以加時費用計算。
+若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。"""
+
+    cancel_policy = """**異動/取消服務注意事項
+凡訂單成立付款後，若異動日期或取消服務異動手續費如下
+ **工作日不含例假日且以上班時間計之，超過 17:30 算下個工作日。
+◎服務日3個工作天前，取消酌收訂單5%手續費。
+◎服務日2-3個工作天內，取消或更改酌收訂單30%手續費。
+◎服務日1個工作天內，取消或更改酌收訂單50%手續費。"""
+
+    if payway == "儲值金":
+        return f"""感謝您預約檸檬家事【居家清潔】服務
+服務時間：{date_disp} {period}
+服務地址：{address}
+
+{vip_fare_line}檸檬家事專員會於現場再溝通服務需求，
+以於系統估算時間內可以完的服務項目為主。
+預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
+請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+
+建議您可以至會員中心》訂單查詢 確認喔
+https://www.lemonclean.com.tw/login
+帳號：email；密碼：手機號碼
+＊即日起本站暫停做防疫調查，為保障客戶及專員安全，若確診請於服務前日主動告知，否則需付異動費喔
+若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。
+
+VIP客戶
+◎異動費
+VIP若取消/異動服務日期，需於服務日前4個工作天上班時間(不含例假日，17:30後算下個工作日)告知。
+若於服務前2-3個工作日告知，則收取每2人1小時異動費200元；
+若於服務前1個工日(含服務當天)告知，則收取每2人1小時異動費300元。"""
+
+    if payway == "信用卡":
+        # 合併單時產生多個付款連結，每筆訂單各一條
+        all_order_nos = order_result.get("all_order_nos") or [order_no]
+        if len(all_order_nos) > 1:
+            link_lines = []
+            for idx, ono in enumerate(all_order_nos, start=1):
+                last6 = ono[-6:] if len(ono) >= 6 else ono
+                link_lines.append(f"訂單{idx}：https://www.lemonclean.com.tw/order/{last6}")
+            payment_links = "\n".join(link_lines)
         else:
-            st.warning(f"確認信發送失敗：{order_result.get('mail_msg', '')}")
-        line_message = build_line_message(order_result)
-        col_msg, col_memo = st.columns([3, 1])
-        with col_msg:
-            st.text_area("LINE 訊息內容", line_message, height=420, label_visibility="collapsed")
-            copy_button("複製 LINE 訊息", line_message, "copy-line-message")
-        with col_memo:
-            st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_order_result")
-            copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-order-result")
+            payment_links = f"https://www.lemonclean.com.tw/order/{order_last6}"
+
+        return f"""感謝您於 檸檬家事 預約【居家清潔】服務！
+{service_time_line}
+服務金額：{price}（含稅）
+{card_fare_line}服務地址：{address}
+※麻煩您於『明天 24:00前』完成付款，為保留他人訂購權利，逾期付款訂單將自動取消
+
+{common_footer}
+
+線上刷卡流程:
+{payment_links}
+登入會員
+帳號：email；密碼：手機號碼
+在訂單點選付款狀態點選『重新付款』即可
+
+{cancel_policy}"""
+
+    if payway == "ATM":
+        if region == "台北":
+            bank_block = """銀行戶名：檸檬專業清潔有限公司
+銀行代碼 台北富邦銀行(012)-松高分行
+銀行帳號 7091-2000-3320"""
+            extra_note = """*發票於付款完成後24小時之內會開立並寄至Email，屆時麻煩查收或是檢查垃圾郵件。
+*匯款完成後再請您提供您的匯款帳號後5碼，以供檸檬家事為您核對帳款。
+"""
+        else:
+            bank_block = """銀行戶名：泳檬有限公司
+銀行代碼 台北富邦銀行(012)-營業部
+銀行帳號 00200102520512"""
+            extra_note = ""
+
+        atm_pay_title = "▲請您依下列匯款帳戶資訊繳費，謝謝！" if region == "台北" else "請您依下列匯款帳戶資訊繳費，謝謝！"
+        extra_note_block = f"\n{extra_note}" if extra_note else ""
+        service_lines = (
+            f"{service_time_line}\n{taipei_atm_fare_line}服務地址：{address}"
+            if region == "台北"
+            else f"{service_time_line}\n服務地址：{address}{taichung_atm_fare_line}"
+        )
+
+        return f"""感謝您於 檸檬家事 預約【居家清潔】服務！
+{service_lines}
+※麻煩您於『明天 24:00前』完成付款，為保留他人訂購權利，逾期付款訂單將自動取消
+
+{common_footer}
+
+{atm_pay_title}
+{bank_block}
+轉帳金額  {price}元（含營業稅）
+
+訂單可以登入『會員中心』查詢確認
+https://www.lemonclean.com.tw/login
+帳號：email；密碼：手機號碼
+{extra_note_block}
+{cancel_policy}"""
+
+    raise Exception(f"未知付款方式: {payway}")
+
+
+# =========================================================
+# 需求搜尋 / 新客建單輔助功能（服務訂單系統 UI 使用）
+# =========================================================
+
+def _is_target_day(d, day_type="不限"):
+    """依平日/週末/不限判斷日期是否符合搜尋條件。"""
+    weekday = d.weekday()
+    if day_type == "平日":
+        return weekday < 5
+    if day_type == "週末":
+        return weekday >= 5
+    return True
+
+
+def _filter_periods_by_preference(periods, time_preference="不限"):
+    """依上午/下午/不限篩選系統時段。"""
+    selected = []
+    for period in periods or []:
+        try:
+            start_hour = int(str(period).split("-", 1)[0].split(":", 1)[0])
+        except Exception:
+            start_hour = 0
+        if time_preference == "上午" and start_hour >= 12:
+            continue
+        if time_preference == "下午" and start_hour < 12:
+            continue
+        selected.append(period)
+    return selected
+
+
+def build_equivalent_plans(person, hour):
+    """
+    產生等效人時方案。
+    人時 = 人數 × 服務時數。
+    """
+    try:
+        base_person = int(person)
+        base_hour = int(float(hour))
+    except Exception:
+        base_person, base_hour = 2, 4
+
+    total_person_hours = base_person * base_hour
+    candidates = [(base_person, base_hour)]
+
+    for p in range(1, 5):
+        if p == base_person:
+            continue
+        if total_person_hours % p != 0:
+            continue
+        h = total_person_hours // p
+        if 2 <= h <= 8:
+            candidates.append((p, h))
+
+    seen = set()
+    plans = []
+    for p, h in candidates:
+        key = (p, h)
+        if key in seen:
+            continue
+        seen.add(key)
+        plans.append({"person": p, "hour": h, "total_person_hours": total_person_hours})
+    return plans
+
+
+def search_available_service_dates(
+    env_name,
+    payway,
+    lookup_result,
+    address,
+    clean_type_id,
+    start_date,
+    days=30,
+    day_type="不限",
+    time_preference="不限",
+    plans=None,
+    periods=None,
+    period_hours=None,
+    max_results=30,
+):
+    """
+    依客人需求往後搜尋可服務日期。
+    回傳每筆包含：date / period / person / hour / staff。
+    """
+    if isinstance(start_date, datetime):
+        cursor = start_date.date()
+    elif isinstance(start_date, date):
+        cursor = start_date
+    else:
+        cursor = datetime.strptime(str(start_date), "%Y-%m-%d").date()
+
+    periods = periods or [
+        "08:30-12:30",
+        "09:00-11:00",
+        "09:00-12:00",
+        "14:00-16:00",
+        "14:00-17:00",
+        "14:00-18:00",
+        "09:00-16:00",
+        "09:00-18:00",
+    ]
+    period_hours = period_hours or {
+        "08:30-12:30": 4,
+        "09:00-11:00": 2,
+        "09:00-12:00": 3,
+        "14:00-16:00": 2,
+        "14:00-17:00": 3,
+        "14:00-18:00": 4,
+        "09:00-16:00": 6,
+        "09:00-18:00": 8,
+    }
+    periods = _filter_periods_by_preference(periods, time_preference)
+    plans = plans or build_equivalent_plans(2, 4)
+
+    results = []
+    for offset in range(int(days)):
+        d = cursor + timedelta(days=offset)
+        if not _is_target_day(d, day_type):
+            continue
+
+        date_s = d.strftime("%Y-%m-%d")
+        for plan in plans:
+            target_hour = int(plan.get("hour") or 0)
+            target_periods = [p for p in periods if int(period_hours.get(p, 0)) == target_hour]
+            if not target_periods:
+                continue
+            rows = quick_check_available_slots(
+                env_name=env_name,
+                payway=payway,
+                lookup_result=lookup_result,
+                address=address,
+                clean_type_id=clean_type_id,
+                date_s=date_s,
+                hour=target_hour,
+                person=plan.get("person"),
+                periods=target_periods,
+                period_hours=period_hours,
+            )
+            for row in rows:
+                if not row.get("available"):
+                    continue
+                results.append({
+                    "date": date_s,
+                    "period": row.get("period"),
+                    "person": plan.get("person"),
+                    "hour": target_hour,
+                    "total_person_hours": plan.get("total_person_hours"),
+                    "staff": row.get("staff", ""),
+                })
+                if len(results) >= int(max_results):
+                    return results
+    return results
+
+
+def parse_new_customer_order_text(raw_text):
+    """
+    將客服貼上的新客制式文字拆解成欄位。
+    """
+    text = str(raw_text or "").strip()
+    result = {
+        "name": "",
+        "phone": "",
+        "email": "",
+        "address": "",
+        "ping": "",
+        "payway": "",
+        "invoice_type": "",
+        "invoice_title": "",
+        "tax_id": "",
+        "carrier": "",
+        "requirement": "",
+        "note": "",
+    }
+    if not text:
+        return result
+
+    def clean_value(value):
+        return str(value or "").strip().strip("：:").strip()
+
+    normalized = text.replace("：", ":")
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+    label_map = [
+        ("name", ["訂購人姓名", "姓名", "客人姓名"]),
+        ("phone", ["訂購人電話", "電話", "手機", "客人電話"]),
+        ("email", ["訂購人Email", "訂購人email", "Email", "email", "信箱"]),
+        ("address", ["服務地址", "地址"]),
+        ("ping", ["室內坪數", "坪數"]),
+        ("payway", ["付款方式"]),
+        ("invoice_type", ["發票載具", "發票方式", "載具類型", "發票"]),
+        ("invoice_title", ["發票抬頭", "公司抬頭", "抬頭", "買受人"]),
+        ("tax_id", ["統一編號", "統編", "公司統編", "買受人統編"]),
+        ("carrier", ["載具號碼", "載碼", "載具", "統編資訊"]),
+        ("requirement", ["服務需求", "需求", "服務條件"]),
+    ]
+
+    consumed = set()
+
+    for idx, line in enumerate(lines):
+        compact_line = line.replace(" ", "")
+        for key, labels in label_map:
+            for label in labels:
+                compact_label = label.replace(" ", "")
+                if compact_line.startswith(compact_label + ":"):
+                    result[key] = clean_value(line.split(":", 1)[1])
+                    consumed.add(idx)
+                    break
+                if compact_line == compact_label and idx + 1 < len(lines):
+                    result[key] = clean_value(lines[idx + 1])
+                    consumed.add(idx)
+                    consumed.add(idx + 1)
+                    break
+            if idx in consumed:
+                break
+
+    if not result["carrier"]:
+        for idx, line in enumerate(lines):
+            value = line.strip()
+            if re.match(r"^/[A-Za-z0-9.+-]{6,}$", value):
+                result["carrier"] = value
+                consumed.add(idx)
+                break
+
+    if not result["email"]:
+        m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
+        if m:
+            result["email"] = m.group(0)
+
+    if not result["phone"]:
+        m = re.search(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,12}", text)
+        if m:
+            result["phone"] = normalize_phone(m.group(0))
+
+    if result.get("phone"):
+        result["phone"] = normalize_phone(result["phone"])
+
+    requirement_patterns = [
+        r"(平日|週末|假日|不限).*(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
+        r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
+    ]
+    if not result["requirement"]:
+        for idx, line in enumerate(lines):
+            if idx in consumed:
+                continue
+            if any(re.search(pattern, line) for pattern in requirement_patterns):
+                result["requirement"] = line.strip()
+                consumed.add(idx)
+                break
+
+    if not result["tax_id"]:
+        tax_matches = re.findall(r"(?<!\d)\d{8}(?!\d)", text)
+        if tax_matches:
+            result["tax_id"] = tax_matches[0]
+
+    notes = [line for idx, line in enumerate(lines) if idx not in consumed]
+    result["note"] = "\n".join(notes).strip()
+
+    return result
+
+
+def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
+    """
+    新客建單入口（目前只做前端驗證，尚未接上新客建立會員 API）。
+    """
+    required = ["name", "phone", "email", "address", "payway", "clean_type_id"]
+    missing = [key for key in required if not str((customer or {}).get(key, "")).strip()]
+    if missing:
+        raise Exception("新客資料不足，請補齊：" + "、".join(missing))
+
+    carrier = str((customer or {}).get("carrier", "")).strip()
+    invoice_type = str((customer or {}).get("invoice_type", "")).strip()
+    if invoice_type == "手機載具" and not carrier.startswith("/"):
+        raise Exception("手機載具格式可能不正確，範例：/T8K346B")
+
+    raise Exception(
+        "新客資料已完成前端收集與驗證；但目前 quick_order.py 的既有建單核心需要會員 addressId，"
+        "尚未接上新客建立會員/地址或新客訂單送出 API。請先依此資料至後台建立會員，"
+        "或下一版新增 create_new_member_and_order() 後再直接送單。"
+    )
