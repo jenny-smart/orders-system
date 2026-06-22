@@ -804,6 +804,8 @@ else:
                     if not order_nos:
                         st.error("請輸入至少一個訂單編號")
                     else:
+                        # 先清空舊結果，避免 Streamlit re-run 期間殘留上一次資料
+                        st.session_state.line_from_order_nos_results = []
                         results_list = []
                         for ono in order_nos:
                             try:
@@ -814,9 +816,11 @@ else:
                                         backend_password=backend_password.strip(),
                                         order_no=ono,
                                     )
+                                # session 物件不存入 session_state（避免序列化問題）
+                                safe_result = {k: v for k, v in line_result.items() if k != "session"}
                                 results_list.append({
                                     "order_no": ono,
-                                    "result": line_result,
+                                    "result": safe_result,
                                     "text": line_text,
                                     "error": None,
                                 })
@@ -828,6 +832,7 @@ else:
                                     "error": str(e),
                                 })
                         st.session_state.line_from_order_nos_results = results_list
+                        st.rerun()
 
         with col_right:
             st.markdown('<div class="sec-label">N-J Memo</div>', unsafe_allow_html=True)
@@ -849,8 +854,12 @@ else:
             line_result = item["result"]
             line_text = item["text"]
 
+            all_nos = line_result.get("all_order_nos") or [line_result.get("order_no")]
+            order_no_display = "、".join(str(n) for n in all_nos if n)
+            is_combined = len(all_nos) > 1
+            combined_note = "　⚠️ 同日合併單" if is_combined else ""
             st.caption(
-                f"訂單：{line_result.get('order_no')}　"
+                f"訂單：{order_no_display}{combined_note}　"
                 f"付款方式：{line_result.get('payway')}　"
                 f"區域：{line_result.get('region')}　"
                 f"金額：{line_result.get('service_amount') or '—'}　"
