@@ -1658,7 +1658,7 @@ def convert_order(
 
     # ── Step 2: 建折價券 ────────────────────────────────────────────
     today_str = date.today().strftime("%Y-%m-%d")
-    coupon_prefix = f"conv{order_no_a[-4:]}"  # e.g., conv1537
+    coupon_prefix = f"conv{order_no_a[-4:]}"  # e.g., conv3121
     coupon_discount = int(float(str(service_amount_a).replace(",", "")))
 
     # 取 CSRF token（GET /coupon/add）
@@ -1681,12 +1681,12 @@ def convert_order(
         ("piece", "1"),
         ("_token", csrf),
     ]
-    # 全選地區
-    for cid in COUPON_COMPANY_ID_MAP.values():
-        coupon_fields.append(("company_id[]", cid))
-    # 全選服務項目
-    for sid in COUPON_SERVICE_ITEM_MAP.values():
-        coupon_fields.append(("service_item[]", sid))
+    # 限制地區：台北、台中
+    for region_name in ["台北", "台中"]:
+        coupon_fields.append(("company_id[]", COUPON_COMPANY_ID_MAP[region_name]))
+    # 限制服務：居家清潔、裝修細清
+    for svc_name in ["居家清潔", "裝修細清"]:
+        coupon_fields.append(("service_item[]", COUPON_SERVICE_ITEM_MAP[svc_name]))
     # multipart/form-data（list of tuples 保留重複 key）
     coupon_files = [(k, (None, v)) for k, v in coupon_fields]
     post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
@@ -1697,11 +1697,13 @@ def convert_order(
         allow_redirects=True,
     )
     if coupon_resp.status_code not in (200, 302):
-        snippet = coupon_resp.text[:200].replace("\n", " ")
-        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}｜{snippet}")
+        err_text = coupon_resp.text
+        title_m = re.search(r"<title>([^<]+)</title>", err_text)
+        detail_str = title_m.group(1)[:150] if title_m else err_text[:300].replace("\n", " ")
+        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}｜{detail_str}")
     if coupon_resp.url and "add" in coupon_resp.url:
-        raise Exception("折價券建立失敗：後台驗證未通過，請確認區域/服務項目欄位")
-
+        snippet = coupon_resp.text[400:700].replace("\n", " ")
+        raise Exception(f"折價券後台驗證未通過｜{snippet}")
     # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
     coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
 
