@@ -1684,15 +1684,16 @@ def convert_order(
         ("service_item[]", COUPON_SERVICE_ITEM_MAP.get("居家清潔", "1")),
         ("_token", csrf),
     ]
-    post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
     coupon_resp = session.post(
         coupon_add_url,
-        files={k: (None, v) for k, v in coupon_fields},
-        headers=post_headers,
+        data=coupon_fields,
+        headers=HEADERS,
         allow_redirects=True,
     )
     if coupon_resp.status_code not in (200, 302):
         raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}")
+    if coupon_resp.url and "add" in coupon_resp.url:
+        raise Exception("折價券建立失敗：未跳轉，請確認後台欄位設定")
 
     # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
     coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
