@@ -1684,16 +1684,20 @@ def convert_order(
         ("service_item[]", COUPON_SERVICE_ITEM_MAP.get("居家清潔", "1")),
         ("_token", csrf),
     ]
+    # multipart/form-data（list of tuples 保留重複 key）
+    coupon_files = [(k, (None, v)) for k, v in coupon_fields]
+    post_headers = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
     coupon_resp = session.post(
         coupon_add_url,
-        data=coupon_fields,
-        headers=HEADERS,
+        files=coupon_files,
+        headers=post_headers,
         allow_redirects=True,
     )
     if coupon_resp.status_code not in (200, 302):
-        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}")
+        snippet = coupon_resp.text[:200].replace("\n", " ")
+        raise Exception(f"折價券建立失敗：HTTP {coupon_resp.status_code}｜{snippet}")
     if coupon_resp.url and "add" in coupon_resp.url:
-        raise Exception("折價券建立失敗：未跳轉，請確認後台欄位設定")
+        raise Exception("折價券建立失敗：後台驗證未通過，請確認區域/服務項目欄位")
 
     # ── Step 3: 取實際優惠碼 ────────────────────────────────────────
     coupon_code = _get_newest_coupon_code(session, base_url, coupon_prefix)
@@ -2192,18 +2196,20 @@ def create_coupon(
     for s in (service_items or ["居家清潔"]):
         fields.append(("service_item[]", COUPON_SERVICE_ITEM_MAP.get(s, "1")))
 
+    coupon_files3 = [(k, (None, v)) for k, v in fields]
+    post_headers3 = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
     post_resp = session.post(
         coupon_add_url,
-        data=fields,
-        headers=HEADERS,
+        files=coupon_files3,
+        headers=post_headers3,
         allow_redirects=True,
     )
 
     if post_resp.status_code not in (200, 302):
-        raise Exception(f"優惠券建立失敗：HTTP {post_resp.status_code}")
+        snippet = post_resp.text[:200].replace("\n", " ")
+        raise Exception(f"優惠券建立失敗：HTTP {post_resp.status_code}｜{snippet}")
     if post_resp.url and "add" in post_resp.url:
-        raise Exception("優惠券建立失敗：未跳轉，請確認欄位是否填寫正確")
-
+        raise Exception("優惠券建立失敗：後台驗證未通過，請確認區域/服務項目欄位")
     # 建完後取剛建的那張優惠碼
     coupon_code = _get_newest_coupon_code(session, base_url, str(prefix).strip())
 
