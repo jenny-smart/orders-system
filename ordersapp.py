@@ -796,38 +796,50 @@ else:
             key="line_order_nos",
         )
 
-        if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
-            if not backend_email.strip() or not backend_password.strip():
-                st.error("請先輸入後台帳號密碼")
-            else:
-                order_nos = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
-                if not order_nos:
-                    st.error("請輸入至少一個訂單編號")
+        # N-J Memo 固定顯示，不需要等待查詢結果
+        col_btn, col_memo_fixed = st.columns([3, 1])
+        with col_btn:
+            if st.button("產生 LINE 訊息", use_container_width=True, key="make-line-from-order-no"):
+                if not backend_email.strip() or not backend_password.strip():
+                    st.error("請先輸入後台帳號密碼")
                 else:
-                    results_list = []
-                    for ono in order_nos:
-                        try:
-                            with st.spinner(f"查詢訂單 {ono}…"):
-                                line_result, line_text = build_line_message_from_order_no(
-                                    env_name=env,
-                                    backend_email=backend_email.strip(),
-                                    backend_password=backend_password.strip(),
-                                    order_no=ono,
-                                )
-                            results_list.append({
-                                "order_no": ono,
-                                "result": line_result,
-                                "text": line_text,
-                                "error": None,
-                            })
-                        except Exception as e:
-                            results_list.append({
-                                "order_no": ono,
-                                "result": None,
-                                "text": "",
-                                "error": str(e),
-                            })
-                    st.session_state.line_from_order_nos_results = results_list
+                    order_nos = [x.strip() for x in line_order_nos_input.splitlines() if x.strip()]
+                    if not order_nos:
+                        st.error("請輸入至少一個訂單編號")
+                    else:
+                        results_list = []
+                        for ono in order_nos:
+                            try:
+                                with st.spinner(f"查詢訂單 {ono}…"):
+                                    line_result, line_text = build_line_message_from_order_no(
+                                        env_name=env,
+                                        backend_email=backend_email.strip(),
+                                        backend_password=backend_password.strip(),
+                                        order_no=ono,
+                                    )
+                                results_list.append({
+                                    "order_no": ono,
+                                    "result": line_result,
+                                    "text": line_text,
+                                    "error": None,
+                                })
+                            except Exception as e:
+                                results_list.append({
+                                    "order_no": ono,
+                                    "result": None,
+                                    "text": "",
+                                    "error": str(e),
+                                })
+                        st.session_state.line_from_order_nos_results = results_list
+        with col_memo_fixed:
+            st.text_area(
+                "N-J Memo",
+                NJ_MEMO,
+                height=160,
+                key="nj_memo_fixed",
+                label_visibility="collapsed",
+            )
+            copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-fixed")
 
         results_list = st.session_state.get("line_from_order_nos_results", [])
         for idx, item in enumerate(results_list):
@@ -846,25 +858,14 @@ else:
                 f"車馬費：{line_result.get('fare') or '0'}"
             )
 
-            col_msg, col_memo = st.columns([3, 1])
-            with col_msg:
-                st.text_area(
-                    f"LINE 訊息（{line_result.get('order_no')}）",
-                    line_text,
-                    height=380,
-                    key=f"line_text_{idx}",
-                    label_visibility="collapsed",
-                )
-                copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
-            with col_memo:
-                st.text_area(
-                    "N-J Memo",
-                    NJ_MEMO,
-                    height=200,
-                    key=f"nj_memo_{idx}",
-                    label_visibility="collapsed",
-                )
-                copy_button("複製 N-J Memo", NJ_MEMO, f"copy-nj-memo-{idx}")
+            st.text_area(
+                f"LINE 訊息（{line_result.get('order_no')}）",
+                line_text,
+                height=380,
+                key=f"line_text_{idx}",
+                label_visibility="collapsed",
+            )
+            copy_button("複製 LINE 訊息", line_text, f"copy-line-msg-{idx}")
 
             if idx < len(results_list) - 1:
                 st.markdown("<hr>", unsafe_allow_html=True)
