@@ -568,6 +568,229 @@ def _service_amount_from_block(joined_text, fare):
         return total
 
 
+def build_combined_line_message_from_order_nos(
+    env_name,
+    backend_email,
+    backend_password,
+    order_nos,
+    fallback_region="台北",
+):
+    """
+    多筆訂單合併成一則 LINE 通知。
+
+    用於客服在輸入框以「+」分隔指定同日合併單的情況，
+    例如：LC002115751+LC002115741 → 合併成一則含累計金額與合併時段的訊息。
+
+    驗證：所有訂單需同一服務日期、同一付款方式，否則拋出說明例外。
+    """
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    orders_info = []
+    for ono in order_nos:
+        block = _fetch_purchase_block_for_order_no(session, ono)
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        actual_time = _extract_actual_service_time(joined)
+        person_extracted, _ = _extract_person_hour_line(joined)
+        address = _extract_address_line(lines)
+        fare = _extract_fare_line(joined) or "0"
+        payway = _extract_payway_line(joined)
+        service_amount = _service_amount_from_block(joined, fare)
+        region = get_region_by_address(address, ACCOUNTS) or fallback_region
+
+        if not service_date or not service_time:
+            raise Exception(f"訂單 {ono} 缺少服務日期或時段，無法合併")
+        if not address:
+            raise Exception(f"訂單 {ono} 缺少服務地址，無法合併")
+        if not payway:
+            raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
+
+        orders_info.append({
+            "order_no": ono,
+            "service_date": service_date,
+            "period_s": service_time,
+            "actual_period": actual_time,
+            "person": person_extracted,
+            "address": address,
+            "fare": fare,
+            "payway": payway,
+            "service_amount": service_amount,
+            "region": region,
+        })
+
+    # 驗證：所有訂單服務日期需相同
+    dates = {o["service_date"] for o in orders_info}
+    if len(dates) > 1:
+        raise Exception(
+            f"合併的訂單服務日期不同（{', '.join(sorted(dates))}），"
+            "請確認是否為同一天的訂單，或改用分行輸入分別產生通知。"
+        )
+
+    # 驗證：所有訂單付款方式需相同
+    payways = {o["payway"] for o in orders_info if o["payway"]}
+    if len(payways) > 1:
+        raise Exception(
+            f"合併的訂單付款方式不同（{', '.join(payways)}），"
+            "請分開輸入分別產生通知。"
+        )
+
+    # 合併時段描述
+    period_data = [
+        {"period_s": o["period_s"], "actual_period": o["actual_period"], "person": o["person"]}
+        for o in orders_info
+    ]
+    combined_period = _build_combined_period_display(period_data)
+
+    # 加總金額
+    total_amount = 0
+    for o in orders_info:
+        try:
+            total_amount += int(o["service_amount"] or 0)
+        except Exception:
+            pass
+
+    first = orders_info[0]
+    result = {
+        "order_no": first["order_no"],
+        "all_order_nos": order_nos,
+        "address": first["address"],
+        "date": first["service_date"],
+        "period": first["period_s"],
+        "period_s": first["period_s"],
+        "actual_period": first["actual_period"],
+        "combined_period": combined_period,
+        "person": first["person"],
+        "service_amount": str(total_amount) if total_amount else "",
+        "price_with_tax": str(total_amount) if total_amount else "",
+        "fare": first["fare"],
+        "payway": first["payway"],
+        "region": first["region"],
+        "env_name": env_name,
+        "session": session,
+        "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
+    }
+    return result, build_line_message(result)
+
+
+def build_combined_line_message_from_order_nos(
+    env_name,
+    backend_email,
+    backend_password,
+    order_nos,
+    fallback_region="台北",
+):
+    """
+    接收多個訂單號（以逗號分隔輸入，例如 LC001+LC002），
+    各自查詢後合併成一則 LINE 訊息。
+
+    合併規則：
+    - 服務日期：取第一筆（合併單應為同一天）
+    - 服務時段：用 _build_combined_period_display 合併
+    - 服務金額：加總
+    - 車馬費：加總
+    - 付款方式/地址/區域：取第一筆
+    - 信用卡：每筆訂單各給一條付款連結
+    """
+    if not order_nos:
+        raise Exception("請至少輸入一個訂單編號")
+
+    if len(order_nos) == 1:
+        return build_line_message_from_order_no(
+            env_name, backend_email, backend_password, order_nos[0], fallback_region
+        )
+
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    infos = []
+    for ono in order_nos:
+        ono = ono.strip()
+        block = _fetch_purchase_block_for_order_no(session, ono)
+        lines = block.get("lines", [])
+        joined = "\n".join(lines)
+
+        service_date, service_time = _parse_service_date_time_loose(joined)
+        actual_time = _extract_actual_service_time(joined)
+        person_extracted, _ = _extract_person_hour_line(joined)
+        address = _extract_address_line(lines)
+        fare = _extract_fare_line(joined) or "0"
+        payway = _extract_payway_line(joined)
+        region = get_region_by_address(address, ACCOUNTS) or fallback_region
+        service_amount = _service_amount_from_block(joined, fare)
+
+        if not service_date or not service_time:
+            raise Exception(f"訂單 {ono} 缺少服務日期或時段")
+        if not address:
+            raise Exception(f"訂單 {ono} 缺少服務地址")
+        if not payway:
+            raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
+
+        infos.append({
+            "order_no": ono,
+            "date": service_date,
+            "period_s": service_time,
+            "actual_period": actual_time,
+            "person": person_extracted,
+            "address": address,
+            "fare": fare,
+            "payway": payway,
+            "region": region,
+            "service_amount": service_amount,
+        })
+
+    # 合併計算
+    first = infos[0]
+    service_date = first["date"]
+    address = first["address"]
+    payway = first["payway"]
+    region = first["region"]
+
+    combined_period = _build_combined_period_display([
+        {"period_s": i["period_s"], "actual_period": i["actual_period"], "person": i["person"]}
+        for i in infos
+    ])
+
+    total_amount = 0
+    total_fare = 0
+    for i in infos:
+        try:
+            total_amount += int(i["service_amount"] or 0)
+        except Exception:
+            pass
+        try:
+            total_fare += int(i["fare"] or 0)
+        except Exception:
+            pass
+
+    result = {
+        "order_no": infos[0]["order_no"],
+        "all_order_nos": [i["order_no"] for i in infos],
+        "address": address,
+        "date": service_date,
+        "period": first["period_s"],
+        "period_s": first["period_s"],
+        "actual_period": first["actual_period"],
+        "combined_period": combined_period,
+        "person": first["person"],
+        "service_amount": str(total_amount) if total_amount else "",
+        "price_with_tax": str(total_amount) if total_amount else "",
+        "fare": str(total_fare) if total_fare else "0",
+        "payway": payway,
+        "region": region,
+        "env_name": env_name,
+        "session": session,
+        "source_url": f"{base_url}/purchase?orderNo={infos[0]['order_no']}",
+    }
+    return result, build_line_message(result)
+
+
 def build_line_message_from_order_no(
     env_name,
     backend_email,
@@ -604,65 +827,18 @@ def build_line_message_from_order_no(
     if payway != "儲值金" and not service_amount:
         raise Exception(f"訂單 {order_no} 缺少服務金額，無法產生通知")
 
-    # v7.5: 同日多筆偵測 ─────────────────────────────────────────────
-    # 從訂單區塊抓電話，搜尋同一客人同一日期的所有訂單，
-    # 若有多筆則合併服務時段描述；不同日期的訂單不會被合併。
-    phone_from_block = _extract_phone_from_block_lines(lines)
-    same_date_blocks = []
-    combined_period_str = ""
-    all_order_nos = [block["order_no"]]
-    total_service_amount = 0
-
-    if phone_from_block:
-        same_date_blocks = _fetch_same_date_order_blocks(session, phone_from_block, service_date)
-        # 排除主訂單本身，收集其他同日訂單的資訊
-        other_blocks = [b for b in same_date_blocks if b.get("order_no") != block["order_no"]]
-
-        if other_blocks:
-            # 主訂單資料
-            primary_info = {
-                "period_s": service_time,
-                "actual_period": actual_time,
-                "person": person_extracted,
-            }
-            other_infos = []
-            for ob in other_blocks:
-                ob_lines = ob.get("lines", [])
-                ob_joined = "\n".join(ob_lines)
-                ob_date, ob_time = _parse_service_date_time_loose(ob_joined)
-                ob_actual = _extract_actual_service_time(ob_joined)
-                ob_person, _ = _extract_person_hour_line(ob_joined)
-                ob_amount = _service_amount_from_block(ob_joined, _extract_fare_line(ob_joined) or "0")
-                all_order_nos.append(ob.get("order_no", ""))
-                try:
-                    total_service_amount += int(ob_amount or 0)
-                except Exception:
-                    pass
-                other_infos.append({
-                    "period_s": ob_time,
-                    "actual_period": ob_actual,
-                    "person": ob_person,
-                })
-
-            try:
-                total_service_amount += int(service_amount or 0)
-            except Exception:
-                pass
-
-            combined_period_str = _build_combined_period_display([primary_info] + other_infos)
-
     result = {
         "order_no": block["order_no"],
-        "all_order_nos": all_order_nos,          # v7.5: 同日全部訂單號
+        "all_order_nos": [block["order_no"]],
         "address": address,
         "date": service_date,
         "period": service_time,
         "period_s": service_time,
         "actual_period": actual_time,
-        "combined_period": combined_period_str,   # v7.5: 有值代表同日多筆合併時段
+        "combined_period": "",
         "person": person_extracted,
-        "service_amount": str(total_service_amount) if total_service_amount else service_amount,
-        "price_with_tax": str(total_service_amount) if total_service_amount else service_amount,
+        "service_amount": service_amount,
+        "price_with_tax": service_amount,
         "fare": fare,
         "payway": payway,
         "region": region,
