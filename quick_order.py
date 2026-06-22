@@ -1658,7 +1658,8 @@ def convert_order(
 
     # ── Step 2: 建折價券 ────────────────────────────────────────────
     today_str = date.today().strftime("%Y-%m-%d")
-    coupon_prefix = f"conv{order_no_a[-4:]}"  # e.g., conv3121
+    _md = date.today().strftime("%m%d")
+    coupon_prefix = f"c{order_no_a[-4:]}{_md}"  # e.g., c31210623
     coupon_discount = int(float(str(service_amount_a).replace(",", "")))
 
     # 取 CSRF token（GET /coupon/add）
