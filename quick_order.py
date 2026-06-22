@@ -630,20 +630,34 @@ def build_combined_line_message_from_order_nos(
             f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。"
         )
 
-    # 日期相同 → 合併時段；日期不同 → 每筆各自顯示日期＋時段
+    # ── 服務時間顯示：三種組合 ─────────────────────────────────────────
     unique_dates = sorted({o["service_date"] for o in orders_info})
+    unique_periods = {str(o["period_s"] or "").replace(" ", "") for o in orders_info}
     all_same_date = len(unique_dates) == 1
+    all_same_time = len(unique_periods) == 1
 
     if all_same_date:
-        # 同一天：合併時段，不重複顯示日期
+        # 同日不同時段 → 日期由模板帶，時段合併一行
         period_data = [
             {"period_s": o["period_s"], "actual_period": o["actual_period"], "person": o["person"]}
             for o in orders_info
         ]
         combined_period = _build_combined_period_display(period_data)
         multi_date = False
+
+    elif all_same_time:
+        # 不同日期、相同時段 → 日期並列，時段只寫一次
+        dates_str = "、".join(d.replace("-", "/") for d in unique_dates)
+        ref = orders_info[0]
+        p_raw = str(ref["period_s"] or "").replace(" ", "")
+        p_actual = str(ref["actual_period"] or "").replace(" ", "")
+        p_person = str(ref["person"] or "")
+        p_str = _format_period_display(p_raw, p_person, display_override=p_actual)
+        combined_period = f"{dates_str}\n{p_str}"
+        multi_date = True
+
     else:
-        # 不同天：每行 = 日期 + 時段
+        # 不同日期、不同時段 → 每行各自列日期＋時段
         period_lines = []
         for o in orders_info:
             d = o["service_date"].replace("-", "/")
@@ -655,11 +669,26 @@ def build_combined_line_message_from_order_nos(
         combined_period = "\n".join(period_lines)
         multi_date = True
 
-    # 加總金額
+    # ── 金額：A＋B＝總計 ──────────────────────────────────────────────
+    amount_parts = []
     total_amount = 0
     for o in orders_info:
         try:
-            total_amount += int(o["service_amount"] or 0)
+            v = int(str(o["service_amount"] or "0").replace(",", ""))
+            amount_parts.append(str(v))
+            total_amount += v
+        except Exception:
+            pass
+    if len(amount_parts) > 1:
+        amount_display = "＋".join(amount_parts) + "＝" + str(total_amount)
+    else:
+        amount_display = str(total_amount) if total_amount else ""
+
+    # ── 車馬費加總 ────────────────────────────────────────────────────
+    total_fare = 0
+    for o in orders_info:
+        try:
+            total_fare += int(str(o["fare"] or "0").replace(",", ""))
         except Exception:
             pass
 
@@ -675,9 +704,9 @@ def build_combined_line_message_from_order_nos(
         "combined_period": combined_period,
         "multi_date": multi_date,
         "person": first["person"],
-        "service_amount": str(total_amount) if total_amount else "",
-        "price_with_tax": str(total_amount) if total_amount else "",
-        "fare": first["fare"],
+        "service_amount": amount_display,
+        "price_with_tax": str(total_amount),
+        "fare": str(total_fare) if total_fare else "0",
         "payway": first["payway"],
         "region": first["region"],
         "env_name": env_name,
