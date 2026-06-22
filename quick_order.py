@@ -521,6 +521,28 @@ def _extract_person_hour_line(joined_text):
     return person, hour
 
 
+def _count_staff_from_lines(lines):
+    """
+    從訂單區塊的服務人員行數人頭，作為人數的備用來源。
+
+    後台訂單卡片顯示格式：嚴慶隆(3) X 林岱羽(2)
+    用大寫 X 分隔人名，排除「檸檬人」（學員）。
+    抓到幾個非檸檬人的名字就是幾人。
+    """
+    joined = "\n".join(lines)
+    # 找有「(數字) X」或「X (數字)」形態的服務人員行
+    staff_line_match = re.search(
+        r"[^\n]*\(\d+\)(?:\s*X\s*[^\n]*\(\d+\))+",
+        joined,
+    )
+    if not staff_line_match:
+        return ""
+    staff_line = staff_line_match.group(0)
+    parts = [p.strip() for p in re.split(r"\bX\b", staff_line) if p.strip()]
+    count = sum(1 for p in parts if "檸檬人" not in p and re.search(r"\(\d+\)", p))
+    return str(count) if count > 0 else ""
+
+
 def _extract_address_line(lines):
     for line in lines:
         text = str(line or "").strip()
@@ -596,6 +618,8 @@ def build_combined_line_message_from_order_nos(
         service_date, service_time = _parse_service_date_time_loose(joined)
         actual_time = _extract_actual_service_time(joined)
         person_extracted, _ = _extract_person_hour_line(joined)
+        if not person_extracted:
+            person_extracted = _count_staff_from_lines(lines)
         address = _extract_address_line(lines)
         fare = _extract_fare_line(joined) or "0"
         payway = _extract_payway_line(joined)
@@ -721,8 +745,10 @@ def build_line_message_from_order_no(
     service_date, service_time = _parse_service_date_time_loose(joined)
     # v7.4: 若有「簡訊實際服務時間」，優先用於 LINE 訊息顯示
     actual_time = _extract_actual_service_time(joined)
-    # v7.3: 從訂單區塊抓人數，供 _format_period_display() 使用
+    # v7.3: 從訂單區塊抓人數；若文字中無「X人Y小時」，改從服務人員名單數人頭
     person_extracted, _ = _extract_person_hour_line(joined)
+    if not person_extracted:
+        person_extracted = _count_staff_from_lines(lines)
     address = _extract_address_line(lines)
     fare = _extract_fare_line(joined) or "0"
     payway = _extract_payway_line(joined)
