@@ -1,11 +1,16 @@
 # ============================================================
-# 檔名：quick_order_7_2.py
-# 版本：v7.2
+# 檔名：quick_order.py
+# 版本：v7.3
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-22
 #
 # Change Log
+# v7.3
+# - 新增 PERIOD_DISPLAY_INFO / _format_period_display()
+# - build_line_message 服務時間加入時數/休息備註/人數
+# - build_line_message_from_order_no 補 person / period_s
+# - quick_create_order return dict 補 person / period_s
 # v7.2
 # - 新客資料拆解電話統一轉純數字
 # - 新增發票抬頭與統編解析
@@ -71,6 +76,37 @@ BOOKING_ENDPOINT_MAP = {
 }
 
 TAX_RATE = 1.05  # 服務費未稅 → 含稅
+
+# 服務時段對應時數與中間休息備註
+# has_break=True 的時段，LINE 訊息顯示「X小時,中間休息1小時」
+PERIOD_DISPLAY_INFO = {
+    "08:30-12:30": ("4小時", False),
+    "09:00-11:00": ("2小時", False),
+    "09:00-12:00": ("3小時", False),
+    "14:00-16:00": ("2小時", False),
+    "14:00-17:00": ("3小時", False),
+    "14:00-18:00": ("4小時", False),
+    "09:00-16:00": ("6小時", True),
+    "09:00-18:00": ("8小時", True),
+}
+
+
+def _format_period_display(period_raw, person=""):
+    """
+    格式化服務時段顯示，含小時數、中間休息備註與人數。
+    例：08:30-12:30 → 08:30-12:30(4小時)-2人
+        09:00-16:00 → 09:00-16:00(6小時,中間休息1小時)-3人
+    找不到對應資料時，只補人數（或不補）。
+    """
+    compact = str(period_raw or "").replace(" ", "")
+    info = PERIOD_DISPLAY_INFO.get(compact)
+    person_str = str(person or "").strip()
+    person_part = f"-{person_str}人" if person_str and person_str != "0" else ""
+    if info:
+        hour_str, has_break = info
+        break_note = ",中間休息1小時" if has_break else ""
+        return f"{compact}({hour_str}{break_note}){person_part}"
+    return f"{compact}{person_part}"
 
 
 def _configure_environment(env_name):
@@ -212,13 +248,6 @@ def _block_matches_phone_filter(block, phone_norm):
 def _fetch_purchase_blocks_for_phone(session, phone, name="", purchase_status=""):
     """
     比照後台「訂單管理」篩選列搜尋的實際請求格式。
-
-    歷史服務查詢只用 phone= 與 purchase_status=1，直接對齊後台
-    「電話 + 付款狀態：已付款」的認定；不再把姓名、地址、服務類別、
-    付款方式或發票條件混進來。
-
-    同時記錄診斷資訊（實際請求網址、回應狀態、是否疑似被導回登入頁、
-    抓到幾筆區塊），查無結果時可以直接看是真的沒資料還是請求本身有問題。
     """
     global _LAST_PURCHASE_FETCH_DEBUG
 
@@ -325,18 +354,6 @@ def _fetch_purchase_block_for_order_no(session, order_no):
 def _parse_service_date_time_loose(joined_text):
     """
     從訂單區塊文字解析「服務日期」與「服務時段」。
-
-    重要修正：訂單區塊裡同時存在兩個日期字串：
-    - 訂購日期：格式為 "YYYY-MM-DD HH:MM:SS"（帶秒數的時間戳記），
-      在文字流裡通常排在「服務日期」前面（訂購資訊欄位先出現）。
-    - 服務日期：格式為 "YYYY-MM-DD (週幾)"，例如 "2026-07-04 (六)"，
-      後面緊接著服務時段 "HH:MM - HH:MM"（無秒數）。
-
-    舊版邏輯「抓文字裡第一個日期」會誤抓到訂購日期。
-    這裡改成優先找「日期 + 星期幾括號」這個服務日期專屬的格式特徵；
-    真的找不到才退而求其次，找一個「後面不是緊接著 HH:MM:SS」的日期
-    （排除訂購日期戳記）。
-
     回傳 (日期, "起 - 迄" 時段字串)，抓不到回傳 ("", "")。
     """
     date_match = re.search(r"(\d{4}-\d{2}-\d{2})\s*[（(][一二三四五六日][）)]", joined_text)
@@ -344,7 +361,6 @@ def _parse_service_date_time_loose(joined_text):
     if not date_match:
         for m in re.finditer(r"(\d{4}-\d{2}-\d{2})", joined_text):
             tail = joined_text[m.end():m.end() + 12]
-            # 訂購日期格式緊接著 " HH:MM:SS"，排除掉；剩下的才當作候選服務日期
             if not re.match(r"\s*\d{1,2}:\d{2}:\d{2}", tail):
                 date_match = m
                 break
@@ -355,7 +371,6 @@ def _parse_service_date_time_loose(joined_text):
     service_date = date_match.group(1)
 
     tail = joined_text[date_match.end():date_match.end() + 600]
-    # 時段格式為 "HH:MM - HH:MM"（無秒數），用 (?!:) 避免誤吃到 HH:MM:SS 的前半段
     time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", tail)
     if not time_match:
         time_match = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})(?!:\d)", joined_text)
@@ -426,8 +441,6 @@ def _date_not_after_today(date_text):
 def _extract_payway_line(joined_text):
     """
     從訂單區塊文字解析「付款方式」。
-    一般客訂單會明確顯示「付款方式：信用卡」或「付款方式：ATM」；
-    儲值金訂單通常不會有這行，改用區塊內出現「儲值金」字樣判斷。
     """
     m = re.search(r"付款方式[：:]\s*([^\s\n]+)", joined_text)
     if m:
@@ -471,6 +484,8 @@ def build_line_message_from_order_no(
     joined = "\n".join(lines)
 
     service_date, service_time = _parse_service_date_time_loose(joined)
+    # v7.3: 從訂單區塊抓人數，供 _format_period_display() 使用
+    person_extracted, _ = _extract_person_hour_line(joined)
     address = _extract_address_line(lines)
     fare = _extract_fare_line(joined) or "0"
     payway = _extract_payway_line(joined)
@@ -482,8 +497,6 @@ def build_line_message_from_order_no(
     if not address:
         raise Exception(f"訂單 {order_no} 缺少服務地址，無法產生通知")
     if not payway:
-        # 付款方式不可用 fallback 猜，猜錯訊息樣板/金額會整個錯，
-        # 寧可請客服去後台確認真實付款方式，不要冒險帶錯。
         raise Exception(f"訂單 {order_no} 無法判斷付款方式（信用卡/ATM/儲值金），請至後台『訂單管理』確認後手動處理，不要使用本功能猜測。")
     if payway != "儲值金" and not service_amount:
         raise Exception(f"訂單 {order_no} 缺少服務金額，無法產生通知")
@@ -493,6 +506,8 @@ def build_line_message_from_order_no(
         "address": address,
         "date": service_date,
         "period": service_time,
+        "period_s": service_time,       # v7.3: 供 _format_period_display() 用
+        "person": person_extracted,      # v7.3: 供 _format_period_display() 用
         "service_amount": service_amount,
         "price_with_tax": service_amount,
         "fare": fare,
@@ -722,11 +737,6 @@ def _extract_label_value(lines, label, stop_labels):
 def get_customer_paid_orders(session, phone, known_addresses=None, name=""):
     """
     抓這支電話「所有已付款」訂單，不限地址、不限服務類別、不限付款方式。
-
-    重要：判斷客人「是否曾被服務過」一律只看「電話 + 已付款」，
-    不應該因為這次服務類別（例如裝修細清 vs 居家清潔）不同
-    就誤判成新客人——客人是同一個人，只是買了不同服務。
-
     由新到舊排序。
     """
     known_addresses = known_addresses or []
@@ -820,13 +830,6 @@ def _match_person_hour(member_payload, order_no, address):
 def get_last_paid_per_address(session, phone, member_payload, known_addresses, within_days=365):
     """
     客人有多個地址時，每個地址各自找「近一年內」最近一次已付款服務。
-
-    跟 get_last_paid_summary() 不同：那個是抓「全部地址中最新一筆」，
-    這個是「每個地址各自的最新一筆」，用於多地址客人完整顯示各地點服務史，
-    避免只看到全域最新那筆、其他地址的服務紀錄被蓋掉看不到。
-
-    地址對不到（matched address 為空）的訂單不計入任何地址。
-    超過 within_days 天數的不算「近一年內」，回傳該地址為 None。
     """
     cutoff = date.today() - timedelta(days=within_days)
     name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
@@ -838,7 +841,7 @@ def get_last_paid_per_address(session, phone, member_payload, known_addresses, w
         if not addr:
             continue
         if addr in by_address:
-            continue  # 已經有更新的這個地址訂單了（paid_orders 已由新到舊排序）
+            continue
         try:
             d = datetime.strptime(o["date"], "%Y-%m-%d").date()
         except Exception:
@@ -875,10 +878,6 @@ def get_last_paid_per_address(session, phone, member_payload, known_addresses, w
 def get_last_paid_summary(session, phone, member_payload, known_addresses):
     """
     取得「這支電話」全部地址、全部服務類別中，最近一次已付款服務的完整摘要。
-    地址/服務類別/付款方式/發票都直接從這筆抓出來，作為這次建單的預設值。
-
-    若最近服務日期當天有多筆訂單（例如同天約了不同住處/不同服務），
-    same_date_orders 會列出當天所有筆數，避免客服誤判成只有一筆。
     """
     name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
     paid_orders = get_customer_paid_orders(session, phone, known_addresses, name=name)
@@ -922,10 +921,6 @@ def get_last_paid_summary(session, phone, member_payload, known_addresses):
 def get_unserved_paid_orders(session, phone, member_payload, known_addresses, today_value=None):
     """
     「已付款但服務日期還沒到」的訂單清單（排除已取消）。
-
-    用途：避免客服明明是要幫客人「異動」原本的服務時間，
-    卻誤建立第二筆新訂單，造成重複收費/重複派工。
-    儲值金訂單沒有付款方式/發票概念，畫面顯示時請自行省略。
     """
     today_value = today_value or date.today()
     name = (member_payload.get("member", {}) or {}).get("name", "") if isinstance(member_payload, dict) else ""
@@ -992,14 +987,14 @@ def get_unserved_paid_orders(session, phone, member_payload, known_addresses, to
 
 def quick_create_order(
     env_name,
-    payway,             # "信用卡" / "ATM" / "儲值金"
-    region,              # 決定 ATM 收款帳戶 / 訊息區域
-    lookup_result,       # quick_lookup_member() 回傳值
-    address,             # 選定的地址字串（需與會員下拉地址其中一筆一致）
-    clean_type_id,       # "1" 居家清潔／"2" 辦公室清潔／"3" 裝修細清
-    date_s,              # "2026-06-25"
-    period_s,            # 系統標準時段，例如 "09:00-12:00"
-    hour,                 # 時數
+    payway,
+    region,
+    lookup_result,
+    address,
+    clean_type_id,
+    date_s,
+    period_s,
+    hour,
     person="2",
     fallback_fare="0",
 ):
@@ -1059,8 +1054,6 @@ def quick_create_order(
         best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
         best_addr["country_id"] = area_info.get("country_id", best_addr.get("country_id"))
 
-    # 真實車馬費：比照批次流程，從 check_contain 回傳的 purchase/area 多處欄位掃描，
-    # 找不到才用呼叫端傳入的 fallback_fare（預設 0），不可隨意帶固定金額（例如舊版誤帶 200）。
     purchase_info = addr_check.get("purchase") if isinstance(addr_check.get("purchase"), dict) else {}
     fare_from_check = first_nonzero(
         purchase_info.get("fare") if purchase_info else "",
@@ -1075,10 +1068,6 @@ def quick_create_order(
     )
     best_addr["fare"] = fare_from_check
 
-    # 發票欄位：/booking/single（信用卡/ATM 走這條）後台表單把「發票類別」設為必填，
-    # 之前完全沒帶這幾個欄位，後台驗證沒過、根本沒建立訂單，
-    # 但畫面上看起來像「建單失敗」訊息，其實是表單沒送成功。
-    # 優先沿用 check_contain 回傳的上次發票設定，沒有才用預設值（個人二聯式 + 會員載具/email）。
     invoice_type = str(
         first_nonzero(
             purchase_info.get("invoiceType") if purchase_info else "",
@@ -1163,7 +1152,6 @@ def quick_create_order(
         "lng": str(best_addr.get("lng") or pick("lng", "")),
     }
 
-    # 模擬手動「計算時數」：price/fare 留空讓後台計算（回傳值為未稅服務費）
     calc_result = calculate_hour(session, base_data, token)
     if not calc_result:
         raise Exception("計算時數失敗")
@@ -1180,7 +1168,6 @@ def quick_create_order(
     if base_data["price"] in ("", "0", "0.0") and payway != "儲值金":
         raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
 
-    # 確認該時段有班表/人力
     slot = f"{date_s}_{period_s}"
     raw_section = get_section_raw(session, base_data, token, slot)
     if not slot_exists_in_section_response(raw_section, slot):
@@ -1191,9 +1178,6 @@ def quick_create_order(
 
     booking_url = _booking_url_for_payway(base_url, payway)
 
-    # 送出建單前，先記錄此電話目前有哪些訂單編號，
-    # 用來在送出後判斷「是否真的產生新訂單」，
-    # 避免撞到同日期同時段的舊訂單時被誤判成功。
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
 
     booking_resp = session.post(
@@ -1210,8 +1194,6 @@ def quick_create_order(
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
 
     if not new_order_nos:
-        # 把後台實際回應狀態/網址/內容片段一起附上，
-        # 才看得出來是真的撞單，還是表單驗證沒過（例如缺必填欄位）導致根本沒送出。
         debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
         raise Exception(
             "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在、後台拒絕重複預約，"
@@ -1223,8 +1205,6 @@ def quick_create_order(
     if len(new_order_nos) == 1:
         order_no = next(iter(new_order_nos))
     else:
-        # 理論上一次只會新增一筆，若意外抓到多筆，
-        # 用日期/時段再比對一次，縮小範圍。
         order_no = None
         for candidate in new_order_nos:
             meta = fetch_order_meta_by_order_no(session, candidate)
@@ -1247,9 +1227,11 @@ def quick_create_order(
         "address": selected_address,
         "date": date_s,
         "period": display_period,
-        "price": price_no_tax,              # 後台原始未稅服務費，保留供除錯核對
-        "price_with_tax": price_with_tax,    # 含稅金額，訊息/畫面顯示用這個
-        "service_amount": price_with_tax,     # 對外顯示的服務金額一律含稅
+        "period_s": period_s,            # v7.3: 供 _format_period_display() 用
+        "person": str(person),           # v7.3: 供 _format_period_display() 用
+        "price": price_no_tax,
+        "price_with_tax": price_with_tax,
+        "service_amount": price_with_tax,
         "fare": base_data["fare"],
         "payway": payway,
         "region": region,
@@ -1273,11 +1255,19 @@ def build_line_message(order_result):
     回傳純文字，方便前端直接複製貼上 LINE。
 
     金額一律使用含稅金額（price_with_tax）。
+    服務時間格式：HH:MM-HH:MM(X小時[,中間休息1小時])-N人
     """
     payway = order_result["payway"]
     region = order_result["region"]
     date_disp = order_result["date"].replace("-", "/")
-    period = str(order_result["period"]).replace(" ", "")
+
+    # v7.3: 用 period_s（原始時段字串）查 PERIOD_DISPLAY_INFO，格式化後帶人數
+    period_raw = str(
+        order_result.get("period_s") or order_result.get("period", "")
+    ).replace(" ", "")
+    person_cnt = str(order_result.get("person", "") or "")
+    period = _format_period_display(period_raw, person_cnt)
+
     price = order_result.get("service_amount") or order_result.get("price_with_tax", order_result.get("price"))
     fare = order_result["fare"]
     address = order_result["address"]
@@ -1356,8 +1346,6 @@ https://www.lemonclean.com.tw/order/{order_last6}
 *匯款完成後再請您提供您的匯款帳號後5碼，以供檸檬家事為您核對帳款。
 """
         else:
-            # 台中帳戶；其餘區域（桃園/新竹/高雄）目前沿用台中帳戶，
-            # 若日後各區開獨立帳戶，這裡再依 region 擴充對照表。
             bank_block = """銀行戶名：泳檬有限公司
 銀行代碼 台北富邦銀行(012)-營業部
 銀行帳號 00200102520512"""
@@ -1388,6 +1376,8 @@ https://www.lemonclean.com.tw/login
 {cancel_policy}"""
 
     raise Exception(f"未知付款方式: {payway}")
+
+
 # =========================================================
 # 需求搜尋 / 新客建單輔助功能（服務訂單系統 UI 使用）
 # =========================================================
@@ -1421,10 +1411,7 @@ def _filter_periods_by_preference(periods, time_preference="不限"):
 def build_equivalent_plans(person, hour):
     """
     產生等效人時方案。
-
     人時 = 人數 × 服務時數。
-    例：2人6小時 = 12人時，會同時提供 2人6小時與 3人4小時。
-    目前先提供最常用的原方案與可整除替代方案，避免列出太多不實用組合。
     """
     try:
         base_person = int(person)
@@ -1444,7 +1431,6 @@ def build_equivalent_plans(person, hour):
         if 2 <= h <= 8:
             candidates.append((p, h))
 
-    # 常用顯示順序：原方案優先，其餘依人數由少到多。
     seen = set()
     plans = []
     for p, h in candidates:
@@ -1473,10 +1459,6 @@ def search_available_service_dates(
 ):
     """
     依客人需求往後搜尋可服務日期。
-
-    使用情境：客人未指定日期，只說「平日」、「週末」、「不限」、
-    「上午」、「下午」、「不限時段」與人時需求時使用。
-
     回傳每筆包含：date / period / person / hour / staff。
     """
     if isinstance(start_date, datetime):
@@ -1520,7 +1502,6 @@ def search_available_service_dates(
             target_hour = int(plan.get("hour") or 0)
             target_periods = [p for p in periods if int(period_hours.get(p, 0)) == target_hour]
             if not target_periods:
-                # 若沒有剛好符合時數的標準時段，就跳過該方案，避免送錯班表時段。
                 continue
             rows = quick_check_available_slots(
                 env_name=env_name,
@@ -1550,15 +1531,9 @@ def search_available_service_dates(
     return results
 
 
-
 def parse_new_customer_order_text(raw_text):
     """
     將客服貼上的新客制式文字拆解成欄位。
-
-    注意：
-    - 此函式只做文字拆解，不建立訂單、不送後台。
-    - 不內建任何個資預設值。
-    - 支援常見標籤：訂購人姓名、訂購人電話、訂購人Email、服務地址、室內坪數、付款方式、發票載具、載具號碼、服務需求。
     """
     text = str(raw_text or "").strip()
     result = {
@@ -1581,7 +1556,6 @@ def parse_new_customer_order_text(raw_text):
     def clean_value(value):
         return str(value or "").strip().strip("：:").strip()
 
-    # Normalize full-width colon and split lines.
     normalized = text.replace("：", ":")
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
 
@@ -1618,7 +1592,6 @@ def parse_new_customer_order_text(raw_text):
             if idx in consumed:
                 break
 
-    # Extract carrier when it is written alone on the next line, e.g. /T8K346B
     if not result["carrier"]:
         for idx, line in enumerate(lines):
             value = line.strip()
@@ -1627,23 +1600,19 @@ def parse_new_customer_order_text(raw_text):
                 consumed.add(idx)
                 break
 
-    # Extract email if no label was found.
     if not result["email"]:
         m = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
         if m:
             result["email"] = m.group(0)
 
-    # Extract Taiwan mobile if no label was found.
     if not result["phone"]:
         m = re.search(r"(?:\+?886[-\s]?)?0?9[\d\-\s]{8,12}", text)
         if m:
             result["phone"] = normalize_phone(m.group(0))
 
-    # Normalize phone to digits only, even if user typed hyphens/spaces.
     if result.get("phone"):
         result["phone"] = normalize_phone(result["phone"])
 
-    # Treat short requirement-like lines not consumed as service requirement.
     requirement_patterns = [
         r"(平日|週末|假日|不限).*(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
         r"(\d+)\s*人\s*(\d+(?:\.\d+)?)\s*小時",
@@ -1657,25 +1626,20 @@ def parse_new_customer_order_text(raw_text):
                 consumed.add(idx)
                 break
 
-    # Extract 8-digit Taiwan tax ID if no label was found.
     if not result["tax_id"]:
         tax_matches = re.findall(r"(?<!\d)\d{8}(?!\d)", text)
         if tax_matches:
             result["tax_id"] = tax_matches[0]
 
-    # Remaining non-empty text is note.
     notes = [line for idx, line in enumerate(lines) if idx not in consumed]
     result["note"] = "\n".join(notes).strip()
 
     return result
 
+
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
     """
-    新客建單入口。
-
-    目前舊 quick_create_order() 依賴後台會員 payload 與既有 addressId，
-    因此新客若要直接建立訂單，需要另接「建立會員/地址」或「新客訂單」後台流程。
-    這個函式先集中驗證新客資料，避免 UI 與後端邏輯混在一起。
+    新客建單入口（目前只做前端驗證，尚未接上新客建立會員 API）。
     """
     required = ["name", "phone", "email", "address", "payway", "clean_type_id"]
     missing = [key for key in required if not str((customer or {}).get(key, "")).strip()]
