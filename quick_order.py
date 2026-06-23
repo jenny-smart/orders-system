@@ -2498,6 +2498,66 @@ def create_coupon(
         "message": f"優惠券建立成功，優惠碼：{coupon_code}",
     }
 
+
+def get_stored_value(session, base_url, phone, clean_type_id="1"):
+    """
+    透過 /ajax/get_member 查詢會員的儲值金餘額。
+    回傳整數（元），查無或無儲值金回傳 0。
+    """
+    # 取 CSRF token
+    page = session.get(f"{base_url}/booking/stored_value_routine", headers=HEADERS, allow_redirects=True)
+    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', page.text)
+    csrf = token_m.group(1) if token_m else ""
+
+    ajax = session.post(
+        f"{base_url}/ajax/get_member",
+        data={
+            "phone": str(phone).strip(),
+            "_token": csrf,
+            "clean_type_id": str(clean_type_id),
+        },
+        headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        allow_redirects=True,
+    )
+    try:
+        data = ajax.json()
+    except Exception:
+        return 0, None
+
+    if data.get("return_code") == "0000":
+        sv = int(data.get("storedValue") or 0)
+        member = data.get("member", {})
+        return sv, member
+    return 0, None
+
+
+def calc_stored_value_plan(sv, new_service_price=None):
+    """
+    計算儲值金補差額方案。
+
+    sv               : 客人目前儲值金餘額（元）
+    new_service_price: 新服務總金額（元），可為 None（僅計算清零部分）
+
+    回傳 dict：
+        dummy_price  : 儲值訂單金額（600 的最小倍數 >= sv）
+        coupon_a     : 差額優惠券面額（dummy_price - sv）
+        coupon_b     : 原儲值金面額（sv）
+        customer_pays: 客人需補繳（new_service_price - sv）
+    """
+    import math
+    n = math.ceil(sv / 600) if sv > 0 else 1
+    dummy_price = n * 600
+    coupon_a = dummy_price - sv
+    coupon_b = sv
+    customer_pays = (new_service_price - sv) if new_service_price else None
+    return {
+        "dummy_price": dummy_price,
+        "coupon_a": coupon_a,
+        "coupon_b": coupon_b,
+        "customer_pays": customer_pays,
+        "n": n,
+    }
+
 def parse_new_customer_order_text(raw_text):
     """
     將客服貼上的新客制式文字拆解成欄位。
