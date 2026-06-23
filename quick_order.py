@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_7_8.py
-# 版本：v7.8
+# 檔名：quick_order_7_9.py
+# 版本：v7.9
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v7.9
+# - 檸檬人改由 /cleaner1?keyword=檸檬 與 /cleaner1/{id}/shift 設定勾班。
+# - 勾班前檢查該檸檬人同日已勾時段；全6/全8 與任何目標衝突，同上午/同下午/同晚上互衝，不衝突才補勾。
+# - 若檸檬人當天已有衝突時段，自動跳過改選下一位，不覆蓋既有勾班。
 # v7.8
 # - 修正儲值金清零邏輯：儲值金單必走 /booking/stored_value_routine，優惠券A = 服務總額 - 儲值金餘額。
 # - 客付補價差單必走 /booking/single，優惠券B = 儲值金餘額。
@@ -37,7 +41,7 @@
 # - 保留載具/統編資訊相容欄位
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "7.8"
+__version__ = "7.9"
 
 """
 單筆快速建單模組（信用卡 / ATM / 儲值金）
@@ -1973,12 +1977,89 @@ def _search_lemon_cleaners(session, base_url):
     return entries
 
 
-def _get_cleaner_shifts_on_date(session, base_url, cleaner_id, date_str):
+def _shift_value_to_code(value):
+    """將 cleaner1 shift 頁面的 radio value 轉成內部班別代碼。"""
+    value = str(value or "").strip()
+    return VALUE_TO_SHIFT_CODE.get(value, value)
+
+
+def _shift_code_to_value(code):
+    """將內部班別代碼轉成 cleaner1 shift 頁面的 radio value。"""
+    code = str(code or "").strip()
+    for value, mapped in VALUE_TO_SHIFT_CODE.items():
+        if mapped == code:
+            return value
+    return code
+
+
+def _shift_code_to_group(code):
+    """回傳 cleaner1 shift 頁面的 radio name 尾碼：all / 1(上午) / 2(下午) / 3(晚上)。"""
+    code = str(code or "").strip()
+    if code in {"全6", "全8"}:
+        return "all"
+    if code in {"上2", "上3", "上4"}:
+        return "1"
+    if code in {"下2", "下3", "下4"}:
+        return "2"
+    if code in {"晚2"}:
+        return "3"
+    return "1"
+
+
+def _shift_codes_conflict(existing_code, target_code):
     """
-    GET /cleaner1/{id}/shift?month=YYYY-MM → 回傳指定日期已勾選的班表代碼 set。
-    例如：{"上3", "全6"}
+    判斷同一位檸檬人同一天既有勾班是否與目標時段衝突。
+
+    規則：
+    - 全6 / 全8 與任何目標時段衝突。
+    - 上午只與上午或全日衝突；下午只與下午或全日衝突；晚上只與晚上或全日衝突。
+    - 例：已有全6，不可再勾上4；已有下3，可以再勾上4。
     """
-    ym = date_str[:7]  # "2026-07"
+    existing_code = _shift_value_to_code(existing_code)
+    target_code = _shift_value_to_code(target_code)
+    if not existing_code or not target_code:
+        return False
+    if existing_code == target_code:
+        return False
+    if existing_code in {"全6", "全8"} or target_code in {"全6", "全8"}:
+        return True
+    return target_code in SHIFT_CONFLICT_TABLE.get(existing_code, set())
+
+
+def _parse_cleaner_shift_page(html_text, date_str=None):
+    """
+    解析 /cleaner1/{id}/shift?month=YYYY-MM 頁面。
+    回傳 (csrf, checked_fields, checked_codes_on_date)
+    checked_fields 會保留全月所有已勾班，POST 時一起送回，避免覆蓋既有排班。
+    """
+    token_m = re.search(r'name=["\']_token["\'][^>]*value=["\']([^"\']+)["\']', html_text or "")
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf:
+        meta_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html_text or "")
+        csrf = meta_m.group(1) if meta_m else ""
+
+    checked_fields = []
+    checked_codes_on_date = set()
+    # cleaner shift 頁面格式：<input type="radio" date="YYYY-MM-DD" name="shift_YYYY-MM-DD_1" value="0830-1230" checked>
+    for m in re.finditer(r'<input\b[^>]*\bchecked\b[^>]*>', html_text or "", re.I):
+        tag = m.group(0)
+        name_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.I)
+        value_m = re.search(r'\bvalue=["\']?([^"\'\s>]+)', tag, re.I)
+        date_m = re.search(r'\bdate=["\']([^"\']+)["\']', tag, re.I)
+        if not name_m or not value_m:
+            continue
+        name = name_m.group(1)
+        value = value_m.group(1)
+        checked_fields.append((name, value))
+        d = date_m.group(1) if date_m else ""
+        if date_str and d == date_str:
+            checked_codes_on_date.add(_shift_value_to_code(value))
+    return csrf, checked_fields, checked_codes_on_date
+
+
+def _get_cleaner_shift_form_info(session, base_url, cleaner_id, date_str):
+    """讀取檸檬人排班頁，回傳 CSRF、全月已勾欄位、指定日期已勾班別。"""
+    ym = str(date_str)[:7]
     resp = session.get(
         f"{base_url}/cleaner1/{cleaner_id}/shift",
         params={"month": ym},
@@ -1986,34 +2067,127 @@ def _get_cleaner_shifts_on_date(session, base_url, cleaner_id, date_str):
         allow_redirects=True,
     )
     if resp.status_code != 200:
-        return set()
+        return "", [], set(), f"HTTP {resp.status_code}"
+    csrf, checked_fields, checked_codes = _parse_cleaner_shift_page(resp.text, date_str)
+    return csrf, checked_fields, checked_codes, ""
 
-    # 找目標日期區塊
-    # 後台格式通常是 data-date="2026-07-20" 或日期出現在 <th>
-    day = date_str[8:10].lstrip("0")  # "20"
-    # 嘗試幾種格式找日期區塊
-    patterns = [
-        rf'{re.escape(date_str)}.*?(?={re.escape(ym)}|$)',
-        rf'>{day}</.*?(?=>\d{{1,2}}</|$)',
-    ]
-    # 更可靠：找 isLock checkbox 帶有日期
-    checked = set()
-    checked = set()
-    # 找 isLock checkbox 帶有日期（格式：name="isLock[DATE][TYPE]" checked）
-    day_pat = date_str.replace("-", "\\-")
-    for m in re.finditer(
-        r'isLock\[(' + re.escape(date_str) + r'\]\[([^\]]+)\][^>]*checked',
-        resp.text, re.I,
-    ):
-        checked.add(m.group(2))
 
-    # 備用：value="YYYY-MM-DD_TYPE" checked
-    if not checked:
-        for m in re.finditer(
-            re.escape(date_str) + r'_([A-Za-z0-9]+)[^>]*checked',
-            resp.text, re.I,
-        ):
-            checked.add(m.group(1))
+def _get_cleaner_shifts_on_date(session, base_url, cleaner_id, date_str):
+    """
+    GET /cleaner1/{id}/shift?month=YYYY-MM → 回傳指定日期已勾選的班表代碼 set。
+    例如：{"上3", "全6"}
+    """
+    _csrf, _fields, checked_codes, _msg = _get_cleaner_shift_form_info(
+        session, base_url, cleaner_id, date_str
+    )
+    return checked_codes
+
+
+def _set_cleaner_shift_if_available(session, base_url, cleaner_id, cleaner_name, date_str, target_shift_code):
+    """
+    若檸檬人同日沒有衝突時段，於 /cleaner1/{id}/shift 補勾目標班別。
+    不清除既有非衝突勾班；例如已有下3，仍可補勾上4。
+    """
+    csrf, checked_fields, checked_codes, err = _get_cleaner_shift_form_info(
+        session, base_url, cleaner_id, date_str
+    )
+    if err:
+        return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": err, "checked": sorted(checked_codes)}
+
+    target_shift_code = _shift_value_to_code(target_shift_code)
+    conflicts = sorted(c for c in checked_codes if _shift_codes_conflict(c, target_shift_code))
+    if conflicts:
+        return {
+            "success": False,
+            "name": cleaner_name,
+            "id": cleaner_id,
+            "reason": f"{date_str} 已勾 {'、'.join(conflicts)}，與 {target_shift_code} 衝突",
+            "checked": sorted(checked_codes),
+        }
+
+    # 已經有同一班別或同區塊等效班別時，視為可用，不重複 POST。
+    if target_shift_code in checked_codes:
+        return {
+            "success": True,
+            "name": cleaner_name,
+            "id": cleaner_id,
+            "message": f"{cleaner_name} {date_str} 已有 {target_shift_code} 勾班",
+            "checked": sorted(checked_codes),
+            "already_checked": True,
+        }
+
+    target_name = f"shift_{date_str}_{_shift_code_to_group(target_shift_code)}"
+    target_value = _shift_code_to_value(target_shift_code)
+    fields = []
+    if csrf:
+        fields.append(("_token", csrf))
+    seen = set()
+    for name, value in checked_fields:
+        key = (name, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        fields.append((name, value))
+    if (target_name, target_value) not in seen:
+        fields.append((target_name, target_value))
+
+    resp = session.post(
+        f"{base_url}/cleaner1/{cleaner_id}/shift",
+        params={"month": str(date_str)[:7]},
+        data=fields,
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    ok = resp.status_code in (200, 302)
+    return {
+        "success": ok,
+        "name": cleaner_name,
+        "id": cleaner_id,
+        "message": f"{cleaner_name} 已補勾 {date_str} {target_shift_code}" if ok else f"POST 失敗：HTTP {resp.status_code}",
+        "checked": sorted(checked_codes),
+        "target": target_shift_code,
+    }
+
+
+def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, person_count):
+    """
+    從 /cleaner1?keyword=檸檬 找檸檬人，逐一檢查 /cleaner1/{id}/shift。
+    若同日已有衝突時段，跳過該檸檬人；不衝突者補勾目標班別。
+    """
+    target_shift_code = _period_to_shift_code(period_s)
+    if not target_shift_code:
+        return {"success": False, "message": f"無法判斷服務時段 {period_s} 對應班別", "assigned": [], "skipped": []}
+
+    cleaners = _search_lemon_cleaners(session, base_url)
+    if not cleaners:
+        return {"success": False, "message": "找不到檸檬人清單", "assigned": [], "skipped": []}
+
+    need = int(person_count)
+    assigned = []
+    assigned_ids = []
+    skipped = []
+    for cleaner_id, cleaner_name in cleaners:
+        if len(assigned) >= need:
+            break
+        result = _set_cleaner_shift_if_available(
+            session, base_url, cleaner_id, cleaner_name, service_date, target_shift_code
+        )
+        if result.get("success"):
+            assigned.append(cleaner_name)
+            assigned_ids.append(str(cleaner_id))
+        else:
+            skipped.append(result)
+
+    ok = len(assigned) >= need
+    return {
+        "success": ok,
+        "message": f"已預先補勾檸檬人：{'、'.join(assigned)}" if ok else f"可用檸檬人不足：需要 {need} 位，找到 {len(assigned)} 位",
+        "assigned": assigned,
+        "assigned_ids": assigned_ids,
+        "skipped": skipped,
+        "target_shift_code": target_shift_code,
+    }
+
 
 def _get_schedule_edit_info(session, base_url, date_str, purchase_id):
     """
@@ -2080,7 +2254,24 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     if not purchase_id:
         return {"success": False, "message": f"無法取得訂單 {order_no_a} 的後台 ID"}
 
-    # Step 2: GET 排班修改頁
+    # Step 2: 先至 /cleaner1/{id}/shift 補勾檸檬人班別；若同日已有衝突時段就改找下一位
+    pre_shift_result = ensure_lemon_cleaner_shifts(
+        session=session,
+        base_url=base_url,
+        service_date=service_date,
+        period_s=period_s,
+        person_count=person_count,
+    )
+    if not pre_shift_result.get("success"):
+        return {
+            "success": False,
+            "message": pre_shift_result.get("message", "檸檬人勾班失敗"),
+            "pre_shift_result": pre_shift_result,
+        }
+
+    preferred_names = list(pre_shift_result.get("assigned") or [])
+
+    # Step 3: GET 排班修改頁
     csrf, origin_ids, slots = _get_schedule_edit_info(
         session, base_url, service_date, purchase_id
     )
@@ -2093,18 +2284,26 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     assigned_names = []
     missing_slots = []
 
+    used_names = set()
     for i, slot_map in enumerate(slots):
         if i >= n:
             break
-        # slot_map 是 {名稱: shiftId}，找含「檸檬人」的那個
+        # 優先選剛才已在 /cleaner1/{id}/shift 補勾且不衝突的檸檬人，避免選到同日已有衝突班的人。
         lemon_entry = None
-        for name_key, sid in slot_map.items():
-            if "檸檬人" in name_key:
-                lemon_entry = (name_key.strip(), sid)
+        for preferred in preferred_names:
+            if preferred in used_names:
+                continue
+            for name_key, sid in slot_map.items():
+                clean_name = name_key.strip()
+                if preferred == clean_name or preferred in clean_name or clean_name in preferred:
+                    lemon_entry = (clean_name, sid)
+                    break
+            if lemon_entry:
                 break
         if lemon_entry:
             shift_choices.append(lemon_entry[1])
             assigned_names.append(lemon_entry[0])
+            used_names.add(lemon_entry[0])
         else:
             missing_slots.append(i + 1)
 
@@ -2134,6 +2333,7 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     return {
         "success": success,
         "assigned": assigned_names,
+        "pre_shift_result": pre_shift_result,
         "message": f"已將配班改為：{'、'.join(assigned_names)}" if success
                    else f"POST 失敗：HTTP {post_resp.status_code}",
     }
