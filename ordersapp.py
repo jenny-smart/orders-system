@@ -1,15 +1,19 @@
 # ============================================================
-# 檔名：ordersapp_7_7.py
-# 版本：v7.7
+# 檔名：ordersapp_7_8.py
+# 版本：v7.8
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v7.8
+# - 修正儲值金清零說明與計算：優惠券A = 服務總額 - 儲值金餘額，不再用全額券。
+# - 明確拆分介面：第一段用 /booking/stored_value_routine，第二段用 /booking/single。
+# - 例：儲值金 1650、服務總額 4800 時，優惠券A 顯示 3150。
 # v7.7
 # - 儲值金補價差拆成兩段按鈕：先建立儲值金折抵單，再建立客付補價差單。
 # - 日期類型改由服務日期自動判斷：週一到週五為平日，週六日為週末。
-# - 儲值金折抵單使用優惠券A全額折抵，目標總金額為 0。
+# - 儲值金折抵單使用「服務總額 - 儲值金餘額」作為優惠券A，剩餘額扣儲值金後歸零。
 # v7.6
 # - 修正 /booking/stored_value_routine 回傳 {"count":1} 時，改視為後台已受理並加強重試查詢新訂單編號。
 # - 若後台已建立但訂單列表延遲更新，會依電話、日期、時段、地址、付款方式回查最可能的新訂單。
@@ -32,7 +36,7 @@
 # - LINE通知移除區域選擇，由訂單資料自動判斷
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "7.5"
+__version__ = "7.8"
 
 import html
 import json
@@ -1452,7 +1456,8 @@ else:
         info_panel("流程說明", [
             "此功能拆成兩段：先成立儲值金折抵單，再成立客付補價差訂單。",
             "日期類型由服務日期自動判斷：週一到週五為平日，週六日為週末。",
-            "儲值金折抵單會用優惠券A全額折抵，目標是讓該單總金額為 0；客付補價差單再用優惠券B折抵原儲值金餘額。",
+            "儲值金清零單走 /booking/stored_value_routine，優惠券A = 服務總額 - 儲值金餘額；剩餘額用儲值金扣掉後歸零。",
+            "補差價訂單走 /booking/single，優惠券B = 原儲值金餘額，付款方式限 ATM / 信用卡。",
             "同一天同一會員同時有儲值金單與補差價單是正常情境，因為它們代表同一次服務的兩種付款拆單。",
         ])
 
@@ -1511,20 +1516,21 @@ else:
             sv_region = st.selectbox("適用地區", [""] + list(COUPON_COMPANY_ID_MAP.keys()), format_func=lambda x: x or "依地址自動判斷", key="sv_auto_region")
 
         st.markdown("<hr>", unsafe_allow_html=True)
-        step("5", "第一段：建立儲值金折抵單")
+        step("5", "第一段：建立儲值金清零訂單")
+        sv_stored_total_preview = sv_unit_price * sv_person_hours
         st.markdown(
-            f'<div class="hint-box">儲值金折抵單將用 <b>{sv_unit_price} × {sv_person_hours} = {sv_unit_price * sv_person_hours}</b> 建立，並用優惠券A全額折抵，目標讓該單總金額為 <b>0</b>。</div>',
+            f'<div class="hint-box">儲值金清零訂單會送到 <b>/booking/stored_value_routine</b>。服務總額為 <b>{sv_unit_price} × {sv_person_hours} = {sv_stored_total_preview}</b>；優惠券A會用「服務總額 - 儲值金餘額」計算，剩餘金額由儲值金扣抵後歸零。</div>',
             unsafe_allow_html=True,
         )
 
-        if st.button("① 建立儲值金折抵單（總金額 0）", use_container_width=True, key="sv_create_stored_btn"):
+        if st.button("① 建立儲值金清零訂單（stored_value_routine）", use_container_width=True, key="sv_create_stored_btn"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not sv_phone.strip():
                 st.error("請輸入客人手機號碼")
             else:
                 try:
-                    with st.spinner("第一段執行中：查儲值金 → 建優惠券A → 建儲值金折抵單 → 換檸檬人…"):
+                    with st.spinner("第一段執行中：查儲值金 → 建優惠券A → 建儲值金清零訂單 → 換檸檬人…"):
                         stored_stage = stored_value_makeup_create_stored_order(
                             env_name=env,
                             backend_email=backend_email.strip(),
@@ -1552,9 +1558,10 @@ else:
             c1.metric("儲值金餘額", f"{stored_stage['balance']} 元")
             c2.metric("日期類型", stored_stage.get("day_type", sv_day_type_auto))
             c3.metric("優惠券A", f"{plan['coupon_a']} 元")
+            st.caption(f"計算式：{plan['dummy_price']} - {stored_stage['balance']} = {plan['coupon_a']}；剩餘 {plan.get('stored_value_applied', stored_stage['balance'])} 扣儲值金。")
             c4.metric("儲值金單", so.get("order_no", "—"))
             ca = stored_stage.get("coupon_a", {})
-            st.success(f"✅ 第一段完成：儲值金折抵單 {so.get('order_no', '—')}；優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')} 已全額折抵。")
+            st.success(f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。")
             lemon_r = stored_stage.get("lemon_result", {})
             if lemon_r.get("success"):
                 st.success(lemon_r.get("message", "已改為檸檬人"))
@@ -1566,7 +1573,7 @@ else:
                 f'<div class="hint-box">客付補價差單會建立優惠券B，面額為原儲值金餘額 <b>{stored_stage["balance"]}</b> 元，付款方式為 <b>{sv_customer_payway}</b>。</div>',
                 unsafe_allow_html=True,
             )
-            if st.button("② 建立客付補價差訂單", use_container_width=True, key="sv_create_paid_btn"):
+            if st.button("② 建立客付補價差訂單（single）", use_container_width=True, key="sv_create_paid_btn"):
                 try:
                     with st.spinner("第二段執行中：建優惠券B → 建客付補價差訂單…"):
                         paid_stage = stored_value_makeup_create_paid_order(
