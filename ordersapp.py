@@ -1376,14 +1376,23 @@ else:
                 copy_button("複製新訂單B備註", conv_result["note_b"], "copy_note_b")
 
             st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("#### 🤖 勾檸檬人結果")
+            lemon_r = conv_result.get("lemon_result", {})
+            if lemon_r and lemon_r.get("success"):
+                st.success(f"✅ {lemon_r.get('message', '配班已更新')}")
+                if lemon_r.get("skipped"):
+                    st.info(f"略過（有衝突）：{', '.join(lemon_r['skipped'])}")
+            elif lemon_r:
+                st.warning(f"⚠️ 勾檸檬人未完成：{lemon_r.get('message', '')}")
+                if lemon_r.get("skipped"):
+                    st.info(f"略過（有衝突）：{', '.join(lemon_r['skipped'])}")
+
             st.markdown("#### ⚠️ 請手動完成")
             st.markdown(
-                "1. 點上方連結進入原訂單A後台 \\n"
-                "2. 把服務人員全部改為 **檸檬人** \\n"
-                "3. 在原訂單A客服備註貼上上方備註文字 \\n"
-                "4. 在新訂單B客服備註貼上上方備註文字"
+                "1. 確認配班已改為檸檬人（若自動失敗，請手動進原訂單A後台更改）\\n"
+                "2. 在原訂單A客服備註貼上上方備註文字 \\n"
+                "3. 在新訂單B客服備註貼上上方備註文字"
             )
-
             if conv_result.get("line_message"):
                 st.markdown("<hr>", unsafe_allow_html=True)
                 st.markdown("#### 💬 新訂單B LINE 訊息")
