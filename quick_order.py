@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_7_9.py
-# 版本：v7.9
+# 檔名：quick_order_8_0.py
+# 版本：v8.0
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v8.0
+# - 修正檸檬人清單解析：若 /cleaner1?keyword=檸檬 找不到排班連結，改直接掃描 /cleaner1/{id}/shift 頁。
+# - 勾班會依人數補勾多位檸檬人；例如 2 人訂單會找 2 位可用檸檬人。
+# - 維持時段衝突判斷：已有全6不可補勾上4，已有下3可補勾上4。
 # v7.9
 # - 檸檬人改由 /cleaner1?keyword=檸檬 與 /cleaner1/{id}/shift 設定勾班。
 # - 勾班前檢查該檸檬人同日已勾時段；全6/全8 與任何目標衝突，同上午/同下午/同晚上互衝，不衝突才補勾。
@@ -1934,46 +1938,88 @@ def _period_to_shift_code(period_s):
 
 def _search_lemon_cleaners(session, base_url):
     """
-    GET /cleaner1?keyword=檸檬
-    解析 /cleaner1/{id}/shift 連結，取得所有檸檬人的 (id, name) 列表。
-    HTML 格式：<a href="/cleaner1/28/shift">排班</a> 附近有「檸檬人1」文字。
-    """
-    resp = session.get(
-        f"{base_url}/cleaner1",
-        params={"keyword": "檸檬"},
-        headers=HEADERS,
-        allow_redirects=True,
-    )
-    if resp.status_code != 200:
-        return []
+    取得檸檬人清單。
 
+    優先：GET /cleaner1?area_id=&keyword=檸檬，解析每列的 /cleaner1/{id}/shift。
+    備援：若列表頁因 HTML 結構不同找不到排班連結，直接嘗試
+          /cleaner1/{id}/shift?month=YYYY-MM，從排班頁「專員：檸檬人N」確認。
+
+    回傳 [(cleaner_id, cleaner_name), ...]。
+    """
     entries = []
     seen_ids = set()
-    # 找 /cleaner1/{id}/shift 連結，取其附近的檸檬人名稱
-    for m in re.finditer(r'/cleaner1/(\d+)/shift', resp.text):
-        cid = m.group(1)
-        if cid in seen_ids:
-            continue
-        # 取該連結前後 300 字找名稱
-        ctx_start = max(0, m.start() - 300)
-        ctx = resp.text[ctx_start: m.end() + 100]
-        name_m = re.search(r"檸檬人\d+", ctx)
-        if name_m:
-            seen_ids.add(cid)
-            entries.append((cid, name_m.group(0)))
 
-    # 備用：從詳細資料連結抓
-    if not entries:
-        for m in re.finditer(r'/cleaner1/(\d+)\"[^>]*>詳細資料', resp.text):
+    def add_entry(cid, name):
+        cid = str(cid or "").strip()
+        name = str(name or "").strip()
+        if not cid or cid in seen_ids or "檸檬人" not in name:
+            return
+        seen_ids.add(cid)
+        entries.append((cid, name))
+
+    try:
+        resp = session.get(
+            f"{base_url}/cleaner1",
+            params={"area_id": "", "keyword": "檸檬"},
+            headers=HEADERS,
+            allow_redirects=True,
+        )
+    except Exception:
+        resp = None
+
+    if resp is not None and resp.status_code == 200:
+        html = resp.text or ""
+        # 常見：href="/cleaner1/28/shift" 或完整 URL。
+        for m in re.finditer(r'(?:href|data-href)=["\'][^"\']*/cleaner1/(\d+)/shift[^"\']*["\']', html, re.I):
             cid = m.group(1)
-            if cid in seen_ids:
-                continue
-            ctx = resp.text[max(0, m.start()-300): m.end()+50]
+            ctx = html[max(0, m.start() - 800): m.end() + 800]
             name_m = re.search(r"檸檬人\d+", ctx)
-            name = name_m.group(0) if name_m else f"檸檬人"
-            seen_ids.add(cid)
-            entries.append((cid, name))
+            add_entry(cid, name_m.group(0) if name_m else "")
 
+        # 有些按鈕可能使用 onclick="location.href='.../cleaner1/28/shift'"。
+        for m in re.finditer(r'/cleaner1/(\d+)/shift', html, re.I):
+            cid = m.group(1)
+            ctx = html[max(0, m.start() - 800): m.end() + 800]
+            name_m = re.search(r"檸檬人\d+", ctx)
+            add_entry(cid, name_m.group(0) if name_m else "")
+
+        # 備用：詳細資料連結附近找名字，再用同一 id 嘗試 shift。
+        for m in re.finditer(r'/cleaner1/(\d+)(?:["\'?/#]|[^/])', html, re.I):
+            cid = m.group(1)
+            ctx = html[max(0, m.start() - 800): m.end() + 800]
+            name_m = re.search(r"檸檬人\d+", ctx)
+            if name_m:
+                add_entry(cid, name_m.group(0))
+
+    if entries:
+        entries.sort(key=lambda item: int(re.search(r"\d+", item[1]).group(0)) if re.search(r"\d+", item[1]) else 9999)
+        return entries
+
+    # 最後備援：從已知後台慣例掃描 cleaner id。檸檬人1 在目前環境為 /cleaner1/28/shift，
+    # 但為避免不同環境 id 不同，向前後掃一段，抓到「專員：檸檬人N」才採用。
+    ym = date.today().strftime("%Y-%m")
+    candidate_ids = list(range(20, 81)) + list(range(1, 20)) + list(range(81, 141))
+    for cid in candidate_ids:
+        try:
+            r = session.get(
+                f"{base_url}/cleaner1/{cid}/shift",
+                params={"month": ym},
+                headers=HEADERS,
+                allow_redirects=True,
+            )
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        name_m = re.search(r"專員[：:]\s*(?:<[^>]+>\s*)?(檸檬人\d+)", r.text or "")
+        if not name_m:
+            name_m = re.search(r"檸檬人\d+", r.text or "")
+        if name_m:
+            add_entry(cid, name_m.group(1) if name_m.lastindex else name_m.group(0))
+            if len(entries) >= 20:
+                break
+
+    entries.sort(key=lambda item: int(re.search(r"\d+", item[1]).group(0)) if re.search(r"\d+", item[1]) else 9999)
     return entries
 
 
