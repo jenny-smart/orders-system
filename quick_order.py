@@ -1787,6 +1787,19 @@ def convert_order(
 # =========================================================
 
 # 時段衝突表：原訂單時段 → 哪些班表時段會衝突
+# 班表頁 radio value → 班表代碼
+VALUE_TO_SHIFT_CODE = {
+    "6":         "全6",
+    "8":         "全8",
+    "0830-1230": "上4",
+    "0900-1200": "上3",
+    "0900-1100": "上2",
+    "1400-1600": "下2",
+    "1400-1700": "下3",
+    "1400-1800": "下4",
+    "1900-2100": "晚2",
+}
+
 SHIFT_CONFLICT_TABLE = {
     "全6": {"上3", "上4", "上2", "全6", "全8"},
     "全8": {"上3", "上4", "上2", "下2", "下3", "下4", "全6", "全8"},
@@ -1819,7 +1832,9 @@ def _period_to_shift_code(period_s):
 
 def _search_lemon_cleaners(session, base_url):
     """
-    GET /cleaner1?keyword=檸檬 → 回傳所有檸檬人的 (id, name) 列表。
+    GET /cleaner1?keyword=檸檬
+    解析 /cleaner1/{id}/shift 連結，取得所有檸檬人的 (id, name) 列表。
+    HTML 格式：<a href="/cleaner1/28/shift">排班</a> 附近有「檸檬人1」文字。
     """
     resp = session.get(
         f"{base_url}/cleaner1",
@@ -1829,31 +1844,34 @@ def _search_lemon_cleaners(session, base_url):
     )
     if resp.status_code != 200:
         return []
-    # 解析每列：<a href="/cleaner1/{id}">...</a> 加上旁邊的名稱
+
     entries = []
-    for m in re.finditer(
-        r'href="/cleaner1/(\d+)"[^>]*>.*?詳細資料',
-        resp.text,
-        re.DOTALL,
-    ):
-        chunk = m.group(0)
+    seen_ids = set()
+    # 找 /cleaner1/{id}/shift 連結，取其附近的檸檬人名稱
+    for m in re.finditer(r'/cleaner1/(\d+)/shift', resp.text):
         cid = m.group(1)
-        # 名稱在同一 row 裡，找「檸檬人X」
-        name_m = re.search(r"檸檬人\d+", chunk)
+        if cid in seen_ids:
+            continue
+        # 取該連結前後 300 字找名稱
+        ctx_start = max(0, m.start() - 300)
+        ctx = resp.text[ctx_start: m.end() + 100]
+        name_m = re.search(r"檸檬人\d+", ctx)
         if name_m:
+            seen_ids.add(cid)
             entries.append((cid, name_m.group(0)))
-    # 若上面抓不到，改用更寬鬆的方式
+
+    # 備用：從詳細資料連結抓
     if not entries:
-        # 找所有含「檸檬人」的列
-        rows = re.findall(
-            r'href="/cleaner1/(\d+)"[^>]*>詳細資料',
-            resp.text,
-        )
-        # 找名稱
-        names = re.findall(r"檸檬人\d+", resp.text)
-        for i, cid in enumerate(rows):
-            name = names[i] if i < len(names) else f"檸檬人{i+1}"
+        for m in re.finditer(r'/cleaner1/(\d+)\"[^>]*>詳細資料', resp.text):
+            cid = m.group(1)
+            if cid in seen_ids:
+                continue
+            ctx = resp.text[max(0, m.start()-300): m.end()+50]
+            name_m = re.search(r"檸檬人\d+", ctx)
+            name = name_m.group(0) if name_m else f"檸檬人"
+            seen_ids.add(cid)
             entries.append((cid, name))
+
     return entries
 
 
