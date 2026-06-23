@@ -1423,13 +1423,12 @@ else:
             else:
                 try:
                     with st.spinner("查詢儲值金中…"):
-                        base_url = _configure_environment(env)
-                        session = requests.Session()
-                        login(session, backend_email.strip(), backend_password.strip())
                         sv_balance, member_info = get_stored_value(
-                            session, base_url,
-                            sv_phone.strip(),
-                            CLEAN_TYPE_ID_MAP[sv_clean_type]
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            phone=sv_phone.strip(),
+                            clean_type_id=CLEAN_TYPE_ID_MAP[sv_clean_type],
                         )
                     if sv_balance <= 0:
                         st.warning("查無儲值金或餘額為 0")
