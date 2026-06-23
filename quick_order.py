@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_8_2.py
-# 版本：v8.2
+# 檔名：quick_order_8_3.py
+# 版本：v8.3
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v8.3
+# - 修正排班換人送出邏輯：訂單有幾位配班人員，就必須勾選幾位不同的檸檬人。
+# - 排班修改頁每個槽位會優先選已補勾成功的檸檬人；若仍缺人，會從該槽位可換班名單中依檸檬人編號選檸檬人2、檸檬人3...，不改用一般專員。
+# - 若任一槽位找不到檸檬人，直接停止並提示，不會用洪暐智等非檸檬人補位。
 # v8.2
 # - 修正檸檬人補勾順序：2 人訂單會依序檢查檸檬人1、檸檬人2、檸檬人3...，已衝突才往下一位。
 # - 強化 /cleaner1?keyword=檸檬 清單解析，若清單沒有排班連結會掃描 /cleaner1/{id}/shift?month=服務月份 確認檸檬人。
@@ -2371,22 +2375,42 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     assigned_names = []
     missing_slots = []
 
+    def _lemon_name_no(name):
+        m = re.search(r"檸檬人\s*(\d+)", str(name or ""))
+        return int(m.group(1)) if m else 9999
+
     used_names = set()
     for i, slot_map in enumerate(slots):
         if i >= n:
             break
-        # 優先選剛才已在 /cleaner1/{id}/shift 補勾且不衝突的檸檬人，避免選到同日已有衝突班的人。
+        # 每個配班槽位都必須選「檸檬人」，且不能重複。
+        # 先選剛才已在 /cleaner1/{id}/shift 補勾成功的檸檬人；
+        # 若排班頁槽位仍有其他檸檬人可選，依檸檬人編號補上，不可改用一般專員。
         lemon_entry = None
+
         for preferred in preferred_names:
             if preferred in used_names:
                 continue
             for name_key, sid in slot_map.items():
                 clean_name = name_key.strip()
+                if "檸檬人" not in clean_name or clean_name in used_names:
+                    continue
                 if preferred == clean_name or preferred in clean_name or clean_name in preferred:
                     lemon_entry = (clean_name, sid)
                     break
             if lemon_entry:
                 break
+
+        if not lemon_entry:
+            lemon_candidates = [
+                (name_key.strip(), sid)
+                for name_key, sid in slot_map.items()
+                if "檸檬人" in name_key and name_key.strip() not in used_names
+            ]
+            lemon_candidates.sort(key=lambda x: _lemon_name_no(x[0]))
+            if lemon_candidates:
+                lemon_entry = lemon_candidates[0]
+
         if lemon_entry:
             shift_choices.append(lemon_entry[1])
             assigned_names.append(lemon_entry[0])
@@ -2395,11 +2419,17 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
             missing_slots.append(i + 1)
 
     if missing_slots:
-        available = list(slots[0].keys()) if slots else []
+        available_by_slot = []
+        for idx, slot_map in enumerate(slots[:n], start=1):
+            available_by_slot.append({
+                "slot": idx,
+                "lemon_candidates": [name for name in slot_map.keys() if "檸檬人" in name],
+            })
         return {
             "success": False,
-            "message": f"槽位 {missing_slots} 找不到可用的檸檬人（排班頁未顯示）",
-            "available_in_slot0": available[:10],
+            "message": f"槽位 {missing_slots} 找不到可用的檸檬人；訂單需要 {n} 位不同檸檬人，已選 {len(assigned_names)} 位。",
+            "available_by_slot": available_by_slot,
+            "pre_shift_result": pre_shift_result,
         }
 
     # Step 5: POST
