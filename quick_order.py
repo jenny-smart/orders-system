@@ -1,15 +1,19 @@
 # ============================================================
-# 檔名：quick_order_7_7.py
-# 版本：v7.7
+# 檔名：quick_order_7_8.py
+# 版本：v7.8
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v7.8
+# - 修正儲值金清零邏輯：儲值金單必走 /booking/stored_value_routine，優惠券A = 服務總額 - 儲值金餘額。
+# - 客付補價差單必走 /booking/single，優惠券B = 儲值金餘額。
+# - 例：儲值金 1650、服務總額 4800 時，儲值金清零單優惠券A = 3150。
 # v7.7
 # - 儲值金補價差拆成兩段：先建立儲值金折抵單，再建立客付補價差單。
 # - 日期類型改由服務日期自動判斷：週一到週五為平日，週六日為週末。
-# - 儲值金折抵單改用全額優惠券折抵，讓該單總金額為 0。
+# - 儲值金折抵單優惠券A = 服務總額 - 儲值金餘額；剩餘金額用儲值金扣抵後總額歸零。
 # - 保留 v7.6 對 stored_value_routine 回傳 count 的回查處理。
 # v7.6
 # - 修正 /booking/stored_value_routine 回傳 {"count":1} 時，改視為後台已受理並加強重試查詢新訂單編號。
@@ -33,7 +37,7 @@
 # - 保留載具/統編資訊相容欄位
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "7.7"
+__version__ = "7.8"
 
 """
 單筆快速建單模組（信用卡 / ATM / 儲值金）
@@ -2642,13 +2646,16 @@ def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_
     """
     計算儲值金補價差方案。
 
-    v7.7 規則：
+    v7.8 規則：
     - 平日單價 600，週末單價 700。
-    - 儲值金折抵單的金額 = 單價 × 人時（若未提供人時，才用最小倍數 >= 儲值金餘額）。
-    - zero_total_stored_order=True 時，優惠券A = 儲值金折抵單金額，讓該單總金額為 0。
-    - 優惠券B = 儲值金餘額，用於客付補價差訂單。
+    - 儲值金清零單一定走 /booking/stored_value_routine。
+    - 儲值金清零單服務總額 = 單價 × 人時。
+    - 優惠券A = 服務總額 - 儲值金餘額，剩餘金額剛好用儲值金扣掉。
+      例：儲值金 1650、服務總額 4800 → 優惠券A 3150，剩餘 1650 扣儲值金後歸零。
+    - 客付補價差單一定走 /booking/single，優惠券B = 儲值金餘額。
     """
     import math
+    sv = int(float(sv or 0))
     unit_price = 700 if str(day_type or "").strip() == "週末" else 600
     try:
         ph = int(float(total_person_hours or 0))
@@ -2661,7 +2668,7 @@ def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_
         n = math.ceil(sv / unit_price) if sv > 0 else 1
         dummy_price = n * unit_price
 
-    coupon_a = dummy_price if zero_total_stored_order else max(dummy_price - sv, 0)
+    coupon_a = max(dummy_price - sv, 0)
     coupon_b = sv
     customer_pays = (new_service_price - sv) if new_service_price else None
     return {
@@ -2672,7 +2679,8 @@ def calc_stored_value_plan(sv, new_service_price=None, day_type="平日", total_
         "customer_pays": customer_pays,
         "n": n,
         "total_person_hours": ph or n,
-        "stored_order_total_after_coupon": 0 if zero_total_stored_order else sv,
+        "stored_value_applied": min(sv, dummy_price),
+        "stored_order_total_after_coupon": max(dummy_price - coupon_a - sv, 0),
         "zero_total_stored_order": bool(zero_total_stored_order),
     }
 
@@ -2761,7 +2769,7 @@ def stored_value_makeup_create_stored_order(
     env_name, backend_email, backend_password, phone, clean_type_id, service_date, period_s,
     hour, person, address="", region="", coupon_prefix_base="", coupon_valid_days=60,
 ):
-    """第一段：建立儲值金折抵單，並把該單總金額用優惠券A折到 0，再換成檸檬人。"""
+    """第一段：用 /booking/stored_value_routine 建立儲值金清零單，再換成檸檬人。"""
     ctx = _stored_value_makeup_context(
         env_name, backend_email, backend_password, phone, clean_type_id, service_date,
         period_s, hour, person, address, region, coupon_prefix_base, coupon_valid_days,
@@ -2770,7 +2778,7 @@ def stored_value_makeup_create_stored_order(
     services = ["居家清潔", "裝修細清"]
     coupon_a = create_coupon(
         env_name, backend_email, backend_password,
-        title=f"儲值金折抵歸零-{phone}", discount=ctx["plan"]["coupon_a"],
+        title=f"儲值金清零-{phone}", discount=ctx["plan"]["coupon_a"],
         date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1",
         regions=regions, service_items=services,
     )
@@ -2799,7 +2807,7 @@ def stored_value_makeup_create_stored_order(
     note = (
         f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，"
         f"{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，"
-        f"優惠券A全額折抵 {ctx['plan']['coupon_a']} 元，該單總金額應為 0，檸檬人勿動。"
+        f"優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。"
     )
     _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
     return {
@@ -2830,7 +2838,7 @@ def stored_value_makeup_create_paid_order(
     company_title="", company_no="", address="", region="", coupon_prefix_base="",
     coupon_valid_days=60, stored_order_no="", balance_override=None,
 ):
-    """第二段：建立客付補價差單，優惠券B折抵原儲值金餘額。"""
+    """第二段：用 /booking/single 建立客付補價差單，優惠券B折抵原儲值金餘額。"""
     ctx = _stored_value_makeup_context(
         env_name, backend_email, backend_password, phone, clean_type_id, service_date,
         period_s, hour, person, address, region, coupon_prefix_base, coupon_valid_days,
