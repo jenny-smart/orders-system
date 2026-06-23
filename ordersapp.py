@@ -1460,11 +1460,13 @@ else:
 
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("#### 步驟說明")
+            _ENV_URL = {"prod": "https://backend.lemonclean.com.tw", "dev": "https://backend-dev.lemonclean.com.tw"}.get(env, "https://backend.lemonclean.com.tw")
+            sv_booking_url = f"{_ENV_URL}/booking/stored_value_routine"
             st.markdown(f"""
 **步驟1** 成立優惠券A（{plan['coupon_a']} 元）
 → 用於讓儲值訂單扣完後剛好歸零
 
-**步驟2** 到 [代客預訂-扣VIP儲值金]({_configure_environment(env)}/booking/stored_value_routine)
+**步驟2** 到 [代客預訂-扣VIP儲值金]({sv_booking_url})
 → 輸入手機 {sv_phone.strip()}，選日期，訂單金額 {plan['dummy_price']} 元，套用優惠券A
 → 儲值金 {sv} 元清零 ✅
 
