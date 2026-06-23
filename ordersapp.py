@@ -1,11 +1,18 @@
 # ============================================================
-# 檔名：ordersapp_7_3.py
-# 版本：v7.3
+# 檔名：ordersapp_7_5.py
+# 版本：v7.5
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
-# 最後更新：2026-06-22
+# 最後更新：2026-06-24
 #
 # Change Log
+# v7.5
+# - 修正 quick_order 匯入方式：改用安全載入與缺少函式提示，避免 Streamlit Cloud 只顯示 ImportError。
+# - 儲值金補價差維持訂單轉換邏輯：建券、儲值金折抵單、客付單、檸檬人換班。
+# - 程式檔頭版本與更新日期同步更新。
+# v7.4
+# - 新增儲值金補價差自動轉換流程。
+# - 平日以 600 倍數、週末以 700 倍數計算儲值金折抵訂單。
 # v7.3
 # - LINE 通知產生器：訂單編號改多筆輸入（text_area，每行一個）
 # - LINE 通知產生器：移除區域選擇欄位，由地址自動判斷
@@ -17,6 +24,8 @@
 # - LINE通知移除區域選擇，由訂單資料自動判斷
 # ============================================================
 # -*- coding: utf-8 -*-
+__version__ = "7.5"
+
 import html
 import json
 import streamlit as st
@@ -25,30 +34,54 @@ from datetime import date, timedelta
 
 from orders import run_process_web, get_region_by_address
 from accounts import ACCOUNTS
-from quick_order import (
-    quick_lookup_member,
-    quick_create_order,
-    quick_check_available_slots,
-    send_confirmation,
-    build_line_message,
-    build_line_message_from_order_no,
-    build_combined_line_message_from_order_nos,
-    get_last_paid_summary,
-    get_last_paid_per_address,
-    get_unserved_paid_orders,
-    get_last_purchase_fetch_debug,
-    build_equivalent_plans,
-    search_available_service_dates,
-    parse_new_customer_order_text,
-    create_coupon,
-    convert_order,
-    get_stored_value,
-    calc_stored_value_plan,
-    stored_value_makeup_convert,
-    COUPON_COMPANY_ID_MAP,
-    COUPON_SERVICE_ITEM_MAP,
-    COUPON_TYPE_MAP,
-)
+# v7.5：改用安全載入 quick_order，讓 Streamlit Cloud 顯示實際缺少的函式名稱，
+# 避免只有紅色 ImportError 而不知道是哪一個名稱沒有同步。
+try:
+    import quick_order as qo
+except Exception as e:
+    st.error(f"quick_order.py 載入失敗：{type(e).__name__}: {e}")
+    st.stop()
+
+# 相容舊命名：若舊檔案只提供 stored_value_makeup，補成新版名稱。
+if not hasattr(qo, "stored_value_makeup_convert") and hasattr(qo, "stored_value_makeup"):
+    qo.stored_value_makeup_convert = qo.stored_value_makeup
+
+_REQUIRED_QUICK_ORDER_NAMES = [
+    "quick_lookup_member",
+    "quick_create_order",
+    "quick_check_available_slots",
+    "send_confirmation",
+    "build_line_message",
+    "build_line_message_from_order_no",
+    "build_combined_line_message_from_order_nos",
+    "get_last_paid_summary",
+    "get_last_paid_per_address",
+    "get_unserved_paid_orders",
+    "get_last_purchase_fetch_debug",
+    "build_equivalent_plans",
+    "search_available_service_dates",
+    "parse_new_customer_order_text",
+    "create_coupon",
+    "convert_order",
+    "get_stored_value",
+    "calc_stored_value_plan",
+    "stored_value_makeup_convert",
+    "COUPON_COMPANY_ID_MAP",
+    "COUPON_SERVICE_ITEM_MAP",
+    "COUPON_TYPE_MAP",
+]
+
+_missing_quick_order_names = [name for name in _REQUIRED_QUICK_ORDER_NAMES if not hasattr(qo, name)]
+if _missing_quick_order_names:
+    st.error(
+        "quick_order.py 版本不完整，請用 v7.5 覆蓋 GitHub 上的 quick_order.py。"
+        + "\n缺少："
+        + "、".join(_missing_quick_order_names)
+    )
+    st.stop()
+
+for _name in _REQUIRED_QUICK_ORDER_NAMES:
+    globals()[_name] = getattr(qo, _name)
 
 st.set_page_config(page_title="服務訂單系統", page_icon="🧹", layout="wide")
 
