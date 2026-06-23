@@ -1749,10 +1749,21 @@ def convert_order(
     # 新訂單 B 的 LINE 訊息
     line_msg = build_line_message(order_b_result)
 
+    # ── Step 6: 自動勾檸檬人 ─────────────────────────────────────────
+    lemon_result = assign_lemon_cleaners_to_order(
+        session=session,
+        base_url=base_url,
+        order_no_a=order_no_a,
+        service_date=service_date_a,
+        period_s=new_period_s,
+        person_count=new_person,
+    )
+
     return {
         "order_no_a": order_no_a,
         "order_no_b": order_no_b,
         "coupon_code": coupon_code,
+        "lemon_result": lemon_result,
         "coupon_discount": coupon_discount,
         "service_date_a": service_date_a,
         "combo_desc": combo_desc,
@@ -1769,6 +1780,279 @@ def convert_order(
         "region": region_a,
     }
 
+
+
+# =========================================================
+# 勾檸檬人（訂單轉換用）
+# =========================================================
+
+# 時段衝突表：原訂單時段 → 哪些班表時段會衝突
+SHIFT_CONFLICT_TABLE = {
+    "全6": {"上3", "上4", "上2", "全6", "全8"},
+    "全8": {"上3", "上4", "上2", "下2", "下3", "下4", "全6", "全8"},
+    "上3": {"上3", "上4", "上2", "全6", "全8"},
+    "上4": {"上3", "上4", "上2", "全6", "全8"},
+    "上2": {"上3", "上4", "上2", "全6", "全8"},
+    "下3": {"下2", "下3", "下4", "全6", "全8"},
+    "下4": {"下2", "下3", "下4", "全6", "全8"},
+    "下2": {"下2", "下3", "下4", "全6", "全8"},
+}
+
+# 時段代碼 → 標準時間 mapping（用來從訂單時段推出代碼）
+PERIOD_TO_SHIFT_CODE = {
+    "09:00-12:00": "上3",
+    "08:30-12:30": "上4",
+    "09:00-11:00": "上2",
+    "14:00-16:00": "下2",
+    "14:00-17:00": "下3",
+    "14:00-18:00": "下4",
+    "09:00-16:00": "全6",
+    "09:00-18:00": "全8",
+}
+
+
+def _period_to_shift_code(period_s):
+    """將訂單時段字串轉為班表代碼，例如 '09:00-16:00' → '全6'。"""
+    compact = str(period_s or "").replace(" ", "")
+    return PERIOD_TO_SHIFT_CODE.get(compact, "")
+
+
+def _search_lemon_cleaners(session, base_url):
+    """
+    GET /cleaner1?keyword=檸檬 → 回傳所有檸檬人的 (id, name) 列表。
+    """
+    resp = session.get(
+        f"{base_url}/cleaner1",
+        params={"keyword": "檸檬"},
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return []
+    # 解析每列：<a href="/cleaner1/{id}">...</a> 加上旁邊的名稱
+    entries = []
+    for m in re.finditer(
+        r'href="/cleaner1/(\d+)"[^>]*>.*?詳細資料',
+        resp.text,
+        re.DOTALL,
+    ):
+        chunk = m.group(0)
+        cid = m.group(1)
+        # 名稱在同一 row 裡，找「檸檬人X」
+        name_m = re.search(r"檸檬人\d+", chunk)
+        if name_m:
+            entries.append((cid, name_m.group(0)))
+    # 若上面抓不到，改用更寬鬆的方式
+    if not entries:
+        # 找所有含「檸檬人」的列
+        rows = re.findall(
+            r'href="/cleaner1/(\d+)"[^>]*>詳細資料',
+            resp.text,
+        )
+        # 找名稱
+        names = re.findall(r"檸檬人\d+", resp.text)
+        for i, cid in enumerate(rows):
+            name = names[i] if i < len(names) else f"檸檬人{i+1}"
+            entries.append((cid, name))
+    return entries
+
+
+def _get_cleaner_shifts_on_date(session, base_url, cleaner_id, date_str):
+    """
+    GET /cleaner1/{id}/shift?month=YYYY-MM → 回傳指定日期已勾選的班表代碼 set。
+    例如：{"上3", "全6"}
+    """
+    ym = date_str[:7]  # "2026-07"
+    resp = session.get(
+        f"{base_url}/cleaner1/{cleaner_id}/shift",
+        params={"month": ym},
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return set()
+
+    # 找目標日期區塊
+    # 後台格式通常是 data-date="2026-07-20" 或日期出現在 <th>
+    day = date_str[8:10].lstrip("0")  # "20"
+    # 嘗試幾種格式找日期區塊
+    patterns = [
+        rf'{re.escape(date_str)}.*?(?={re.escape(ym)}|$)',
+        rf'>{day}</.*?(?=>\d{{1,2}}</|$)',
+    ]
+    # 更可靠：找 isLock checkbox 帶有日期
+    checked = set()
+    checked = set()
+    # 找 isLock checkbox 帶有日期（格式：name="isLock[DATE][TYPE]" checked）
+    day_pat = date_str.replace("-", "\\-")
+    for m in re.finditer(
+        r'isLock\[(' + re.escape(date_str) + r'\]\[([^\]]+)\][^>]*checked',
+        resp.text, re.I,
+    ):
+        checked.add(m.group(2))
+
+    # 備用：value="YYYY-MM-DD_TYPE" checked
+    if not checked:
+        for m in re.finditer(
+            re.escape(date_str) + r'_([A-Za-z0-9]+)[^>]*checked',
+            resp.text, re.I,
+        ):
+            checked.add(m.group(1))
+
+def _get_schedule_edit_info(session, base_url, date_str, purchase_id):
+    """
+    GET /schedule/edit?date={date}&purchase_id={id}
+    解析：
+    - originShiftId[] 值（目前配班的 shift ID）
+    - 各槽位可換班的 {名稱: shiftId} dict
+    回傳 (csrf, origin_ids, slots)
+    slots = [{name: shift_id, ...}, ...]  一個 dict per 人員槽位
+    """
+    resp = session.get(
+        f"{base_url}/schedule/edit",
+        params={"date": date_str, "purchase_id": purchase_id},
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return None, [], []
+
+    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
+    csrf = token_m.group(1) if token_m else ""
+
+    origin_ids = re.findall(r'name=["\']originShiftId\[\]["\'][^>]*value=["\']?(\d+)["\']?', resp.text)
+    if not origin_ids:
+        origin_ids = re.findall(r'value=["\']?(\d+)["\'][^>]*name=["\']originShiftId\[\]', resp.text)
+
+    # 解析各槽位可換班人員
+    # HTML 格式：<label for="shift_N_SHIFTID">姓名</label>
+    #            <input type="radio" name="shiftId[N]" value="SHIFTID">
+    slots = []
+    slot_blocks = re.split(r'name=["\']originShiftId\[\]', resp.text)[1:]
+    for block in slot_blocks:
+        # 取到下一個 originShiftId 為止
+        # 找所有 label/input 對
+        slot_map = {}
+        for m in re.finditer(
+            r'<label[^>]+for=["\']shift_\d+_(\d+)["\'][^>]*>([^<]+)</label>',
+            block,
+        ):
+            shift_id = m.group(1)
+            name = m.group(2).strip()
+            slot_map[name] = shift_id
+        slots.append(slot_map)
+
+    return csrf, origin_ids, slots
+
+
+def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, period_s, person_count):
+    """
+    自動找空閒的檸檬人，把原訂單A的人力改為檸檬人。
+
+    步驟：
+    1. 取 purchase_id
+    2. 搜尋所有檸檬人
+    3. 查每個檸檬人在服務日期的班表，過濾衝突
+    4. GET 排班修改頁取可用 shift ID
+    5. 在頁面上找對應的檸檬人 shift ID
+    6. POST 送出
+
+    回傳 dict：
+        success / assigned / skipped / message
+    """
+    # Step 1: 取 purchase_id
+    purchase_id = _fetch_order_edit_id(session, order_no_a)
+    if not purchase_id:
+        return {"success": False, "message": f"無法取得訂單 {order_no_a} 的後台 ID"}
+
+    original_shift_code = _period_to_shift_code(period_s)
+    conflict_shifts = SHIFT_CONFLICT_TABLE.get(original_shift_code, set())
+
+    # Step 2-3: 搜尋並過濾檸檬人
+    lemon_list = _search_lemon_cleaners(session, base_url)
+    if not lemon_list:
+        return {"success": False, "message": "後台找不到檸檬人，請確認搜尋關鍵字"}
+
+    available_lemons = []
+    skipped = []
+    for cid, name in lemon_list:
+        shifts = _get_cleaner_shifts_on_date(session, base_url, cid, service_date)
+        has_conflict = bool(shifts & conflict_shifts)
+        if shifts and has_conflict:
+            skipped.append(f"{name}（{', '.join(shifts)}）")
+        elif not shifts:
+            # 沒有任何班表代表該日空閒
+            available_lemons.append((cid, name))
+        else:
+            # 有班表但不衝突
+            available_lemons.append((cid, name))
+
+        if len(available_lemons) >= int(person_count):
+            break  # 找夠人了
+
+    if len(available_lemons) < int(person_count):
+        return {
+            "success": False,
+            "message": f"空閒檸檬人不足（需要 {person_count} 人，找到 {len(available_lemons)} 人）",
+            "skipped": skipped,
+            "available": [n for _, n in available_lemons],
+        }
+
+    selected_lemons = available_lemons[:int(person_count)]
+
+    # Step 4: 取排班修改頁
+    csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
+    if not slots:
+        return {"success": False, "message": "無法取得排班修改頁，請手動操作"}
+
+    # Step 5: 在頁面找對應 shift ID
+    shift_choices = []
+    not_found = []
+    for i, (_, lemon_name) in enumerate(selected_lemons):
+        if i >= len(slots):
+            break
+        slot_map = slots[i]
+        # 找含「檸檬人」關鍵字的名稱
+        found_id = None
+        for name_key, sid in slot_map.items():
+            if lemon_name in name_key or "檸檬人" in name_key:
+                found_id = sid
+                break
+        if found_id:
+            shift_choices.append(found_id)
+        else:
+            not_found.append(lemon_name)
+
+    if not_found:
+        return {
+            "success": False,
+            "message": f"以下檸檬人在排班頁找不到（可能日期或時段衝突）：{', '.join(not_found)}",
+            "skipped": skipped,
+        }
+
+    # Step 6: POST
+    fields = [("_token", csrf), ("_method", "PUT")]
+    for oid in origin_ids:
+        fields.append(("originShiftId[]", oid))
+    for i, sid in enumerate(shift_choices):
+        fields.append((f"shiftId[{i}]", sid))
+
+    post_resp = session.post(
+        f"{base_url}/schedule/edit",
+        params={"date": service_date, "purchase_id": purchase_id},
+        data=fields,
+        headers=HEADERS,
+        allow_redirects=True,
+    )
+    success = post_resp.status_code in (200, 302)
+    assigned_names = [n for _, n in selected_lemons]
+
+    return {
+        "success": success,
+        "assigned": assigned_names,
+        "skipped": skipped,
+        "message": f"已將配班改為：{', '.join(assigned_names)}" if success else f"POST 失敗：HTTP {post_resp.status_code}",
+    }
 
 def send_confirmation(order_result):
     """送出後寄確認信，回傳 (是否成功, 訊息)"""
