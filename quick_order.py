@@ -1263,6 +1263,8 @@ def quick_create_order(
     carrier_info="",
     company_no="",
     company_title="",
+    invoice_type_override="",
+    carrier_type_id_override="",
 ):
     """
     建立單筆訂單。流程完全比照人工在後台操作：
@@ -1334,8 +1336,11 @@ def quick_create_order(
     )
     best_addr["fare"] = fare_from_check
 
+    # 發票欄位：若呼叫端有明確指定，優先使用；否則沿用地址/會員前次資料。
+    # invoice_type: 2=二聯式, 3=三聯式；carrier_type_id: 1=會員載具(email), 2=手機條碼。
     invoice_type = str(
         first_nonzero(
+            invoice_type_override,
             purchase_info.get("invoiceType") if purchase_info else "",
             find_nested_value(addr_check, ["invoiceType", "invoice_type"]),
             default="2",
@@ -1343,15 +1348,25 @@ def quick_create_order(
     )
     carrier_type_id = str(
         first_nonzero(
+            carrier_type_id_override,
             purchase_info.get("carrierTypeId") if purchase_info else "",
             default="1",
         )
     )
     carrier_info = str(
-        purchase_info.get("carrierInfo") if purchase_info and purchase_info.get("carrierInfo") else (member.get("email") or "")
+        first_nonzero(
+            carrier_info,
+            purchase_info.get("carrierInfo") if purchase_info else "",
+            member.get("email") or "",
+            default="",
+        )
     )
-    company_title = str(purchase_info.get("companyTitle", "") if purchase_info else "")
-    company_no = str(purchase_info.get("companyNo", "") if purchase_info else "")
+    company_title = str(
+        first_nonzero(company_title, purchase_info.get("companyTitle", "") if purchase_info else "", default="")
+    )
+    company_no = str(
+        first_nonzero(company_no, purchase_info.get("companyNo", "") if purchase_info else "", default="")
+    )
     donate_code = str(purchase_info.get("donateCode", "8585") if purchase_info else "8585")
 
     old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
@@ -2473,7 +2488,7 @@ def create_coupon(
         ("prefix", str(prefix).strip()),
         ("discount", str(int(float(discount)))),
         ("piece", str(int(piece))),
-        ("_token", csrf),
+        ("_token", token),
     ]
     for r in (regions or ["台北"]):
         fields.append(("company_id[]", COUPON_COMPANY_ID_MAP.get(r, "1")))
@@ -2543,31 +2558,198 @@ def get_stored_value(env_name, backend_email, backend_password, phone, clean_typ
     return 0, None
 
 
-def calc_stored_value_plan(sv, new_service_price=None):
+def calc_stored_value_plan(sv, new_service_price=None, day_type="平日"):
     """
     計算儲值金補差額方案。
 
-    sv               : 客人目前儲值金餘額（元）
-    new_service_price: 新服務總金額（元），可為 None（僅計算清零部分）
-
-    回傳 dict：
-        dummy_price  : 儲值訂單金額（600 的最小倍數 >= sv）
-        coupon_a     : 差額優惠券面額（dummy_price - sv）
-        coupon_b     : 原儲值金面額（sv）
-        customer_pays: 客人需補繳（new_service_price - sv）
+    平日以 600 的倍數建立儲值金折抵訂單；週末以 700 的倍數建立。
+    公式：單價倍數金額 - 優惠券A面額 = 儲值金餘額。
     """
     import math
-    n = math.ceil(sv / 600) if sv > 0 else 1
-    dummy_price = n * 600
+    unit_price = 700 if str(day_type or "").strip() == "週末" else 600
+    n = math.ceil(sv / unit_price) if sv > 0 else 1
+    dummy_price = n * unit_price
     coupon_a = dummy_price - sv
     coupon_b = sv
     customer_pays = (new_service_price - sv) if new_service_price else None
     return {
+        "unit_price": unit_price,
         "dummy_price": dummy_price,
         "coupon_a": coupon_a,
         "coupon_b": coupon_b,
         "customer_pays": customer_pays,
         "n": n,
+    }
+
+
+def _invoice_payload(invoice_mode, member_email="", mobile_carrier="", company_title="", company_no=""):
+    """將畫面發票選項轉成 quick_create_order 需要的欄位。"""
+    mode = str(invoice_mode or "會員載具").strip()
+    if mode == "手機載具":
+        if not str(mobile_carrier or "").strip().startswith("/"):
+            raise Exception("手機載具需以 / 開頭")
+        return {
+            "invoice_type_override": "2",
+            "carrier_type_id_override": "2",
+            "carrier_info": str(mobile_carrier).strip(),
+            "company_title": "",
+            "company_no": "",
+            "payment_type": "B2C",
+        }
+    if mode == "三聯式":
+        if not str(company_title or "").strip() or not str(company_no or "").strip():
+            raise Exception("三聯式發票需填寫抬頭與統編")
+        return {
+            "invoice_type_override": "3",
+            "carrier_type_id_override": "1",
+            "carrier_info": "",
+            "company_title": str(company_title).strip(),
+            "company_no": str(company_no).strip(),
+            "payment_type": "B2B",
+        }
+    return {
+        "invoice_type_override": "2",
+        "carrier_type_id_override": "1",
+        "carrier_info": str(member_email or "").strip(),
+        "company_title": "",
+        "company_no": "",
+        "payment_type": "B2C",
+    }
+
+
+def stored_value_makeup_convert(
+    env_name,
+    backend_email,
+    backend_password,
+    phone,
+    clean_type_id,
+    service_date,
+    period_s,
+    hour,
+    person,
+    day_type="平日",
+    customer_payway="ATM",
+    invoice_mode="會員載具",
+    mobile_carrier="",
+    company_title="",
+    company_no="",
+    address="",
+    region="",
+    coupon_prefix_base="",
+    coupon_valid_days=60,
+):
+    """
+    儲值金補價差自動轉換：
+    1. 查儲值金。
+    2. 建優惠券A：用於儲值金折抵訂單，dummy_price - coupon_a = 儲值金餘額。
+    3. 建優惠券B：用於客人付款訂單，折抵原儲值金餘額。
+    4. 建立 /booking/stored_value_routine 儲值金折抵訂單並套 A。
+    5. 將儲值金折抵訂單的配班人員換成檸檬人。
+    6. 建立 /booking/single 客人付款訂單並套 B。
+    """
+    sv, _ = get_stored_value(env_name, backend_email, backend_password, phone, clean_type_id)
+    if sv <= 0:
+        raise Exception("查無儲值金或儲值金餘額為 0")
+
+    plan = calc_stored_value_plan(sv, None, day_type=day_type)
+    today_str = date.today().strftime("%Y-%m-%d")
+    date_e = (date.today() + timedelta(days=int(coupon_valid_days))).strftime("%Y-%m-%d")
+    suffix = str(coupon_prefix_base or phone)[-4:]
+    prefix_a = f"svA{suffix}"
+    prefix_b = f"svB{suffix}"
+
+    regions = [region] if region else list(COUPON_COMPANY_ID_MAP.keys())
+    services = ["居家清潔", "裝修細清"]
+
+    coupon_a = create_coupon(
+        env_name, backend_email, backend_password,
+        title=f"儲值金折抵-{phone}", discount=plan["coupon_a"],
+        date_s=today_str, date_e=date_e, prefix=prefix_a, piece="1",
+        regions=regions, service_items=services,
+    )
+    coupon_b = create_coupon(
+        env_name, backend_email, backend_password,
+        title=f"儲值金補價差-{phone}", discount=plan["coupon_b"],
+        date_s=today_str, date_e=date_e, prefix=prefix_b, piece="1",
+        regions=regions, service_items=services,
+    )
+
+    lookup = quick_lookup_member(env_name, backend_email, backend_password, phone, clean_type_id)
+    member_payload = lookup.get("member_payload")
+    if not member_payload:
+        raise Exception(f"電話 {phone} 查無會員資料")
+    member = member_payload.get("member", {}) or {}
+    addr_list = member.get("memberAddressList", []) or []
+    selected_address = address or (addr_list[0].get("address", "") if addr_list else "")
+    if not selected_address:
+        raise Exception("會員沒有可用服務地址，請先至後台補地址")
+    selected_region = region or get_region_by_address(selected_address, ACCOUNTS) or "台北"
+
+    code_a = coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or prefix_a
+    code_b = coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or prefix_b
+
+    stored_order = quick_create_order(
+        env_name=env_name,
+        payway="儲值金",
+        region=selected_region,
+        lookup_result=lookup,
+        address=selected_address,
+        clean_type_id=clean_type_id,
+        date_s=service_date,
+        period_s=period_s,
+        hour=str(hour),
+        person=str(person),
+        discount_code=code_a,
+    )
+
+    lemon_result = assign_lemon_cleaners_to_order(
+        session=stored_order["session"],
+        base_url=_configure_environment(env_name),
+        order_no_a=stored_order["order_no"],
+        service_date=service_date,
+        period_s=period_s,
+        person_count=str(person),
+    )
+
+    invoice = _invoice_payload(
+        invoice_mode,
+        member_email=member.get("email") or "",
+        mobile_carrier=mobile_carrier,
+        company_title=company_title,
+        company_no=company_no,
+    )
+
+    paid_order = quick_create_order(
+        env_name=env_name,
+        payway=customer_payway,
+        region=selected_region,
+        lookup_result=lookup,
+        address=selected_address,
+        clean_type_id=clean_type_id,
+        date_s=service_date,
+        period_s=period_s,
+        hour=str(hour),
+        person=str(person),
+        discount_code=code_b,
+        **invoice,
+    )
+
+    note = f"儲值金補價差：儲值折抵單 {stored_order['order_no']} + 客付單 {paid_order['order_no']}，儲值餘額 {sv} 元，{day_type}{plan['unit_price']}倍數，折抵券A {plan['coupon_a']} 元，折抵券B {plan['coupon_b']} 元。"
+    _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note + " 檸檬人勿動")
+    _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
+
+    return {
+        "balance": sv,
+        "plan": plan,
+        "coupon_a": coupon_a,
+        "coupon_b": coupon_b,
+        "stored_order": stored_order,
+        "paid_order": paid_order,
+        "lemon_result": lemon_result,
+        "note": note,
+        "line_message": build_line_message(paid_order),
+        "address": selected_address,
+        "region": selected_region,
     }
 
 def parse_new_customer_order_text(raw_text):
