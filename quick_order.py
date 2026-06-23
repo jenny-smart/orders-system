@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_8_0.py
-# 版本：v8.0
+# 檔名：quick_order_8_1.py
+# 版本：v8.1
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v8.1
+# - 修正第二段客付補價差單：不再重新查已清零的儲值金，直接沿用第一段原儲值金餘額建立優惠券B。
+# - 修正檸檬人補勾：同名檸檬人只會計算一次，避免 2 人訂單重複使用同一位檸檬人。
+# - 排班換人時以已補勾且不同名的檸檬人為準，若不足會停止並提示。
 # v8.0
 # - 修正檸檬人清單解析：若 /cleaner1?keyword=檸檬 找不到排班連結，改直接掃描 /cleaner1/{id}/shift 頁。
 # - 勾班會依人數補勾多位檸檬人；例如 2 人訂單會找 2 位可用檸檬人。
@@ -1948,13 +1952,18 @@ def _search_lemon_cleaners(session, base_url):
     """
     entries = []
     seen_ids = set()
+    seen_names = set()
 
     def add_entry(cid, name):
         cid = str(cid or "").strip()
         name = str(name or "").strip()
         if not cid or cid in seen_ids or "檸檬人" not in name:
             return
+        # 同一位檸檬人可能被列表頁與掃描頁重複抓到不同 id；同名只保留第一筆，避免 2 人單重複配同一人。
+        if name in seen_names:
+            return
         seen_ids.add(cid)
+        seen_names.add(name)
         entries.append((cid, name))
 
     try:
@@ -2212,7 +2221,13 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
     assigned = []
     assigned_ids = []
     skipped = []
+    seen_candidate_names = set()
+    seen_candidate_ids = set()
     for cleaner_id, cleaner_name in cleaners:
+        if str(cleaner_id) in seen_candidate_ids or str(cleaner_name) in seen_candidate_names:
+            continue
+        seen_candidate_ids.add(str(cleaner_id))
+        seen_candidate_names.add(str(cleaner_name))
         if len(assigned) >= need:
             break
         result = _set_cleaner_shift_if_available(
@@ -2969,11 +2984,19 @@ def _invoice_payload(invoice_mode, member_email="", mobile_carrier="", company_t
 def _stored_value_makeup_context(
     env_name, backend_email, backend_password, phone, clean_type_id, service_date,
     period_s, hour, person, address="", region="", coupon_prefix_base="", coupon_valid_days=60,
+    balance_override=None, allow_zero_balance=False,
 ):
-    """共用查詢：會員、地址、區域、儲值金、計算方案。"""
+    """共用查詢：會員、地址、區域、儲值金、計算方案。
+
+    第二段客付補價差單會在第一段清零後執行，此時後台儲值金餘額可能已是 0，
+    所以可用 balance_override 沿用第一段原儲值金餘額，避免重新查詢失敗。
+    """
     day_type = _day_type_from_date(service_date)
-    sv, _ = get_stored_value(env_name, backend_email, backend_password, phone, clean_type_id)
-    if sv <= 0:
+    if balance_override not in (None, ""):
+        sv = int(float(balance_override))
+    else:
+        sv, _ = get_stored_value(env_name, backend_email, backend_password, phone, clean_type_id)
+    if sv <= 0 and not allow_zero_balance:
         raise Exception("查無儲值金或儲值金餘額為 0")
 
     try:
@@ -3088,13 +3111,11 @@ def stored_value_makeup_create_paid_order(
     ctx = _stored_value_makeup_context(
         env_name, backend_email, backend_password, phone, clean_type_id, service_date,
         period_s, hour, person, address, region, coupon_prefix_base, coupon_valid_days,
+        balance_override=balance_override,
     )
     if balance_override not in (None, ""):
-        try:
-            ctx["balance"] = int(float(balance_override))
-            ctx["plan"]["coupon_b"] = ctx["balance"]
-        except Exception:
-            pass
+        ctx["balance"] = int(float(balance_override))
+        ctx["plan"]["coupon_b"] = ctx["balance"]
 
     regions = [ctx["region"]] if ctx.get("region") else list(COUPON_COMPANY_ID_MAP.keys())
     services = ["居家清潔", "裝修細清"]
