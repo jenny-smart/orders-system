@@ -44,6 +44,7 @@ from quick_order import (
     convert_order,
     get_stored_value,
     calc_stored_value_plan,
+    stored_value_makeup_convert,
     COUPON_COMPANY_ID_MAP,
     COUPON_SERVICE_ITEM_MAP,
     COUPON_TYPE_MAP,
@@ -1406,206 +1407,138 @@ else:
     # -----------------------------------------------------
     elif single_feature == "儲值金補價差":
         info_panel("流程說明", [
-            "1. 查詢儲值金 → 計算清零方案",
-            "2. 自動建立優惠券A（清零用）與優惠券B（新服務折扣）",
-            "3. 手動至後台用優惠券A成立儲值清零訂單",
-            "4. 系統自動建立正式服務訂單（套用優惠券B）",
+            "用訂單轉換邏輯一次完成：建立優惠券 → 建儲值金折抵訂單 → 把折抵單配班換成檸檬人 → 建客人付款訂單。",
+            "平日以 600 的倍數計算，週末以 700 的倍數計算：倍數總額 - 優惠券A = 儲值金餘額。",
+            "客人付款訂單走 /booking/single，付款方式限 ATM / 信用卡，發票支援二聯會員載具、二聯手機載具、三聯抬頭統編。",
         ])
 
-        # ── Step 1: 查詢 ──────────────────────────────────────────────
-        step("4", "查詢儲值金")
-        sv_phone = st.text_input("客人手機號碼", key="sv_phone")
-        sv_ctype = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="sv_ctype")
-        sv_new_price = st.number_input("新服務總金額（元）", min_value=0, value=4200, step=600, key="sv_new_price")
+        step("4", "客人與服務資料")
+        sv1, sv2, sv3 = st.columns(3)
+        with sv1:
+            sv_phone = st.text_input("客人手機號碼", key="sv_auto_phone")
+        with sv2:
+            sv_ctype = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="sv_auto_ctype")
+        with sv3:
+            sv_day_type = st.selectbox("日期類型", ["平日", "週末"], key="sv_auto_day_type")
 
-        if st.button("🔍 查詢儲值金並計算方案", use_container_width=True, key="sv_q_btn"):
+        sd1, sd2, sd3, sd4 = st.columns(4)
+        with sd1:
+            sv_svc_date = st.date_input("服務日期", value=date.today() + timedelta(days=7), key="sv_auto_date")
+        with sd2:
+            sv_svc_period = st.selectbox("服務時段", PERIOD_OPTIONS, key="sv_auto_period")
+        with sd3:
+            sv_svc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="sv_auto_person")
+        with sd4:
+            sv_svc_hour = PERIOD_HOUR_MAP.get(sv_svc_period, 4)
+            st.markdown(f"<br><b>{sv_svc_hour} 小時</b><br><span style='color:#8E8E93;font-size:13px;'>人時：{int(sv_svc_person) * int(sv_svc_hour)}</span>", unsafe_allow_html=True)
+
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("4", "客付訂單付款與發票")
+        pay1, pay2 = st.columns(2)
+        with pay1:
+            sv_customer_payway = st.selectbox("付款方式", ["ATM", "信用卡"], key="sv_auto_customer_payway")
+        with pay2:
+            sv_invoice_mode = st.selectbox("發票", ["會員載具", "手機載具", "三聯式"], key="sv_auto_invoice_mode")
+
+        sv_mobile_carrier = ""
+        sv_company_title = ""
+        sv_company_no = ""
+        if sv_invoice_mode == "手機載具":
+            sv_mobile_carrier = st.text_input("手機條碼", placeholder="例：/ABC1234", key="sv_auto_mobile_carrier")
+        elif sv_invoice_mode == "三聯式":
+            inv_a, inv_b = st.columns(2)
+            with inv_a:
+                sv_company_title = st.text_input("發票抬頭", key="sv_auto_company_title")
+            with inv_b:
+                sv_company_no = st.text_input("統一編號", key="sv_auto_company_no")
+        else:
+            st.caption("二聯會員載具會使用會員 email。")
+
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("4", "選填設定")
+        opt1, opt2 = st.columns(2)
+        with opt1:
+            sv_address = st.text_input("指定服務地址（留空則用會員第一個地址）", key="sv_auto_address")
+        with opt2:
+            sv_region = st.selectbox("適用地區", [""] + list(COUPON_COMPANY_ID_MAP.keys()), format_func=lambda x: x or "依地址自動判斷", key="sv_auto_region")
+
+        if st.button("🚀 建立儲值金補價差訂單", use_container_width=True, key="sv_auto_run_btn"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not sv_phone.strip():
-                st.error("請輸入手機號碼")
+                st.error("請輸入客人手機號碼")
             else:
                 try:
-                    with st.spinner("查詢中…"):
-                        sv_bal, sv_member = get_stored_value(
+                    with st.spinner("執行中：查儲值金 → 建優惠券 → 建折抵單 → 換檸檬人 → 建客付單…"):
+                        sv_auto_result = stored_value_makeup_convert(
                             env_name=env,
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
                             phone=sv_phone.strip(),
                             clean_type_id=CLEAN_TYPE_ID_MAP[sv_ctype],
+                            service_date=sv_svc_date.strftime("%Y-%m-%d"),
+                            period_s=sv_svc_period,
+                            hour=str(sv_svc_hour),
+                            person=str(int(sv_svc_person)),
+                            day_type=sv_day_type,
+                            customer_payway=sv_customer_payway,
+                            invoice_mode=sv_invoice_mode,
+                            mobile_carrier=sv_mobile_carrier,
+                            company_title=sv_company_title,
+                            company_no=sv_company_no,
+                            address=sv_address.strip(),
+                            region=sv_region,
+                            coupon_prefix_base=sv_phone.strip(),
                         )
-                    if sv_bal <= 0:
-                        st.warning("查無儲值金或餘額為 0")
-                        st.session_state.sv_data = None
-                    else:
-                        plan = calc_stored_value_plan(sv_bal, int(sv_new_price) if sv_new_price > 0 else None)
-                        st.session_state.sv_data = {
-                            "balance": sv_bal, "plan": plan,
-                            "phone": sv_phone.strip(), "member": sv_member,
-                            "new_price": int(sv_new_price), "ctype": sv_ctype,
-                        }
-                        st.session_state.sv_coupon_a = None
-                        st.session_state.sv_coupon_b = None
-                        st.session_state.sv_order_result = None
+                    st.session_state.sv_auto_result = sv_auto_result
                 except Exception as e:
-                    st.error(f"查詢失敗：{e}")
+                    st.session_state.sv_auto_result = None
+                    st.error(f"建立失敗：{e}")
 
-        sv_data = st.session_state.get("sv_data")
-        if not sv_data:
-            pass
-        else:
-            plan = sv_data["plan"]
-            sv = sv_data["balance"]
-
-            # ── 計算結果 ───────────────────────────────────────────────
-            st.markdown("<hr>", unsafe_allow_html=True)
+        sv_auto_result = st.session_state.get("sv_auto_result")
+        if sv_auto_result:
+            st.success("✅ 儲值金補價差流程完成")
+            plan = sv_auto_result["plan"]
+            stored_order = sv_auto_result["stored_order"]
+            paid_order = sv_auto_result["paid_order"]
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("儲值金餘額", f"{sv} 元")
-            c2.metric("清零訂單金額", f"{plan['dummy_price']} 元")
-            c3.metric("優惠券A（清零差額）", f"{plan['coupon_a']} 元")
-            c4.metric("優惠券B（新服務折扣）", f"{plan['coupon_b']} 元")
-            if plan["customer_pays"]:
-                st.info(f"💰 客人補繳：**{plan['customer_pays']} 元**（{sv_data['new_price']} - {sv}）")
+            c1.metric("儲值金餘額", f"{sv_auto_result['balance']} 元")
+            c2.metric("倍數單價", f"{plan['unit_price']} 元")
+            c3.metric("儲值折抵單", stored_order.get("order_no", "—"))
+            c4.metric("客付訂單", paid_order.get("order_no", "—"))
 
-            # ── Step 2: 建立優惠券 A & B ───────────────────────────────
-            st.markdown("<hr>", unsafe_allow_html=True)
-            step("4", "建立優惠券 A 和 B")
-            col_pa, col_pb, col_reg = st.columns(3)
-            with col_pa:
-                sv_pfx_a = st.text_input("優惠券A前綴", value=f"svA{sv_phone.strip()[-4:]}", key="sv_pfx_a")
-            with col_pb:
-                sv_pfx_b = st.text_input("優惠券B前綴", value=f"svB{sv_phone.strip()[-4:]}", key="sv_pfx_b")
-            with col_reg:
-                sv_region = st.selectbox("適用地區", list(COUPON_COMPANY_ID_MAP.keys()), key="sv_region3")
-            sv_ds = st.date_input("有效期限起", value=date.today(), key="sv_ds3")
-            sv_de = st.date_input("有效期限迄", value=date.today() + timedelta(days=60), key="sv_de3")
+            st.markdown(
+                f"""
+<div class="hint-box">
+<b>計算式</b><br>
+{plan['unit_price']} × {plan['n']} = {plan['dummy_price']}；{plan['dummy_price']} - 優惠券A {plan['coupon_a']} = 儲值金餘額 {sv_auto_result['balance']}<br>
+優惠券B（客付單折抵原儲值金）：{plan['coupon_b']} 元
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
-            if st.button("🎟 建立優惠券A和B", use_container_width=True, key="sv_create2"):
-                results = {}
-                for label, prefix, amount in [("A", sv_pfx_a.strip(), plan["coupon_a"]), ("B", sv_pfx_b.strip(), plan["coupon_b"])]:
-                    try:
-                        with st.spinner(f"建立優惠券{label}（{amount}元）…"):
-                            r = create_coupon(
-                                env_name=env,
-                                backend_email=backend_email.strip(),
-                                backend_password=backend_password.strip(),
-                                title=f"儲值補差額{label}",
-                                discount=amount,
-                                date_s=sv_ds.strftime("%Y-%m-%d"),
-                                date_e=sv_de.strftime("%Y-%m-%d"),
-                                prefix=prefix, piece="1",
-                                regions=[sv_region],
-                                service_items=["居家清潔", "裝修細清"],
-                            )
-                        results[label] = r
-                        st.success(f"✅ 優惠券{label}：{r.get('message','')}")
-                    except Exception as e:
-                        st.error(f"優惠券{label} 失敗：{e}")
-                if "A" in results:
-                    st.session_state.sv_coupon_a = results["A"]
-                if "B" in results:
-                    st.session_state.sv_coupon_b = results["B"]
+            st.markdown("#### 🎟 優惠券")
+            ca = sv_auto_result.get("coupon_a", {})
+            cb = sv_auto_result.get("coupon_b", {})
+            st.write(f"優惠券A（儲值金折抵單）：`{ca.get('coupon_code') or ca.get('coupon_prefix')}`，面額 {ca.get('discount')} 元")
+            st.write(f"優惠券B（客付訂單）：`{cb.get('coupon_code') or cb.get('coupon_prefix')}`，面額 {cb.get('discount')} 元")
 
-            coupon_a = st.session_state.get("sv_coupon_a")
-            coupon_b = st.session_state.get("sv_coupon_b")
+            st.markdown("#### 🤖 檸檬人配班結果")
+            lemon_r = sv_auto_result.get("lemon_result", {})
+            if lemon_r.get("success"):
+                st.success(lemon_r.get("message", "已改為檸檬人"))
+            else:
+                st.warning(lemon_r.get("message", "檸檬人配班未完成，請手動確認"))
 
-            # ── Step 3: 手動清零說明 ────────────────────────────────────
-            if coupon_a:
-                st.markdown("<hr>", unsafe_allow_html=True)
-                step("4", "手動：成立儲值清零訂單")
-                _env_url = {"prod": "https://backend.lemonclean.com.tw", "dev": "https://backend-dev.lemonclean.com.tw"}.get(env, "https://backend.lemonclean.com.tw")
-                code_a = coupon_a.get("coupon_code", coupon_a.get("coupon_prefix", ""))
-                st.markdown(f"""
-1. 開啟 [{_env_url}/booking/stored_value_routine]({_env_url}/booking/stored_value_routine)
-2. 輸入手機 `{sv_data['phone']}` → 查詢會員
-3. 選地址，計算時數，選擇總金額為 **{plan['dummy_price']} 元** 的人時組合
-4. 查詢班表並選日期時段
-5. 優惠代碼填：**`{code_a}`**
-6. 付款方式：儲值金 → 送出
-""")
-                st.info(f"優惠券A代碼：**{code_a}**（清零差額 {plan['coupon_a']} 元）")
-                copy_button("複製優惠券A代碼", code_a, "copy_sv_a")
+            st.markdown("#### 📋 備註文字")
+            st.text_area("備註", sv_auto_result.get("note", ""), height=90, label_visibility="collapsed")
+            copy_button("複製備註", sv_auto_result.get("note", ""), "copy_sv_auto_note")
 
-            # ── Step 4: 成立正式服務訂單 ───────────────────────────────
-            if coupon_b:
-                st.markdown("<hr>", unsafe_allow_html=True)
-                step("4", "成立正式服務訂單")
-                code_b = coupon_b.get("coupon_code", coupon_b.get("coupon_prefix", ""))
-                st.info(f"將套用優惠券B：**{code_b}**（{plan['coupon_b']} 元折扣）")
-
-                bo1, bo2, bo3, bo4 = st.columns(4)
-                with bo1:
-                    sv_svc_date = st.date_input("服務日期", value=date.today() + timedelta(days=7), key="sv_svc_date")
-                with bo2:
-                    sv_svc_period = st.selectbox("時段", PERIOD_OPTIONS, key="sv_svc_period")
-                with bo3:
-                    sv_svc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="sv_svc_person")
-                with bo4:
-                    sv_svc_hour = PERIOD_HOUR_MAP.get(sv_svc_period, 4)
-                    st.markdown(f"<br><b>{sv_svc_hour} 小時</b>", unsafe_allow_html=True)
-
-                sv_payway = st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"], key="sv_payway")
-
-                st.markdown("**發票資訊**")
-                inv1, inv2 = st.columns(2)
-                with inv1:
-                    sv_inv_type = st.selectbox("發票類型", ["紙本", "個人電子發票（二聯式）", "公司行號（三聯式）"], key="sv_inv_type")
-                with inv2:
-                    if sv_inv_type == "個人電子發票（二聯式）":
-                        sv_carrier = st.text_input("載具號碼（/開頭）", key="sv_carrier")
-                        sv_pay_type, sv_carrier_val, sv_co_no, sv_co_title = "B2C", sv_carrier, "", ""
-                    elif sv_inv_type == "公司行號（三聯式）":
-                        sv_co_no = st.text_input("統一編號", key="sv_co_no")
-                        sv_co_title = st.text_input("公司抬頭", key="sv_co_title")
-                        sv_pay_type, sv_carrier_val = "B2B", ""
-                    else:
-                        sv_pay_type, sv_carrier_val, sv_co_no, sv_co_title = "", "", "", ""
-
-                if st.button("📋 成立正式服務訂單", use_container_width=True, key="sv_order_btn"):
-                    if not backend_email.strip():
-                        st.error("請先輸入後台帳號密碼")
-                    else:
-                        try:
-                            with st.spinner("查會員 → 查班表 → 建單…"):
-                                lookup = quick_lookup_member(
-                                    env_name=env,
-                                    backend_email=backend_email.strip(),
-                                    backend_password=backend_password.strip(),
-                                    phone=sv_data["phone"],
-                                    clean_type_id=CLEAN_TYPE_ID_MAP[sv_data["ctype"]],
-                                )
-                                if not lookup.get("member_payload"):
-                                    st.error("查無會員，請確認手機號碼")
-                                else:
-                                    member_addr = lookup["member_payload"].get("memberAddressList", [])
-                                    addr = member_addr[0]["address"] if member_addr else ""
-                                    order_r = quick_create_order(
-                                        env_name=env,
-                                        payway=sv_payway,
-                                        region=get_region_by_address(addr, ACCOUNTS) or "台北",
-                                        lookup_result=lookup,
-                                        address=addr,
-                                        clean_type_id=CLEAN_TYPE_ID_MAP[sv_data["ctype"]],
-                                        date_s=sv_svc_date.strftime("%Y-%m-%d"),
-                                        period_s=sv_svc_period,
-                                        hour=str(sv_svc_hour),
-                                        person=str(int(sv_svc_person)),
-                                        discount_code=code_b,
-                                        payment_type=sv_pay_type,
-                                        carrier_info=sv_carrier_val if sv_inv_type == "個人電子發票（二聯式）" else "",
-                                        company_no=sv_co_no if sv_inv_type == "公司行號（三聯式）" else "",
-                                        company_title=sv_co_title if sv_inv_type == "公司行號（三聯式）" else "",
-                                    )
-                            st.session_state.sv_order_result = order_r
-                        except Exception as e:
-                            st.error(f"建單失敗：{e}")
-
-            sv_order = st.session_state.get("sv_order_result")
-            if sv_order:
-                st.success(f"✅ 訂單建立成功：{sv_order.get('order_no', '—')}")
-                line_msg = build_line_message(sv_order)
-                if line_msg:
-                    st.text_area("LINE 訊息", line_msg, height=300, label_visibility="collapsed")
-                    copy_button("複製 LINE 訊息", line_msg, "sv_line_copy")
+            if sv_auto_result.get("line_message"):
+                st.markdown("#### 💬 客付訂單 LINE 訊息")
+                st.text_area("LINE 訊息", sv_auto_result["line_message"], height=320, label_visibility="collapsed")
+                copy_button("複製 LINE 訊息", sv_auto_result["line_message"], "copy_sv_auto_line")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
