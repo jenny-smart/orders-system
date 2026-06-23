@@ -1259,6 +1259,10 @@ def quick_create_order(
     person="2",
     fallback_fare="0",
     discount_code="",
+    payment_type="",
+    carrier_info="",
+    company_no="",
+    company_title="",
 ):
     """
     建立單筆訂單。流程完全比照人工在後台操作：
@@ -1399,6 +1403,10 @@ def quick_create_order(
         "memo": "",
         "notice": str(best_addr.get("notice") or old_purchase.get("notice") or ""),
         "discount_code": str(discount_code or ""),
+        "payment": str(payment_type or ""),
+        "carrierInfo": str(carrier_info or ""),
+        "companyNo": str(company_no or ""),
+        "companyTitle": str(company_title or ""),
         "payway": PAYWAY_MAP.get(payway, "2"),
         "invoice_type": invoice_type,
         "carrier_type_id": carrier_type_id,
