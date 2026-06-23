@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_8_1.py
-# 版本：v8.1
+# 檔名：quick_order_8_2.py
+# 版本：v8.2
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v8.2
+# - 修正檸檬人補勾順序：2 人訂單會依序檢查檸檬人1、檸檬人2、檸檬人3...，已衝突才往下一位。
+# - 強化 /cleaner1?keyword=檸檬 清單解析，若清單沒有排班連結會掃描 /cleaner1/{id}/shift?month=服務月份 確認檸檬人。
+# - 排班換人時只選已成功補勾且不同名稱的檸檬人，避免配班頁只出現檸檬人1時誤用同一人。
 # v8.1
 # - 修正第二段客付補價差單：不再重新查已清零的儲值金，直接沿用第一段原儲值金餘額建立優惠券B。
 # - 修正檸檬人補勾：同名檸檬人只會計算一次，避免 2 人訂單重複使用同一位檸檬人。
@@ -1940,31 +1944,47 @@ def _period_to_shift_code(period_s):
     return PERIOD_TO_SHIFT_CODE.get(compact, "")
 
 
-def _search_lemon_cleaners(session, base_url):
+def _search_lemon_cleaners(session, base_url, target_month=None, min_needed=0):
     """
-    取得檸檬人清單。
+    取得檸檬人清單，並依「檸檬人1、檸檬人2、檸檬人3...」排序。
 
-    優先：GET /cleaner1?area_id=&keyword=檸檬，解析每列的 /cleaner1/{id}/shift。
-    備援：若列表頁因 HTML 結構不同找不到排班連結，直接嘗試
-          /cleaner1/{id}/shift?month=YYYY-MM，從排班頁「專員：檸檬人N」確認。
-
-    回傳 [(cleaner_id, cleaner_name), ...]。
+    這裡不能只相信排班修改頁，因為排班修改頁只會顯示「目前已在該時段可服務」的人。
+    正確流程是：
+    1. 先從 /cleaner1?keyword=檸檬 找可能的檸檬人 id。
+    2. 若清單 HTML 沒有排班連結，改掃描 /cleaner1/{id}/shift?month=YYYY-MM。
+    3. 進入 shift 頁確認頁面標題是「專員：檸檬人N」才採用。
+    4. 找到足夠人數後仍會依檸檬人編號排序，避免 2 人單重複使用檸檬人1。
     """
     entries = []
     seen_ids = set()
     seen_names = set()
+    target_month = str(target_month or date.today().strftime("%Y-%m"))[:7]
+    min_needed = int(min_needed or 0)
+
+    def lemon_sort_key(item):
+        m = re.search(r"檸檬人\s*(\d+)", item[1])
+        return int(m.group(1)) if m else 9999
 
     def add_entry(cid, name):
         cid = str(cid or "").strip()
-        name = str(name or "").strip()
+        name = re.sub(r"\s+", "", str(name or "").strip())
+        m = re.search(r"檸檬人\d+", name)
+        if m:
+            name = m.group(0)
         if not cid or cid in seen_ids or "檸檬人" not in name:
             return
-        # 同一位檸檬人可能被列表頁與掃描頁重複抓到不同 id；同名只保留第一筆，避免 2 人單重複配同一人。
         if name in seen_names:
             return
         seen_ids.add(cid)
         seen_names.add(name)
         entries.append((cid, name))
+
+    candidate_ids = []
+
+    def add_candidate(cid):
+        cid = str(cid or "").strip()
+        if cid.isdigit() and cid not in candidate_ids:
+            candidate_ids.append(cid)
 
     try:
         resp = session.get(
@@ -1978,41 +1998,44 @@ def _search_lemon_cleaners(session, base_url):
 
     if resp is not None and resp.status_code == 200:
         html = resp.text or ""
-        # 常見：href="/cleaner1/28/shift" 或完整 URL。
-        for m in re.finditer(r'(?:href|data-href)=["\'][^"\']*/cleaner1/(\d+)/shift[^"\']*["\']', html, re.I):
-            cid = m.group(1)
-            ctx = html[max(0, m.start() - 800): m.end() + 800]
-            name_m = re.search(r"檸檬人\d+", ctx)
-            add_entry(cid, name_m.group(0) if name_m else "")
+        # 逐列解析，因為清單頁通常是一列一位專員；排班、詳細資料、訂單管理按鈕都可能帶 id。
+        row_blocks = re.split(r"<tr\b", html, flags=re.I)
+        for row in row_blocks:
+            if "檸檬人" not in row:
+                continue
+            name_m = re.search(r"檸檬人\d+", row)
+            ids = re.findall(r"/cleaner1/(\d+)(?=[/'\"?#])", row, re.I)
+            ids += re.findall(r"cleaner[_-]?id[=:'\" ]+(\d+)", row, re.I)
+            for cid in ids:
+                add_candidate(cid)
+                if name_m:
+                    add_entry(cid, name_m.group(0))
 
-        # 有些按鈕可能使用 onclick="location.href='.../cleaner1/28/shift'"。
-        for m in re.finditer(r'/cleaner1/(\d+)/shift', html, re.I):
+        # 非表格或 onclick 連結格式。
+        for m in re.finditer(r"/cleaner1/(\d+)(?=[/'\"?#])", html, re.I):
             cid = m.group(1)
-            ctx = html[max(0, m.start() - 800): m.end() + 800]
+            ctx = html[max(0, m.start() - 1000): m.end() + 1000]
             name_m = re.search(r"檸檬人\d+", ctx)
-            add_entry(cid, name_m.group(0) if name_m else "")
-
-        # 備用：詳細資料連結附近找名字，再用同一 id 嘗試 shift。
-        for m in re.finditer(r'/cleaner1/(\d+)(?:["\'?/#]|[^/])', html, re.I):
-            cid = m.group(1)
-            ctx = html[max(0, m.start() - 800): m.end() + 800]
-            name_m = re.search(r"檸檬人\d+", ctx)
+            add_candidate(cid)
             if name_m:
                 add_entry(cid, name_m.group(0))
 
-    if entries:
-        entries.sort(key=lambda item: int(re.search(r"\d+", item[1]).group(0)) if re.search(r"\d+", item[1]) else 9999)
+    # 若清單頁已抓到足夠不同檸檬人，直接回傳。
+    entries.sort(key=lemon_sort_key)
+    if min_needed and len(entries) >= min_needed:
         return entries
 
-    # 最後備援：從已知後台慣例掃描 cleaner id。檸檬人1 在目前環境為 /cleaner1/28/shift，
-    # 但為避免不同環境 id 不同，向前後掃一段，抓到「專員：檸檬人N」才採用。
-    ym = date.today().strftime("%Y-%m")
-    candidate_ids = list(range(20, 81)) + list(range(1, 20)) + list(range(81, 141))
+    # 補掃 shift 頁：檸檬人 id 在不同環境可能不是連號，所以先掃清單抓到的 id，再擴大掃描。
+    for cid in list(range(1, 501)):
+        add_candidate(cid)
+
     for cid in candidate_ids:
+        if str(cid) in seen_ids:
+            continue
         try:
             r = session.get(
                 f"{base_url}/cleaner1/{cid}/shift",
-                params={"month": ym},
+                params={"month": target_month},
                 headers=HEADERS,
                 allow_redirects=True,
             )
@@ -2020,17 +2043,20 @@ def _search_lemon_cleaners(session, base_url):
             continue
         if r.status_code != 200:
             continue
-        name_m = re.search(r"專員[：:]\s*(?:<[^>]+>\s*)?(檸檬人\d+)", r.text or "")
+        txt = r.text or ""
+        # 僅採用 shift 頁上方「專員：檸檬人N」；不要用側邊欄或其他雜訊。
+        name_m = re.search(r"專員\s*[：:]\s*(?:<[^>]+>\s*)*(檸檬人\d+)", txt)
         if not name_m:
-            name_m = re.search(r"檸檬人\d+", r.text or "")
+            name_m = re.search(r"<label>\s*(檸檬人\d+)\s*</label>", txt)
         if name_m:
-            add_entry(cid, name_m.group(1) if name_m.lastindex else name_m.group(0))
-            if len(entries) >= 20:
+            add_entry(cid, name_m.group(1))
+            entries.sort(key=lemon_sort_key)
+            if min_needed and len(entries) >= min_needed:
+                # 已足夠，後面的檸檬人不需要再掃，避免大量請求。
                 break
 
-    entries.sort(key=lambda item: int(re.search(r"\d+", item[1]).group(0)) if re.search(r"\d+", item[1]) else 9999)
+    entries.sort(key=lemon_sort_key)
     return entries
-
 
 def _shift_value_to_code(value):
     """將 cleaner1 shift 頁面的 radio value 轉成內部班別代碼。"""
@@ -2213,7 +2239,7 @@ def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, perso
     if not target_shift_code:
         return {"success": False, "message": f"無法判斷服務時段 {period_s} 對應班別", "assigned": [], "skipped": []}
 
-    cleaners = _search_lemon_cleaners(session, base_url)
+    cleaners = _search_lemon_cleaners(session, base_url, target_month=str(service_date)[:7], min_needed=int(person_count))
     if not cleaners:
         return {"success": False, "message": "找不到檸檬人清單", "assigned": [], "skipped": []}
 
