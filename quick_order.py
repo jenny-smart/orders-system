@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：quick_order_7_5.py
-# 版本：v7.5
+# 檔名：quick_order_7_6.py
+# 版本：v7.6
 # 模組：單筆服務訂單後端模組
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v7.6
+# - 修正 /booking/stored_value_routine 回傳 {"count":1} 時，改視為後台已受理並加強重試查詢新訂單編號。
+# - 若後台已建立但訂單列表延遲更新，會依電話、日期、時段、地址、付款方式回查最可能的新訂單。
+# - 程式檔頭版本與更新日期同步更新。
 # v7.5
 # - 補上儲值金補價差自動轉換主函式 stored_value_makeup_convert。
 # - 儲值金折抵訂單金額：平日 600n、週末 700n，餘額 = 倍數金額 - 優惠券金額。
@@ -1480,23 +1484,76 @@ def quick_create_order(
         headers=HEADERS,
         allow_redirects=True,
     )
-    time.sleep(1)
-
-    after_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
-    new_order_nos = after_order_nos - before_order_nos
 
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
 
-    if not new_order_nos:
-        debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
-        raise Exception(
-            "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在、後台拒絕重複預約，"
-            "或表單缺少必填欄位導致後台驗證沒過）。請至後台『訂單管理』手動確認，不要直接使用畫面上顯示的舊訂單資訊。\n"
-            f"［除錯資訊］回應狀態：{booking_resp.status_code}，回應網址：{booking_resp.url}\n"
-            f"回應片段：{debug_snippet}"
-        )
+    # v7.6: /booking/stored_value_routine 在部分環境會回傳 {"count":1}，
+    # 代表後台已受理，但訂單列表可能延遲更新；因此改為多次回查新訂單。
+    after_order_nos = set()
+    new_order_nos = set()
+    for wait_seconds in (1, 2, 3, 5):
+        time.sleep(wait_seconds)
+        after_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
+        new_order_nos = after_order_nos - before_order_nos
+        if new_order_nos:
+            break
 
-    if len(new_order_nos) == 1:
+    def _booking_count_success(resp):
+        try:
+            payload = resp.json()
+        except Exception:
+            return False
+        try:
+            return int(payload.get("count", 0)) > 0
+        except Exception:
+            return False
+
+    def _find_matching_order_after_submit():
+        """後台回 count=1 但列表差集抓不到時，依本次建單條件回查最可能的訂單。"""
+        blocks = _fetch_purchase_blocks_for_phone(session, phone, name=member_name)
+        target_addr_norm = normalize_addr_for_match(selected_address)
+        target_period_compact = str(period_s or "").replace(" ", "")
+        target_display_compact = str(display_period or "").replace(" ", "")
+        matched = []
+        for block in blocks:
+            order_no_candidate = block.get("order_no")
+            if not order_no_candidate:
+                continue
+            lines = block.get("lines", [])
+            joined = "\n".join(lines)
+            service_date_found, service_time_found = _parse_service_date_time_loose(joined)
+            if service_date_found != date_s:
+                continue
+            joined_addr_norm = normalize_addr_for_match(joined)
+            if target_addr_norm and target_addr_norm not in joined_addr_norm:
+                continue
+            payway_found = _extract_payway_line(joined)
+            if payway_found and payway_found != payway:
+                continue
+            time_compact = str(service_time_found or "").replace(" ", "")
+            if target_period_compact and target_period_compact not in time_compact and target_display_compact not in time_compact:
+                continue
+            matched.append(order_no_candidate)
+
+        # 優先選擇 before 沒看過的；如果後台列表排序/篩選造成差集失敗，再取最新排序第一筆。
+        for candidate in matched:
+            if candidate not in before_order_nos:
+                return candidate
+        return matched[0] if matched else None
+
+    if not new_order_nos:
+        order_no = _find_matching_order_after_submit() if _booking_count_success(booking_resp) else None
+        if not order_no:
+            debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
+            extra_hint = "後台回傳 count > 0，但訂單列表回查不到符合條件的新訂單；請檢查訂單管理是否已建立。" if _booking_count_success(booking_resp) else ""
+            raise Exception(
+                "建單失敗：系統未產生新訂單編號（可能該客人此時段已有訂單存在、後台拒絕重複預約，"
+                "或表單缺少必填欄位導致後台驗證沒過）。請至後台『訂單管理』手動確認，不要直接使用畫面上顯示的舊訂單資訊。\n"
+                f"{extra_hint}\n"
+                f"［除錯資訊］回應狀態：{booking_resp.status_code}，回應網址：{booking_resp.url}\n"
+                f"回應片段：{debug_snippet}"
+            )
+    elif len(new_order_nos) == 1:
         order_no = next(iter(new_order_nos))
     else:
         order_no = None
