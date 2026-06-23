@@ -2499,12 +2499,16 @@ def create_coupon(
     }
 
 
-def get_stored_value(session, base_url, phone, clean_type_id="1"):
+def get_stored_value(env_name, backend_email, backend_password, phone, clean_type_id="1"):
     """
     透過 /ajax/get_member 查詢會員的儲值金餘額。
-    回傳整數（元），查無或無儲值金回傳 0。
+    回傳 (int餘額, member_dict)；查無或無儲值金回傳 (0, None)。
     """
-    # 取 CSRF token
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗")
+
     page = session.get(f"{base_url}/booking/stored_value_routine", headers=HEADERS, allow_redirects=True)
     token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', page.text)
     csrf = token_m.group(1) if token_m else ""
