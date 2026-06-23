@@ -1,11 +1,15 @@
 # ============================================================
-# 檔名：ordersapp_7_6.py
-# 版本：v7.6
+# 檔名：ordersapp_7_7.py
+# 版本：v7.7
 # 模組：服務訂單系統主畫面
 # 建立日期：2026-06-22
 # 最後更新：2026-06-24
 #
 # Change Log
+# v7.7
+# - 儲值金補價差拆成兩段按鈕：先建立儲值金折抵單，再建立客付補價差單。
+# - 日期類型改由服務日期自動判斷：週一到週五為平日，週六日為週末。
+# - 儲值金折抵單使用優惠券A全額折抵，目標總金額為 0。
 # v7.6
 # - 修正 /booking/stored_value_routine 回傳 {"count":1} 時，改視為後台已受理並加強重試查詢新訂單編號。
 # - 若後台已建立但訂單列表延遲更新，會依電話、日期、時段、地址、付款方式回查最可能的新訂單。
@@ -70,6 +74,8 @@ _REQUIRED_QUICK_ORDER_NAMES = [
     "get_stored_value",
     "calc_stored_value_plan",
     "stored_value_makeup_convert",
+    "stored_value_makeup_create_stored_order",
+    "stored_value_makeup_create_paid_order",
     "COUPON_COMPANY_ID_MAP",
     "COUPON_SERVICE_ITEM_MAP",
     "COUPON_TYPE_MAP",
@@ -78,7 +84,7 @@ _REQUIRED_QUICK_ORDER_NAMES = [
 _missing_quick_order_names = [name for name in _REQUIRED_QUICK_ORDER_NAMES if not hasattr(qo, name)]
 if _missing_quick_order_names:
     st.error(
-        "quick_order.py 版本不完整，請用 v7.5 覆蓋 GitHub 上的 quick_order.py。"
+        "quick_order.py 版本不完整，請用 v7.7 覆蓋 GitHub 上的 quick_order.py。"
         + "\n缺少："
         + "、".join(_missing_quick_order_names)
     )
@@ -1444,9 +1450,10 @@ else:
     # -----------------------------------------------------
     elif single_feature == "儲值金補價差":
         info_panel("流程說明", [
-            "用訂單轉換邏輯一次完成：建立優惠券 → 建儲值金折抵訂單 → 把折抵單配班換成檸檬人 → 建客人付款訂單。",
-            "平日以 600 的倍數計算，週末以 700 的倍數計算：倍數總額 - 優惠券A = 儲值金餘額。",
-            "客人付款訂單走 /booking/single，付款方式限 ATM / 信用卡，發票支援二聯會員載具、二聯手機載具、三聯抬頭統編。",
+            "此功能拆成兩段：先成立儲值金折抵單，再成立客付補價差訂單。",
+            "日期類型由服務日期自動判斷：週一到週五為平日，週六日為週末。",
+            "儲值金折抵單會用優惠券A全額折抵，目標是讓該單總金額為 0；客付補價差單再用優惠券B折抵原儲值金餘額。",
+            "同一天同一會員同時有儲值金單與補差價單是正常情境，因為它們代表同一次服務的兩種付款拆單。",
         ])
 
         step("4", "客人與服務資料")
@@ -1456,18 +1463,22 @@ else:
         with sv2:
             sv_ctype = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="sv_auto_ctype")
         with sv3:
-            sv_day_type = st.selectbox("日期類型", ["平日", "週末"], key="sv_auto_day_type")
+            sv_svc_date = st.date_input("服務日期", value=date.today() + timedelta(days=7), key="sv_auto_date")
+            sv_day_type_auto = "週末" if sv_svc_date.weekday() >= 5 else "平日"
+            st.caption(f"日期類型：{sv_day_type_auto}（自動判斷）")
 
         sd1, sd2, sd3, sd4 = st.columns(4)
         with sd1:
-            sv_svc_date = st.date_input("服務日期", value=date.today() + timedelta(days=7), key="sv_auto_date")
-        with sd2:
             sv_svc_period = st.selectbox("服務時段", PERIOD_OPTIONS, key="sv_auto_period")
-        with sd3:
+        with sd2:
             sv_svc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="sv_auto_person")
-        with sd4:
+        with sd3:
             sv_svc_hour = PERIOD_HOUR_MAP.get(sv_svc_period, 4)
-            st.markdown(f"<br><b>{sv_svc_hour} 小時</b><br><span style='color:#8E8E93;font-size:13px;'>人時：{int(sv_svc_person) * int(sv_svc_hour)}</span>", unsafe_allow_html=True)
+            sv_person_hours = int(sv_svc_person) * int(sv_svc_hour)
+            st.markdown(f"<br><b>{sv_svc_hour} 小時</b><br><span style='color:#8E8E93;font-size:13px;'>人時：{sv_person_hours}</span>", unsafe_allow_html=True)
+        with sd4:
+            sv_unit_price = 700 if sv_day_type_auto == "週末" else 600
+            st.markdown(f"<br><b>{sv_unit_price} 元 / 人時</b><br><span style='color:#8E8E93;font-size:13px;'>儲值金單目標金額：{sv_unit_price * sv_person_hours}</span>", unsafe_allow_html=True)
 
         st.markdown("<hr>", unsafe_allow_html=True)
         step("4", "客付訂單付款與發票")
@@ -1499,15 +1510,22 @@ else:
         with opt2:
             sv_region = st.selectbox("適用地區", [""] + list(COUPON_COMPANY_ID_MAP.keys()), format_func=lambda x: x or "依地址自動判斷", key="sv_auto_region")
 
-        if st.button("🚀 建立儲值金補價差訂單", use_container_width=True, key="sv_auto_run_btn"):
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("5", "第一段：建立儲值金折抵單")
+        st.markdown(
+            f'<div class="hint-box">儲值金折抵單將用 <b>{sv_unit_price} × {sv_person_hours} = {sv_unit_price * sv_person_hours}</b> 建立，並用優惠券A全額折抵，目標讓該單總金額為 <b>0</b>。</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("① 建立儲值金折抵單（總金額 0）", use_container_width=True, key="sv_create_stored_btn"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not sv_phone.strip():
                 st.error("請輸入客人手機號碼")
             else:
                 try:
-                    with st.spinner("執行中：查儲值金 → 建優惠券 → 建折抵單 → 換檸檬人 → 建客付單…"):
-                        sv_auto_result = stored_value_makeup_convert(
+                    with st.spinner("第一段執行中：查儲值金 → 建優惠券A → 建儲值金折抵單 → 換檸檬人…"):
+                        stored_stage = stored_value_makeup_create_stored_order(
                             env_name=env,
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
@@ -1517,65 +1535,81 @@ else:
                             period_s=sv_svc_period,
                             hour=str(sv_svc_hour),
                             person=str(int(sv_svc_person)),
-                            day_type=sv_day_type,
-                            customer_payway=sv_customer_payway,
-                            invoice_mode=sv_invoice_mode,
-                            mobile_carrier=sv_mobile_carrier,
-                            company_title=sv_company_title,
-                            company_no=sv_company_no,
                             address=sv_address.strip(),
                             region=sv_region,
                             coupon_prefix_base=sv_phone.strip(),
                         )
-                    st.session_state.sv_auto_result = sv_auto_result
+                    st.session_state.sv_stored_stage = stored_stage
+                    st.session_state.sv_paid_stage = None
                 except Exception as e:
-                    st.session_state.sv_auto_result = None
-                    st.error(f"建立失敗：{e}")
+                    st.error(f"第一段建立失敗：{e}")
 
-        sv_auto_result = st.session_state.get("sv_auto_result")
-        if sv_auto_result:
-            st.success("✅ 儲值金補價差流程完成")
-            plan = sv_auto_result["plan"]
-            stored_order = sv_auto_result["stored_order"]
-            paid_order = sv_auto_result["paid_order"]
+        stored_stage = st.session_state.get("sv_stored_stage")
+        if stored_stage:
+            plan = stored_stage["plan"]
+            so = stored_stage["stored_order"]
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("儲值金餘額", f"{sv_auto_result['balance']} 元")
-            c2.metric("倍數單價", f"{plan['unit_price']} 元")
-            c3.metric("儲值折抵單", stored_order.get("order_no", "—"))
-            c4.metric("客付訂單", paid_order.get("order_no", "—"))
-
-            st.markdown(
-                f"""
-<div class="hint-box">
-<b>計算式</b><br>
-{plan['unit_price']} × {plan['n']} = {plan['dummy_price']}；{plan['dummy_price']} - 優惠券A {plan['coupon_a']} = 儲值金餘額 {sv_auto_result['balance']}<br>
-優惠券B（客付單折抵原儲值金）：{plan['coupon_b']} 元
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-            st.markdown("#### 🎟 優惠券")
-            ca = sv_auto_result.get("coupon_a", {})
-            cb = sv_auto_result.get("coupon_b", {})
-            st.write(f"優惠券A（儲值金折抵單）：`{ca.get('coupon_code') or ca.get('coupon_prefix')}`，面額 {ca.get('discount')} 元")
-            st.write(f"優惠券B（客付訂單）：`{cb.get('coupon_code') or cb.get('coupon_prefix')}`，面額 {cb.get('discount')} 元")
-
-            st.markdown("#### 🤖 檸檬人配班結果")
-            lemon_r = sv_auto_result.get("lemon_result", {})
+            c1.metric("儲值金餘額", f"{stored_stage['balance']} 元")
+            c2.metric("日期類型", stored_stage.get("day_type", sv_day_type_auto))
+            c3.metric("優惠券A", f"{plan['coupon_a']} 元")
+            c4.metric("儲值金單", so.get("order_no", "—"))
+            ca = stored_stage.get("coupon_a", {})
+            st.success(f"✅ 第一段完成：儲值金折抵單 {so.get('order_no', '—')}；優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')} 已全額折抵。")
+            lemon_r = stored_stage.get("lemon_result", {})
             if lemon_r.get("success"):
                 st.success(lemon_r.get("message", "已改為檸檬人"))
             else:
                 st.warning(lemon_r.get("message", "檸檬人配班未完成，請手動確認"))
 
-            st.markdown("#### 📋 備註文字")
-            st.text_area("備註", sv_auto_result.get("note", ""), height=90, label_visibility="collapsed")
-            copy_button("複製備註", sv_auto_result.get("note", ""), "copy_sv_auto_note")
+            step("6", "第二段：建立客付補價差訂單")
+            st.markdown(
+                f'<div class="hint-box">客付補價差單會建立優惠券B，面額為原儲值金餘額 <b>{stored_stage["balance"]}</b> 元，付款方式為 <b>{sv_customer_payway}</b>。</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("② 建立客付補價差訂單", use_container_width=True, key="sv_create_paid_btn"):
+                try:
+                    with st.spinner("第二段執行中：建優惠券B → 建客付補價差訂單…"):
+                        paid_stage = stored_value_makeup_create_paid_order(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            phone=stored_stage.get("phone") or sv_phone.strip(),
+                            clean_type_id=stored_stage.get("clean_type_id") or CLEAN_TYPE_ID_MAP[sv_ctype],
+                            service_date=stored_stage.get("service_date") or sv_svc_date.strftime("%Y-%m-%d"),
+                            period_s=stored_stage.get("period_s") or sv_svc_period,
+                            hour=stored_stage.get("hour") or str(sv_svc_hour),
+                            person=stored_stage.get("person") or str(int(sv_svc_person)),
+                            customer_payway=sv_customer_payway,
+                            invoice_mode=sv_invoice_mode,
+                            mobile_carrier=sv_mobile_carrier,
+                            company_title=sv_company_title,
+                            company_no=sv_company_no,
+                            address=stored_stage.get("address") or sv_address.strip(),
+                            region=stored_stage.get("region") or sv_region,
+                            coupon_prefix_base=stored_stage.get("coupon_prefix_base") or sv_phone.strip(),
+                            stored_order_no=stored_stage.get("stored_order", {}).get("order_no", ""),
+                            balance_override=stored_stage.get("balance"),
+                        )
+                    st.session_state.sv_paid_stage = paid_stage
+                except Exception as e:
+                    st.error(f"第二段建立失敗：{e}")
 
-            if sv_auto_result.get("line_message"):
+        paid_stage = st.session_state.get("sv_paid_stage")
+        if paid_stage:
+            po = paid_stage["paid_order"]
+            cb = paid_stage.get("coupon_b", {})
+            st.success(f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。")
+            st.markdown("#### 📋 備註文字")
+            combined_note = ""
+            if stored_stage:
+                combined_note += stored_stage.get("note", "")
+            combined_note += "\n" + paid_stage.get("note", "")
+            st.text_area("備註", combined_note.strip(), height=110, label_visibility="collapsed")
+            copy_button("複製備註", combined_note.strip(), "copy_sv_stage_note")
+            if paid_stage.get("line_message"):
                 st.markdown("#### 💬 客付訂單 LINE 訊息")
-                st.text_area("LINE 訊息", sv_auto_result["line_message"], height=320, label_visibility="collapsed")
-                copy_button("複製 LINE 訊息", sv_auto_result["line_message"], "copy_sv_auto_line")
+                st.text_area("LINE 訊息", paid_stage["line_message"], height=320, label_visibility="collapsed")
+                copy_button("複製 LINE 訊息", paid_stage["line_message"], "copy_sv_paid_line")
 
     order_result = st.session_state.get("q_order_result")
     if order_result:
