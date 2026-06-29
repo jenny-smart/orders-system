@@ -799,17 +799,27 @@ else:
             # 原訂單A配班結果
             st.markdown("#### 原訂單A 配班結果")
             lr_a = conv_result.get("lemon_result_a", {})
+
+            # 日期修改狀態
+            if lr_a:
+                new_svc_date = lr_a.get("new_service_date", "")
+                date_ok = lr_a.get("date_change_ok", True)
+                date_msg = lr_a.get("date_change_msg", "")
+                if new_svc_date:
+                    if date_ok:
+                        st.info(f"📅 原訂單A服務日期已改為：{new_svc_date}")
+                    else:
+                        st.error(f"❌ 原訂單A日期修改失敗（{date_msg}），請手動修改服務日期為 {new_svc_date}")
+
             if lr_a and lr_a.get("success"):
-                types = lr_a.get("assigned_types", [])
                 names = lr_a.get("assigned", [])
-                parts = [f"{n}（{'一般' if t == '一般' else '檸檬人'}）" for n, t in zip(names, types)]
-                st.success(f"✅ {conv_result['order_no_a']}：{'、'.join(parts)}")
+                st.success(f"✅ {conv_result['order_no_a']} 配班已換為檸檬人：{'、'.join(names)}")
             else:
                 msg = lr_a.get("message", "未知") if lr_a else "未執行"
                 st.warning(f"⚠️ 原訂單A配班未完成：{msg}")
             st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
 
-            # 人時驗證警告
+            # 人時驗證
             if conv_result.get("ph_warning"):
                 st.warning(conv_result["ph_warning"])
             elif conv_result.get("original_ph") and conv_result.get("new_ph"):
