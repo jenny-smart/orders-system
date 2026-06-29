@@ -1653,7 +1653,13 @@ def convert_order_multi(
     payway_a = _extract_payway_line(joined_a)
     phone_a = _extract_phone_from_block_lines(lines_a)
     region_a = get_region_by_address(address_a, ACCOUNTS) or "台北"
-    _person_str, _ = _extract_person_hour_line(joined_a)
+    _person_str, _hour_str = _extract_person_hour_line(joined_a)
+    # 備援：從配班人員行解析人數（劉士誠(5) X 楊超顯(5) X 薛湘霖(5) → 3人）
+    if not _person_str or not _person_str.isdigit():
+        _staff_line = _extract_staff_line(lines_a)
+        if _staff_line:
+            _staff_count = len(re.split(r"\s*X\s*", _staff_line.strip()))
+            _person_str = str(_staff_count) if _staff_count > 0 else ""
     person_a = int(_person_str) if _person_str and _person_str.isdigit() else len(new_orders)
 
     if not phone_a:
