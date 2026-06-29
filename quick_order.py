@@ -2004,6 +2004,7 @@ def convert_order_multi(
         "note_a_ok": note_a_ok, "note_a_msg": note_a_msg,
         "purchase_url_a": f"{base_url}/purchase?orderNo={order_no_a}",
         "all_nos_str": all_nos_str,
+        "service_date_a": service_date_a,
         "success_count": len([r for r in new_order_results if r.get("order_no")]),
         "fail_count": len([r for r in new_order_results if not r.get("order_no")]),
         "ph_warning": ph_warning,
