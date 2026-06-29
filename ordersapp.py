@@ -851,10 +851,11 @@ else:
                 "09:00-12:00": 3, "09:00-11:00": 2,
                 "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
             }
-            orig_period = str(conv_result.get("period_a_raw", "")).replace(" ", "").replace("　", "")
             orig_person = int(conv_result.get("person_a_count", 0) or 0)
-            orig_hour = _PERIOD_HOURS_UI.get(orig_period, 0)
-            orig_ph = orig_person * orig_hour if orig_person and orig_hour else 0
+            orig_hour = int(conv_result.get("hour_per_person_a", 0) or 0)
+            orig_ph = int(conv_result.get("original_ph_calc", 0) or 0)
+            if not orig_ph and orig_person and orig_hour:
+                orig_ph = orig_person * orig_hour
             try:
                 orig_amount = int(float(str(conv_result.get("service_amount_a_display", 0) or 0)))
             except Exception:
