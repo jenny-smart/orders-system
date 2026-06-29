@@ -1654,13 +1654,38 @@ def convert_order_multi(
     phone_a = _extract_phone_from_block_lines(lines_a)
     region_a = get_region_by_address(address_a, ACCOUNTS) or "台北"
     _person_str, _hour_str = _extract_person_hour_line(joined_a)
-    # 備援：從配班人員行解析人數（劉士誠(5) X 楊超顯(5) X 薛湘霖(5) → 3人）
-    if not _person_str or not _person_str.isdigit():
-        _staff_line = _extract_staff_line(lines_a)
-        if _staff_line:
-            _staff_count = len(re.split(r"\s*X\s*", _staff_line.strip()))
-            _person_str = str(_staff_count) if _staff_count > 0 else ""
-    person_a = int(_person_str) if _person_str and _person_str.isdigit() else len(new_orders)
+    # 備援1：從 calculate_hour 的原始資料解析（取 /purchase/edit 頁面）
+    # 備援2：從金額反推人數
+    # 備援3：從配班人員行（但此行可能已被改成檸檬人，人數不準確）
+    person_a_from_text = int(_person_str) if _person_str and _person_str.isdigit() else 0
+    person_a = person_a_from_text
+
+    if not person_a:
+        # 從金額反推：含稅金額 / 1.05 / 每人時單價 / 時段小時數
+        try:
+            fare_a_tmp = int(float(_extract_fare_line(joined_a) or "0"))
+            total_tmp = int(float(_extract_total_amount_line(joined_a) or "0"))
+            service_amt_tmp = total_tmp - fare_a_tmp if fare_a_tmp and total_tmp > fare_a_tmp else total_tmp
+            _PERIOD_HOURS_TMP = {
+                "09:00-16:00": 6, "09:00-18:00": 8, "08:30-12:30": 4,
+                "09:00-12:00": 3, "09:00-11:00": 2,
+                "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
+            }
+            _h = _PERIOD_HOURS_TMP.get((period_a_raw or "").replace(" ", ""), 0)
+            if service_amt_tmp and _h:
+                # 嘗試平日(600)和週末(700)
+                for unit in (600, 700):
+                    price_no_tax = service_amt_tmp / 1.05
+                    ph = price_no_tax / unit
+                    p = round(ph / _h)
+                    if p > 0 and abs(p * _h * unit * 1.05 - service_amt_tmp) < 50:
+                        person_a = p
+                        break
+        except Exception:
+            pass
+
+    if not person_a:
+        person_a = len(new_orders)  # 最後 fallback
 
     if not phone_a:
         raise Exception(f"無法從訂單 {order_no_a} 取得客人電話")
@@ -1854,52 +1879,34 @@ def convert_order_multi(
             _update_order_note(session, base_url, r["order_no"], note_text)
 
     # ── Step 6: 金額驗證 ─────────────────────────────────────────
-    # 原訂單A人時 vs 所有成功新訂單人時加總，若不相等提醒 user
+    # 用原訂單A的含稅金額 vs 新訂單含稅金額加總比較
+    # 不依賴 person_a（配班人員行可能已被改動，數量不準確）
     try:
-        original_ph = person_a * int(
-            _period_to_shift_code(period_a_for_assign or "").replace("全", "").replace("上", "").replace("下", "") or "0"
-        )
+        _fare_a = int(float(str(fare_a or "0").replace(",", "")))
+        _service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
     except Exception:
-        original_ph = 0
+        _fare_a = 0
+        _service_amount_a = 0
 
-    # 用更可靠的方式算原訂單人時：從解析出的時段推算
-    _PERIOD_HOURS = {
-        "09:00-16:00": 6, "09:00-18:00": 8, "08:30-12:30": 4,
-        "09:00-12:00": 3, "09:00-11:00": 2,
-        "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
-    }
-    period_a_compact = (period_a_raw or "").replace(" ", "")
-    original_hour_per_person = _PERIOD_HOURS.get(period_a_compact, 0)
-    original_ph = person_a * original_hour_per_person
-
+    new_amount_total = sum(
+        int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
+    )
     new_ph = sum(
         int(r.get("person", 0)) * int(r.get("hour", 0))
         for r in new_order_results if r.get("order_no")
     )
 
-    # 金額驗證：原訂單A含稅金額 vs 新訂單含稅金額加總
-    try:
-        fare_a_num = int(float(str(fare_a or "0").replace(",", "")))
-        service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
-    except Exception:
-        fare_a_num = 0
-        service_amount_a = 0
-
-    new_amount_total = sum(
-        int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
-    )
-
     ph_warning = None
-    if original_ph > 0 and new_ph != original_ph:
-        diff_ph = original_ph - new_ph
-        diff_amount = service_amount_a - new_amount_total
+    if _service_amount_a > 0 and new_amount_total != _service_amount_a:
+        diff_amount = _service_amount_a - new_amount_total
         ph_warning = (
-            f"⚠️ 人時不符：原訂單 {person_a}人×{original_hour_per_person}小時 = {original_ph}人時（服務金額 {service_amount_a} 元），"
-            f"新訂單合計 {new_ph}人時（{new_amount_total} 元），"
-            f"差異 {abs(diff_ph)} 人時"
-            + (f"、金額差 {abs(diff_amount)} 元（{'缺少' if diff_amount > 0 else '超出'}）" if diff_amount != 0 else "")
-            + "。請確認是否需要補建新訂單。"
+            f"⚠️ 金額不符：原訂單服務金額 {_service_amount_a} 元，"
+            f"新訂單合計 {new_amount_total} 元（{' + '.join(str(r.get('price_with_tax', 0)) for r in new_order_results if r.get('order_no'))}），"
+            f"差額 {abs(diff_amount)} 元（{'缺少' if diff_amount > 0 else '超出'}）。"
+            f"請確認是否需要補建新訂單。"
         )
+    # original_ph 僅供 UI 顯示，從新訂單人時反推（不用 person_a）
+    original_ph = _service_amount_a  # 這裡傳金額供 UI 判斷用
 
     return {
         "order_no_a": order_no_a,
