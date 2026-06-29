@@ -835,6 +835,13 @@ else:
                         st.text_area(f"LINE 訊息（B{idx}）", r["line_message"], height=320, label_visibility="collapsed", key=f"conv_line_{idx}")
                         copy_button(f"複製 B{idx} LINE 訊息", r["line_message"], f"copy_conv_line_{idx}")
 
+            # 合併 LINE 訊息（所有新訂單 B1+B2）
+            combined_msg = conv_result.get("combined_line_message", "")
+            if combined_msg:
+                st.markdown("**💬 合併 LINE 訊息（B1+B2+...）**")
+                st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed", key="conv_combined_line")
+                copy_button("複製合併 LINE 訊息", combined_msg, "copy_conv_combined_line")
+
             st.markdown("<hr>", unsafe_allow_html=True)
 
             # ── 步驟3：人時與金額比較 ─────────────────────────────
