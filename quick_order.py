@@ -1563,7 +1563,8 @@ def convert_order_multi(
     }
 
     # ── Step 3: 原訂單A 混合配班 ──────────────────────────────────
-    period_a_for_assign = new_orders[0].get("period_s", "") if new_orders else (period_a_raw.replace(" ", "") if period_a_raw else "")
+    # 用原訂單A自己解析出來的時段（不是新訂單的時段）
+    period_a_for_assign = period_a_raw.replace(" ", "") if period_a_raw else ""
     lemon_result_a = _assign_mixed_cleaners_to_order(
         session=session, base_url=base_url, order_no=order_no_a,
         service_date=service_date_a, period_s=period_a_for_assign, person_count=str(person_a),
@@ -1653,6 +1654,13 @@ def convert_order_multi(
                 price_with_tax = 0
             if price_with_tax <= 0 and payway_a != "儲值金":
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
+
+            # 4b-pre. 先勾檸檬人班表，確保 quick_create_order 查班表時有班可選
+            ensure_lemon_cleaner_shifts(
+                session=session, base_url=base_url,
+                service_date=new_date_s, period_s=new_period_s,
+                person_count=new_person,
+            )
 
             # 4b. 建折價券（面額=含稅金額，prefix=c{A後3碼}{序號}）
             coupon_prefix = f"c{order_no_a[-3:]}{idx+1}"
