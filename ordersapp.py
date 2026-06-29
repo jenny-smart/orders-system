@@ -809,6 +809,12 @@ else:
                 st.warning(f"⚠️ 原訂單A配班未完成：{msg}")
             st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
 
+            # 人時驗證警告
+            if conv_result.get("ph_warning"):
+                st.warning(conv_result["ph_warning"])
+            elif conv_result.get("original_ph") and conv_result.get("new_ph"):
+                st.success(f"✅ 人時驗證通過：原訂單 {conv_result['original_ph']} 人時 = 新訂單合計 {conv_result['new_ph']} 人時")
+
             st.markdown("<hr>", unsafe_allow_html=True)
 
             # 各筆新訂單結果
