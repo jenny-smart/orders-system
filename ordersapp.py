@@ -844,16 +844,23 @@ else:
                 "09:00-12:00": 3, "09:00-11:00": 2,
                 "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
             }
-            orig_period = str(conv_result.get("period_a_raw", "")).replace(" ", "")
-            orig_person = conv_result.get("person_a_count", 0)
+            orig_period = str(conv_result.get("period_a_raw", "")).replace(" ", "").replace("　", "")
+            orig_person = int(conv_result.get("person_a_count", 0) or 0)
             orig_hour = _PERIOD_HOURS_UI.get(orig_period, 0)
             orig_ph = orig_person * orig_hour if orig_person and orig_hour else 0
-            orig_amount = conv_result.get("service_amount_a_display", 0)
+            try:
+                orig_amount = int(float(str(conv_result.get("service_amount_a_display", 0) or 0)))
+            except Exception:
+                orig_amount = 0
 
             new_orders_ok = [r for r in conv_result["new_order_results"] if r.get("order_no")]
             new_ph = sum(int(r.get("person", 0)) * int(r.get("hour", 0)) for r in new_orders_ok)
             new_amount = sum(int(r.get("price_with_tax", 0)) for r in new_orders_ok)
             new_ph_parts = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok)
+
+            # debug 顯示（若步驟3空白時用於排查）
+            if not orig_ph or not orig_amount:
+                st.caption(f"debug: period_a_raw={repr(orig_period)} person_a={orig_person} hour={orig_hour} amount={orig_amount}")
 
             if orig_ph and orig_amount:
                 diff_ph = orig_ph - new_ph
