@@ -855,10 +855,15 @@ def quick_create_order(
         raise Exception("計算時數後金額為 0，請確認坪數/時數設定是否正確")
     slot = f"{date_s}_{period_s}"
     raw_section = get_section_raw(session, base_data, token, slot)
-    if not slot_exists_in_section_response(raw_section, slot):
-        raise Exception(f"該時段無班表：{slot}")
-    cleaners = extract_cleaners_from_section_response(raw_section, slot)
-    staff_display = format_staff_from_cleaners(cleaners, people=person)
+    _slot_found = slot_exists_in_section_response(raw_section, slot)
+    if not _slot_found:
+        # 班表可能剛被更新，等2秒重試
+        time.sleep(2)
+        raw_section = get_section_raw(session, base_data, token, slot)
+        _slot_found = slot_exists_in_section_response(raw_section, slot)
+    # 找不到班表仍嘗試建單（後台允許無預配班人員的訂單），配班在建單後另行處理
+    cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
+    staff_display = format_staff_from_cleaners(cleaners, people=person) if _slot_found else "（待配班）" 
     booking_url = _booking_url_for_payway(base_url, payway)
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
     booking_resp = session.post(booking_url, data=_build_booking_submit_data(base_data, token, payway, slot), headers=HEADERS, allow_redirects=True)
@@ -1220,7 +1225,8 @@ def _set_cleaner_shift_if_available(session, base_url, cleaner_id, cleaner_name,
     if conflicts:
         return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": f"{date_str} 已勾 {'、'.join(conflicts)}，與 {target_shift_code} 衝突", "checked": sorted(checked_codes)}
     if target_shift_code in checked_codes:
-        return {"success": True, "name": cleaner_name, "id": cleaner_id, "message": f"{cleaner_name} {date_str} 已有 {target_shift_code} 勾班", "checked": sorted(checked_codes), "already_checked": True}
+        # 該時段已勾班，可能已被其他訂單佔用，跳過換下一位檸檬人
+        return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": f"{date_str} {target_shift_code} 已勾班（可能已有其他訂單使用），換下一位", "checked": sorted(checked_codes), "already_checked": True}
     target_name = f"shift_{date_str}_{_shift_code_to_group(target_shift_code)}"
     target_value = _shift_code_to_value(target_shift_code)
     fields = []
@@ -1562,11 +1568,11 @@ def convert_order_multi(
         "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
     }
 
-    # ── Step 3: 原訂單A 混合配班 ──────────────────────────────────
-    # 用原訂單A自己解析出來的時段（不是新訂單的時段）
+    # ── Step 3: 原訂單A 全換檸檬人 ───────────────────────────────
+    # 用原訂單A自己的日期+時段去勾班，再換人
     period_a_for_assign = period_a_raw.replace(" ", "") if period_a_raw else ""
-    lemon_result_a = _assign_mixed_cleaners_to_order(
-        session=session, base_url=base_url, order_no=order_no_a,
+    lemon_result_a = assign_lemon_cleaners_to_order(
+        session=session, base_url=base_url, order_no_a=order_no_a,
         service_date=service_date_a, period_s=period_a_for_assign, person_count=str(person_a),
     )
 
@@ -1656,11 +1662,13 @@ def convert_order_multi(
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
 
             # 4b-pre. 先勾檸檬人班表，確保 quick_create_order 查班表時有班可選
-            ensure_lemon_cleaner_shifts(
+            _pre_shift = ensure_lemon_cleaner_shifts(
                 session=session, base_url=base_url,
                 service_date=new_date_s, period_s=new_period_s,
                 person_count=new_person,
             )
+            if _pre_shift.get("success"):
+                time.sleep(2)  # 等後台班表更新
 
             # 4b. 建折價券（面額=含稅金額，prefix=c{A後3碼}{序號}）
             coupon_prefix = f"c{order_no_a[-3:]}{idx+1}"
@@ -1716,6 +1724,39 @@ def convert_order_multi(
         if r.get("order_no"):
             _update_order_note(session, base_url, r["order_no"], note_text)
 
+    # ── Step 6: 金額驗證 ─────────────────────────────────────────
+    # 原訂單A人時 vs 所有成功新訂單人時加總，若不相等提醒 user
+    try:
+        original_ph = person_a * int(
+            _period_to_shift_code(period_a_for_assign or "").replace("全", "").replace("上", "").replace("下", "") or "0"
+        )
+    except Exception:
+        original_ph = 0
+
+    # 用更可靠的方式算原訂單人時：從解析出的時段推算
+    _PERIOD_HOURS = {
+        "09:00-16:00": 6, "09:00-18:00": 8, "08:30-12:30": 4,
+        "09:00-12:00": 3, "09:00-11:00": 2,
+        "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
+    }
+    period_a_compact = (period_a_raw or "").replace(" ", "")
+    original_hour_per_person = _PERIOD_HOURS.get(period_a_compact, 0)
+    original_ph = person_a * original_hour_per_person
+
+    new_ph = sum(
+        int(r.get("person", 0)) * int(r.get("hour", 0))
+        for r in new_order_results if r.get("order_no")
+    )
+    ph_warning = None
+    if original_ph > 0 and new_ph != original_ph:
+        diff = original_ph - new_ph
+        ph_warning = (
+            f"⚠️ 人時不符：原訂單 {person_a}人×{original_hour_per_person}小時 = {original_ph}人時，"
+            f"新訂單合計 {new_ph}人時，"
+            f"差異 {abs(diff)}人時（{'缺少' if diff > 0 else '超出'} {abs(diff)} 人時）。"
+            f"請確認是否需要補建新訂單。"
+        )
+
     return {
         "order_no_a": order_no_a,
         "new_order_results": new_order_results,
@@ -1726,6 +1767,9 @@ def convert_order_multi(
         "all_nos_str": all_nos_str,
         "success_count": len([r for r in new_order_results if r.get("order_no")]),
         "fail_count": len([r for r in new_order_results if not r.get("order_no")]),
+        "original_ph": original_ph,
+        "new_ph": new_ph,
+        "ph_warning": ph_warning,
     }
 
 
