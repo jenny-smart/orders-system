@@ -1918,9 +1918,13 @@ def convert_order_multi(
         "all_nos_str": all_nos_str,
         "success_count": len([r for r in new_order_results if r.get("order_no")]),
         "fail_count": len([r for r in new_order_results if not r.get("order_no")]),
-        "original_ph": original_ph,
-        "new_ph": new_ph,
         "ph_warning": ph_warning,
+        "original_ph": _service_amount_a,
+        "new_ph": new_ph,
+        # UI 步驟3 需要的欄位
+        "period_a_raw": period_a_raw,
+        "person_a_count": person_a,
+        "service_amount_a_display": _service_amount_a,
     }
 
 
