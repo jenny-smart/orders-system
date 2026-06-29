@@ -2505,7 +2505,7 @@ def build_line_message(order_result):
     except Exception:
         has_fare = bool(str(fare or "").strip())
     vip_fare_line = f"車馬費：{fare}\n" if has_fare else ""
-    card_fare_line = f"車馬費： {fare}   (服務完後收取)\n" if has_fare else ""
+    card_fare_line = f"車馬費： {fare}   (請現場支付給專員)\n" if has_fare else ""
     taipei_atm_fare_line = f"車馬費：{fare}（請現場支付給專員）\n" if has_fare else ""
     taichung_atm_fare_line = f"\n車馬費:{fare}（請現場支付給專員）" if has_fare else ""
 
