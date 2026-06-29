@@ -1467,9 +1467,12 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
         data=fields, headers=HEADERS, allow_redirects=True,
     )
     success = post_resp.status_code in (200, 302)
+    # actual_person_count：從 originShiftId 數量取得訂單實際人數（最準確）
+    actual_person_count = len(origin_ids) if origin_ids else n
     return {
         "success": success,
         "assigned": assigned_names,
+        "actual_person_count": actual_person_count,
         "pre_shift_result": pre_shift_result,
         "message": f"已換為檸檬人：{'、'.join(assigned_names)}" if success else f"POST 失敗：HTTP {post_resp.status_code}",
     }
@@ -1666,11 +1669,20 @@ def convert_order_multi(
         if _edit_id_a:
             _edit_resp_a = session.get(f"{base_url}/purchase/edit/{_edit_id_a}", headers=HEADERS, allow_redirects=True)
             if _edit_resp_a.status_code == 200:
-                _pm = re.search(r'name=["\']person["\'][^>]*value=["\']?(\d+)["\']?', _edit_resp_a.text, re.I)
+                # 取人數
+                _pm = re.search(r'name=["\'"]person["\'"][^>]*value=["\'"]?(\d+)["\'"]?', _edit_resp_a.text, re.I)
                 if not _pm:
-                    _pm = re.search(r'value=["\']?(\d+)["\']?[^>]*name=["\']person["\']?', _edit_resp_a.text, re.I)
+                    _pm = re.search(r'value=["\'"]?(\d+)["\'"]?[^>]*name=["\'"]person["\'"]?', _edit_resp_a.text, re.I)
                 if _pm:
                     person_a = int(_pm.group(1))
+                # 取原始服務金額（price 欄位，未稅）
+                _price_m = re.search(r'name=["\'"]price["\'"][^>]*value=["\'"]?([\d.]+)["\'"]?', _edit_resp_a.text, re.I)
+                if _price_m and not service_amount_a_int:
+                    try:
+                        _price_no_tax = float(_price_m.group(1))
+                        service_amount_a_int = int(round(_price_no_tax * 1.05))
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -1736,6 +1748,9 @@ def convert_order_multi(
     lemon_result_a["date_change_msg"] = date_change_msg
     lemon_result_a["new_service_date"] = target_date_a
     lemon_result_a["pre_shift_a"] = pre_shift_a
+    # 用排班頁 originShiftId 數量更新 person_a（最準確的原訂單人數）
+    if lemon_result_a.get("actual_person_count"):
+        person_a = lemon_result_a["actual_person_count"]
 
     # ── Step 4: 預先做一次 check_contain 取 area_id/company_id ───
     member = member_payload.get("member", {})
@@ -1948,8 +1963,18 @@ def convert_order_multi(
         if r.get("order_no"):
             _update_order_note(session, base_url, r["order_no"], note_text)
 
-    # ── Step 6: 金額驗證 ─────────────────────────────────────────
+    # ── Step 6: 人時與金額驗證 ──────────────────────────────────
     _service_amount_a = service_amount_a_int  # 已在 Step 1 解析
+
+    # 原訂單人時：person_a × 時段小時數
+    _PERIOD_HOURS_CALC = {
+        "09:00-16:00": 6, "09:00-18:00": 8,
+        "08:30-12:30": 4, "09:00-12:00": 3, "09:00-11:00": 2,
+        "14:00-18:00": 4, "14:00-17:00": 3, "14:00-16:00": 2,
+    }
+    _period_compact = (period_a_raw or "").replace(" ", "")
+    _hour_per_person = _PERIOD_HOURS_CALC.get(_period_compact, 0)
+    original_ph = person_a * _hour_per_person
 
     new_amount_total = sum(
         int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
@@ -1987,6 +2012,8 @@ def convert_order_multi(
         # UI 步驟3 需要的欄位
         "period_a_raw": period_a_raw,
         "person_a_count": person_a,
+        "hour_per_person_a": _hour_per_person,
+        "original_ph_calc": original_ph,
         "service_amount_a_display": _service_amount_a,
         # 合併 LINE 訊息
         "combined_line_message": combined_line_message,
