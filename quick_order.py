@@ -857,11 +857,16 @@ def quick_create_order(
     raw_section = get_section_raw(session, base_data, token, slot)
     _slot_found = slot_exists_in_section_response(raw_section, slot)
     if not _slot_found:
-        # 班表可能剛被更新，等2秒重試
+        # 該時段無人可配班 → 去勾檸檬人班表，再重查
+        _pre = ensure_lemon_cleaner_shifts(
+            session=session,
+            base_url=base_url,
+            service_date=date_s, period_s=period_s, person_count=str(person),
+        )
         time.sleep(2)
         raw_section = get_section_raw(session, base_data, token, slot)
         _slot_found = slot_exists_in_section_response(raw_section, slot)
-    # 找不到班表仍嘗試建單（後台允許無預配班人員的訂單），配班在建單後另行處理
+    # 若仍找不到班表，仍嘗試建單（後台允許無預配班人員的訂單）
     cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
     staff_display = format_staff_from_cleaners(cleaners, people=person) if _slot_found else "（待配班）" 
     booking_url = _booking_url_for_payway(base_url, payway)
@@ -1343,67 +1348,100 @@ def _get_schedule_edit_info(session, base_url, date_str, purchase_id):
 
 
 def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, period_s, person_count):
-    """全換檸檬人（v8.3 邏輯）。用於需要所有位置都換成檸檬人的情境。"""
+    """
+    原訂單A換人：
+    1. GET 排班修改頁，若各槽位已有可換班人員則直接換
+    2. 若排班頁沒有人（無可換班候選），先去勾檸檬人班表，再重取頁面換人
+    不預先全量勾班，避免把其他訂單的檸檬人班別干擾掉。
+    """
     purchase_id = _fetch_order_edit_id(session, order_no_a)
     if not purchase_id:
         return {"success": False, "message": f"無法取得訂單 {order_no_a} 的後台 ID"}
-    pre_shift_result = ensure_lemon_cleaner_shifts(session=session, base_url=base_url, service_date=service_date, period_s=period_s, person_count=person_count)
-    if not pre_shift_result.get("success"):
-        return {"success": False, "message": pre_shift_result.get("message", "檸檬人勾班失敗"), "pre_shift_result": pre_shift_result}
-    preferred_names = list(pre_shift_result.get("assigned") or [])
-    csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
-    if not slots:
-        return {"success": False, "message": "無法取得排班修改頁，請手動操作"}
-    n = int(person_count)
-    shift_choices = []
-    assigned_names = []
-    missing_slots = []
 
     def _lemon_name_no(name):
         m = re.search(r"檸檬人\s*(\d+)", str(name or ""))
         return int(m.group(1)) if m else 9999
 
+    def _pick_lemon(slot_map, used):
+        candidates = [
+            (k.strip(), v) for k, v in slot_map.items()
+            if "檸檬人" in k and k.strip() not in used
+        ]
+        candidates.sort(key=lambda x: _lemon_name_no(x[0]))
+        return candidates[0] if candidates else None
+
+    csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
+    if not slots:
+        return {"success": False, "message": "無法取得排班修改頁，請手動操作"}
+
+    n = int(person_count)
     used_names = set()
+    shift_choices = []
+    assigned_names = []
+    need_lemon_count = 0
+
+    # 第一輪：看排班頁有沒有檸檬人可選
     for i, slot_map in enumerate(slots):
         if i >= n:
             break
-        lemon_entry = None
-        for preferred in preferred_names:
-            if preferred in used_names:
-                continue
-            for name_key, sid in slot_map.items():
-                clean_name = name_key.strip()
-                if "檸檬人" not in clean_name or clean_name in used_names:
-                    continue
-                if preferred == clean_name or preferred in clean_name or clean_name in preferred:
-                    lemon_entry = (clean_name, sid)
-                    break
-            if lemon_entry:
-                break
-        if not lemon_entry:
-            lemon_candidates = [(name_key.strip(), sid) for name_key, sid in slot_map.items() if "檸檬人" in name_key and name_key.strip() not in used_names]
-            lemon_candidates.sort(key=lambda x: _lemon_name_no(x[0]))
-            if lemon_candidates:
-                lemon_entry = lemon_candidates[0]
-        if lemon_entry:
-            shift_choices.append(lemon_entry[1])
-            assigned_names.append(lemon_entry[0])
-            used_names.add(lemon_entry[0])
+        entry = _pick_lemon(slot_map, used_names)
+        if entry:
+            shift_choices.append(entry[1])
+            assigned_names.append(entry[0])
+            used_names.add(entry[0])
         else:
-            missing_slots.append(i + 1)
-    if missing_slots:
-        available_by_slot = [{"slot": idx, "lemon_candidates": [name for name in slot_map.keys() if "檸檬人" in name]} for idx, slot_map in enumerate(slots[:n], start=1)]
-        return {"success": False, "message": f"槽位 {missing_slots} 找不到可用的檸檬人；訂單需要 {n} 位不同檸檬人，已選 {len(assigned_names)} 位。", "available_by_slot": available_by_slot, "pre_shift_result": pre_shift_result}
+            # 這個槽位排班頁沒有檸檬人，需要先去勾班
+            shift_choices.append(None)
+            need_lemon_count += 1
+
+    # 若有槽位沒有檸檬人可選，先勾班再重取頁面
+    pre_shift_result = {"success": True, "assigned": [], "message": "排班頁已有檸檬人，無需額外勾班"}
+    if need_lemon_count > 0:
+        pre_shift_result = ensure_lemon_cleaner_shifts(
+            session=session, base_url=base_url,
+            service_date=service_date, period_s=period_s,
+            person_count=str(need_lemon_count),
+        )
+        # 重取排班修改頁
+        csrf, origin_ids, slots = _get_schedule_edit_info(session, base_url, service_date, purchase_id)
+        if not slots:
+            return {"success": False, "message": "勾班後無法重取排班修改頁，請手動操作"}
+        # 重新填入 None 的槽位
+        for i, slot_map in enumerate(slots):
+            if i >= n:
+                break
+            if shift_choices[i] is None:
+                entry = _pick_lemon(slot_map, used_names)
+                if entry:
+                    shift_choices[i] = entry[1]
+                    assigned_names[i] = entry[0]
+                    used_names.add(entry[0])
+                else:
+                    return {
+                        "success": False,
+                        "message": f"槽位 {i+1} 勾班後仍找不到可用的檸檬人，請手動操作",
+                        "pre_shift_result": pre_shift_result,
+                    }
+
+    # assigned_names 長度補齊（避免 None）
+    assigned_names = [n for n in assigned_names if n]
+
     fields = [("_token", csrf), ("_method", "PUT")]
-    for oid in origin_ids:
+    for oid in origin_ids[:n]:
         fields.append(("originShiftId[]", oid))
-    for j, sid in enumerate(shift_choices):
+    for j, sid in enumerate(shift_choices[:n]):
         fields.append((f"shiftId[{j}]", sid))
-    post_resp = session.post(f"{base_url}/schedule/edit", params={"date": service_date, "purchase_id": purchase_id}, data=fields, headers=HEADERS, allow_redirects=True)
+    post_resp = session.post(
+        f"{base_url}/schedule/edit",
+        params={"date": service_date, "purchase_id": purchase_id},
+        data=fields, headers=HEADERS, allow_redirects=True,
+    )
     success = post_resp.status_code in (200, 302)
     return {
-        "success": success, "assigned": assigned_names, "pre_shift_result": pre_shift_result,
-        "message": f"已將配班改為：{'、'.join(assigned_names)}" if success else f"POST 失敗：HTTP {post_resp.status_code}",
+        "success": success,
+        "assigned": assigned_names,
+        "pre_shift_result": pre_shift_result,
+        "message": f"已換為檸檬人：{'、'.join(assigned_names)}" if success else f"POST 失敗：HTTP {post_resp.status_code}",
     }
 
 
@@ -1718,16 +1756,8 @@ def convert_order_multi(
             if price_with_tax <= 0 and payway_a != "儲值金":
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
 
-            # 4b-pre. 先勾檸檬人班表，確保 quick_create_order 查班表時有班可選
-            _pre_shift = ensure_lemon_cleaner_shifts(
-                session=session, base_url=base_url,
-                service_date=new_date_s, period_s=new_period_s,
-                person_count=new_person,
-            )
-            if _pre_shift.get("success"):
-                time.sleep(2)  # 等後台班表更新
-
-            # 4b. 建折價券（面額=含稅金額，prefix=c{A後3碼}{序號}）
+            # 4b. 建折價券
+            # （班表若無人，quick_create_order 內部會自動勾檸檬人班再重查）（面額=含稅金額，prefix=c{A後3碼}{序號}）
             coupon_prefix = f"c{order_no_a[-3:]}{idx+1}"
             coupon_code = _build_coupon_via_session(
                 session, base_url,
