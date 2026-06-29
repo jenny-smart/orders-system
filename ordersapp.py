@@ -858,10 +858,7 @@ else:
             new_amount = sum(int(r.get("price_with_tax", 0)) for r in new_orders_ok)
             new_ph_parts = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok)
 
-            # debug 顯示（若步驟3空白時用於排查）
-            if not orig_ph or not orig_amount:
-                st.caption(f"debug: period_a_raw={repr(orig_period)} person_a={orig_person} hour={orig_hour} amount={orig_amount}")
-
+            # 顯示比較結果
             if orig_ph and orig_amount:
                 diff_ph = orig_ph - new_ph
                 diff_amt = orig_amount - new_amount
@@ -878,6 +875,13 @@ else:
                         warn_lines.append(f"金額差：{'缺少' if diff_amt > 0 else '超出'} {abs(diff_amt)} 元")
                     warn_lines.append("請確認是否需要補建新訂單。")
                     st.warning("⚠️ " + "\n".join(warn_lines))
+            elif orig_amount and new_amount:
+                # person_a 無法解析，只比較金額
+                diff_amt = orig_amount - new_amount
+                if diff_amt == 0:
+                    st.success(f"✅ 金額相符：原訂單 {orig_amount} 元 = 新訂單合計 {new_amount} 元")
+                else:
+                    st.warning(f"⚠️ 金額不符：原訂單 {orig_amount} 元，新訂單合計 {new_amount} 元（{new_ph_parts}），差額 {'缺少' if diff_amt > 0 else '超出'} {abs(diff_amt)} 元。請確認是否需要補建新訂單。")
             elif conv_result.get("ph_warning"):
                 st.warning(conv_result["ph_warning"])
 
