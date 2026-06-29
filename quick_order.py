@@ -1648,8 +1648,8 @@ def convert_order_multi(
     # 若多筆新訂單日期不同，取最早那筆
     new_dates = sorted([o.get("date_s", "") for o in new_orders if o.get("date_s")])
     target_date_a = new_dates[0] if new_dates else service_date_a
-    target_period_a = new_orders[0].get("period_s", "") if new_orders else ""
-    period_a_for_assign = target_period_a.replace(" ", "") if target_period_a else (period_a_raw.replace(" ", "") if period_a_raw else "")
+    # 原訂單A用自己解析的時段去勾班（不用B1的時段）
+    period_a_for_assign = period_a_raw.replace(" ", "") if period_a_raw else ""
 
     date_change_ok = False
     date_change_msg = ""
@@ -1777,18 +1777,15 @@ def convert_order_multi(
             )
             new_order_nos.append(order_result["order_no"])
 
-            # 4d. 混合配班
-            assign_result = _assign_mixed_cleaners_to_order(
-                session=session, base_url=base_url, order_no=order_result["order_no"],
-                service_date=new_date_s, period_s=new_period_s, person_count=new_person,
-            )
-
+            # 新訂單建單後不另外換人
+            # quick_create_order 建單時後台已依班表自動配班
+            # 若班表無人，quick_create_order 內部已先勾檸檬人班再建單
             new_order_results.append({
                 "index": idx + 1, "order_no": order_result["order_no"],
                 "date_s": new_date_s, "period_s": new_period_s,
                 "hour": new_hour, "person": new_person,
                 "price_with_tax": price_with_tax, "coupon_code": coupon_code,
-                "coupon_prefix": coupon_prefix, "assign_result": assign_result,
+                "coupon_prefix": coupon_prefix, "assign_result": {"success": True, "message": "由後台建單時自動配班"},
                 "order_result": order_result,
                 "line_message": build_line_message(order_result),
                 "error": None,
