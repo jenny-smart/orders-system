@@ -1086,6 +1086,43 @@ def _update_order_note(session, base_url, order_no, note):
         return False, str(e)
 
 
+def _update_order_service_date(session, base_url, order_no, new_date_s):
+    """
+    把原訂單服務日期改成新日期。
+    GET /purchase/edit/{id} -> 抓所有表單欄位 -> 把 date_s 換成 new_date_s -> PUT。
+    回傳 (成功bool, 訊息str)。
+    """
+    try:
+        edit_id = _fetch_order_edit_id(session, order_no)
+        if not edit_id:
+            return False, f"找不到訂單 {order_no} 的編輯 ID"
+        edit_url = f"{base_url}/purchase/edit/{edit_id}"
+        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        if get_resp.status_code != 200:
+            return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+        token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+        csrf = token_m.group(1) if token_m else ""
+        if not csrf:
+            return False, "無法取得 CSRF token"
+        existing = {}
+        for m2 in re.finditer(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2)
+        for m2 in re.finditer(r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2).strip()
+        existing["_token"] = csrf
+        existing["_method"] = "PUT"
+        existing["date_s"] = str(new_date_s)
+        post_resp = session.post(
+            edit_url, data=existing,
+            headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=True,
+        )
+        success = post_resp.status_code in (200, 302)
+        return success, f"HTTP {post_resp.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+
 # =========================================================
 # 檸檬人勾班工具函式
 # =========================================================
@@ -1568,13 +1605,33 @@ def convert_order_multi(
         "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
     }
 
-    # ── Step 3: 原訂單A 全換檸檬人 ───────────────────────────────
-    # 用原訂單A自己的日期+時段去勾班，再換人
-    period_a_for_assign = period_a_raw.replace(" ", "") if period_a_raw else ""
+    # ── Step 3: 原訂單A 修改日期 + 全換檸檬人 ────────────────────
+    # 原訂單A日期改成第一筆新訂單的日期（同一天服務）
+    # 若多筆新訂單日期不同，取最早那筆
+    new_dates = sorted([o.get("date_s", "") for o in new_orders if o.get("date_s")])
+    target_date_a = new_dates[0] if new_dates else service_date_a
+    target_period_a = new_orders[0].get("period_s", "") if new_orders else ""
+    period_a_for_assign = target_period_a.replace(" ", "") if target_period_a else (period_a_raw.replace(" ", "") if period_a_raw else "")
+
+    date_change_ok = False
+    date_change_msg = ""
+    if target_date_a and target_date_a != service_date_a:
+        date_change_ok, date_change_msg = _update_order_service_date(
+            session, base_url, order_no_a, target_date_a
+        )
+    else:
+        date_change_ok = True
+        date_change_msg = "日期相同，無須修改"
+        target_date_a = service_date_a
+
+    # 用新日期+新時段去勾檸檬人班，再到排班修改頁全換檸檬人
     lemon_result_a = assign_lemon_cleaners_to_order(
         session=session, base_url=base_url, order_no_a=order_no_a,
-        service_date=service_date_a, period_s=period_a_for_assign, person_count=str(person_a),
+        service_date=target_date_a, period_s=period_a_for_assign, person_count=str(person_a),
     )
+    lemon_result_a["date_change_ok"] = date_change_ok
+    lemon_result_a["date_change_msg"] = date_change_msg
+    lemon_result_a["new_service_date"] = target_date_a
 
     # ── Step 4: 預先做一次 check_contain 取 area_id/company_id ───
     member = member_payload.get("member", {})
