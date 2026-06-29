@@ -1867,6 +1867,80 @@ def convert_order_multi(
                 "hour": new_hour, "person": new_person, "order_no": None, "error": str(e),
             })
 
+    # ── Step 4e: 建立合併 LINE 訊息（所有新訂單 B1+B2...）────────
+    # 用現有 session，不重新登入
+    combined_line_message = ""
+    try:
+        b_nos_for_line = [r["order_no"] for r in new_order_results if r.get("order_no")]
+        if len(b_nos_for_line) > 1:
+            # 直接用內部函式，傳入現有 session
+            orders_info = []
+            for ono in b_nos_for_line:
+                block = _fetch_purchase_block_for_order_no(session, ono)
+                lines_b = block.get("lines", [])
+                joined_b = "\n".join(lines_b)
+                sdate, stime = _parse_service_date_time_loose(joined_b)
+                actual_t = _extract_actual_service_time(joined_b)
+                p_str, _ = _extract_person_hour_line(joined_b)
+                addr_b = _extract_address_line(lines_b)
+                fare_b = _extract_fare_line(joined_b) or "0"
+                pw_b = payway_a
+                svc_amt = _service_amount_from_block(joined_b, fare_b)
+                orders_info.append({
+                    "order_no": ono, "service_date": sdate, "period_s": stime,
+                    "actual_period": actual_t, "person": p_str,
+                    "address": addr_b or address_a,
+                    "fare": fare_b, "payway": pw_b,
+                    "service_amount": svc_amt, "region": region_a,
+                })
+            # 合併時段顯示
+            from orders import display_period_text
+            unique_dates = sorted({o["service_date"] for o in orders_info})
+            all_same_date = len(unique_dates) == 1
+            if all_same_date:
+                period_parts = []
+                for o in orders_info:
+                    p_compact = str(o["period_s"] or "").replace(" ", "")
+                    p_disp = _format_period_display(p_compact, str(o["person"] or ""))
+                    period_parts.append(p_disp)
+                combined_period = "＋".join(period_parts)
+                multi_date = False
+            else:
+                period_lines = []
+                for o in orders_info:
+                    d = o["service_date"].replace("-", "/")
+                    p_compact = str(o["period_s"] or "").replace(" ", "")
+                    p_disp = _format_period_display(p_compact, str(o["person"] or ""))
+                    period_lines.append(f"{d} {p_disp}")
+                combined_period = "\n".join(period_lines)
+                multi_date = True
+            total_fare = sum(int(float(o["fare"] or "0")) for o in orders_info)
+            amt_parts = [str(o["service_amount"] or "0") for o in orders_info]
+            total_amt = sum(int(float(a.replace(",", ""))) for a in amt_parts if a)
+            amount_display = "＋".join(amt_parts) + "＝" + str(total_amt) if len(amt_parts) > 1 else str(total_amt)
+            first = orders_info[0]
+            line_result = {
+                "order_no": first["order_no"],
+                "all_order_nos": b_nos_for_line,
+                "address": address_a,
+                "date": first["service_date"],
+                "period": first["period_s"], "period_s": first["period_s"],
+                "actual_period": first["actual_period"],
+                "combined_period": combined_period,
+                "multi_date": multi_date,
+                "person": first["person"],
+                "service_amount": amount_display,
+                "price_with_tax": str(total_amt),
+                "fare": str(total_fare) if total_fare else "0",
+                "payway": payway_a, "region": region_a,
+                "env_name": env_name, "session": session,
+            }
+            combined_line_message = build_line_message(line_result)
+        elif b_nos_for_line and new_order_results:
+            combined_line_message = new_order_results[0].get("line_message", "")
+    except Exception as _e_line:
+        combined_line_message = f"（合併 LINE 訊息產生失敗：{_e_line}）"
+
     # ── Step 5: 備註文字並自動寫入 ──────────────────────────────
     b_nos = [r["order_no"] for r in new_order_results if r.get("order_no")]
     all_nos_str = "+".join([order_no_a] + b_nos)
@@ -1884,10 +1958,10 @@ def convert_order_multi(
         _service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
     except Exception:
         _service_amount_a = 0
-    # coupon_discount 是在 Step 1 從 service_amount_a 計算的，應與 _service_amount_a 一致
+    # 若仍為 0，直接從原始字串再解析一次
     if not _service_amount_a:
         try:
-            _service_amount_a = int(coupon_discount)
+            _service_amount_a = int(float(str(service_amount_a).replace(",", "")))
         except Exception:
             _service_amount_a = 0
 
@@ -1928,6 +2002,8 @@ def convert_order_multi(
         "period_a_raw": period_a_raw,
         "person_a_count": person_a,
         "service_amount_a_display": _service_amount_a,
+        # 合併 LINE 訊息
+        "combined_line_message": combined_line_message,
     }
 
 
