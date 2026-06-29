@@ -868,6 +868,18 @@ def quick_create_order(
         _slot_found = slot_exists_in_section_response(raw_section, slot)
     # 若仍找不到班表，仍嘗試建單（後台允許無預配班人員的訂單）
     cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
+    # 若可用人員數量不足 person，補勾檸檬人班表再重查
+    _need = int(person) if str(person).isdigit() else 2
+    if _slot_found and len(cleaners) < _need:
+        _pre2 = ensure_lemon_cleaner_shifts(
+            session=session,
+            base_url=base_url,
+            service_date=date_s, period_s=period_s, person_count=str(_need - len(cleaners)),
+        )
+        time.sleep(2)
+        raw_section = get_section_raw(session, base_data, token, slot)
+        _slot_found = slot_exists_in_section_response(raw_section, slot)
+        cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
     staff_display = format_staff_from_cleaners(cleaners, people=person) if _slot_found else "（待配班）" 
     booking_url = _booking_url_for_payway(base_url, payway)
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
@@ -2011,7 +2023,9 @@ def convert_order_multi(
         "original_ph": _service_amount_a,
         "new_ph": new_ph,
         # UI 步驟3 需要的欄位
-        "period_a_raw": period_a_raw,
+        "period_a_raw": (period_a_raw or "").strip(),
+        "_debug_period_compact": (period_a_raw or "").replace(" ", ""),
+        "_debug_hour": _hour_per_person,
         "person_a_count": person_a,
         "hour_per_person_a": _hour_per_person,
         "original_ph_calc": original_ph,
