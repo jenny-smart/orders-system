@@ -1870,14 +1870,29 @@ def convert_order_multi(
         int(r.get("person", 0)) * int(r.get("hour", 0))
         for r in new_order_results if r.get("order_no")
     )
+
+    # 金額驗證：原訂單A含稅金額 vs 新訂單含稅金額加總
+    try:
+        fare_a_num = int(float(str(fare_a or "0").replace(",", "")))
+        service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
+    except Exception:
+        fare_a_num = 0
+        service_amount_a = 0
+
+    new_amount_total = sum(
+        int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
+    )
+
     ph_warning = None
     if original_ph > 0 and new_ph != original_ph:
-        diff = original_ph - new_ph
+        diff_ph = original_ph - new_ph
+        diff_amount = service_amount_a - new_amount_total
         ph_warning = (
-            f"⚠️ 人時不符：原訂單 {person_a}人×{original_hour_per_person}小時 = {original_ph}人時，"
-            f"新訂單合計 {new_ph}人時，"
-            f"差異 {abs(diff)}人時（{'缺少' if diff > 0 else '超出'} {abs(diff)} 人時）。"
-            f"請確認是否需要補建新訂單。"
+            f"⚠️ 人時不符：原訂單 {person_a}人×{original_hour_per_person}小時 = {original_ph}人時（服務金額 {service_amount_a} 元），"
+            f"新訂單合計 {new_ph}人時（{new_amount_total} 元），"
+            f"差異 {abs(diff_ph)} 人時"
+            + (f"、金額差 {abs(diff_amount)} 元（{'缺少' if diff_amount > 0 else '超出'}）" if diff_amount != 0 else "")
+            + "。請確認是否需要補建新訂單。"
         )
 
     return {
