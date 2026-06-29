@@ -2506,8 +2506,8 @@ def build_line_message(order_result):
         has_fare = bool(str(fare or "").strip())
     vip_fare_line = f"車馬費：{fare}\n" if has_fare else ""
     card_fare_line = f"車馬費： {fare}   (服務完後收取)\n" if has_fare else ""
-    taipei_atm_fare_line = f"車馬費：{fare}\n" if has_fare else ""
-    taichung_atm_fare_line = f"\n車馬費:{fare}" if has_fare else ""
+    taipei_atm_fare_line = f"車馬費：{fare}（請現場支付給專員）\n" if has_fare else ""
+    taichung_atm_fare_line = f"\n車馬費:{fare}（請現場支付給專員）" if has_fare else ""
 
     common_footer = """**當您完成付款後即表示服務已完成預約，
 預約完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策。
