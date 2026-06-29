@@ -812,18 +812,25 @@ else:
                         st.error(f"❌ 原訂單A日期修改失敗（{date_msg}），請手動修改服務日期為 {new_svc_date}")
 
             if lr_a and lr_a.get("success"):
-                names = lr_a.get("assigned", [])
-                st.success(f"✅ {conv_result['order_no_a']} 配班已換為檸檬人：{'、'.join(names)}")
+                lemon_names = lr_a.get("assigned", [])
+                kept_names = lr_a.get("kept", [])
+                parts = []
+                if lemon_names:
+                    parts.append(f"換為檸檬人：{'、'.join(lemon_names)}")
+                if kept_names:
+                    parts.append(f"保留真人：{'、'.join(kept_names)}")
+                st.success(f"✅ {conv_result['order_no_a']}　{'　'.join(parts)}")
             else:
                 msg = lr_a.get("message", "未知") if lr_a else "未執行"
                 st.warning(f"⚠️ 原訂單A配班未完成：{msg}")
             st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
 
-            # 人時驗證
+            # 金額驗證
             if conv_result.get("ph_warning"):
                 st.warning(conv_result["ph_warning"])
-            elif conv_result.get("original_ph") and conv_result.get("new_ph"):
-                st.success(f"✅ 人時驗證通過：原訂單 {conv_result['original_ph']} 人時 = 新訂單合計 {conv_result['new_ph']} 人時")
+            else:
+                new_amt = sum(r.get("price_with_tax", 0) for r in conv_result.get("new_order_results", []) if r.get("order_no"))
+                st.success(f"✅ 金額驗證通過：新訂單合計 {new_amt} 元 = 原訂單服務金額")
 
             st.markdown("<hr>", unsafe_allow_html=True)
 
