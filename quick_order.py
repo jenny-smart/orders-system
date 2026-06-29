@@ -1653,36 +1653,32 @@ def convert_order_multi(
     payway_a = _extract_payway_line(joined_a)
     phone_a = _extract_phone_from_block_lines(lines_a)
     region_a = get_region_by_address(address_a, ACCOUNTS) or "台北"
-    _person_str, _hour_str = _extract_person_hour_line(joined_a)
-    # 備援1：從 calculate_hour 的原始資料解析（取 /purchase/edit 頁面）
-    # 備援2：從金額反推人數
-    # 備援3：從配班人員行（但此行可能已被改成檸檬人，人數不準確）
-    person_a_from_text = int(_person_str) if _person_str and _person_str.isdigit() else 0
-    person_a = person_a_from_text
+    fare_a = _extract_fare_line(joined_a) or "0"
+    service_amount_a = _service_amount_from_block(joined_a, fare_a)
+    try:
+        service_amount_a_int = int(float(str(service_amount_a or "0").replace(",", "")))
+    except Exception:
+        service_amount_a_int = 0
+    # 優先從後台 /purchase/edit 頁面取原始人數（最準確）
+    person_a = 0
+    try:
+        _edit_id_a = _fetch_order_edit_id(session, order_no_a)
+        if _edit_id_a:
+            _edit_resp_a = session.get(f"{base_url}/purchase/edit/{_edit_id_a}", headers=HEADERS, allow_redirects=True)
+            if _edit_resp_a.status_code == 200:
+                _pm = re.search(r'name=["\']person["\'][^>]*value=["\']?(\d+)["\']?', _edit_resp_a.text, re.I)
+                if not _pm:
+                    _pm = re.search(r'value=["\']?(\d+)["\']?[^>]*name=["\']person["\']?', _edit_resp_a.text, re.I)
+                if _pm:
+                    person_a = int(_pm.group(1))
+    except Exception:
+        pass
 
     if not person_a:
-        # 從金額反推：含稅金額 / 1.05 / 每人時單價 / 時段小時數
-        try:
-            fare_a_tmp = int(float(_extract_fare_line(joined_a) or "0"))
-            total_tmp = int(float(_extract_total_amount_line(joined_a) or "0"))
-            service_amt_tmp = total_tmp - fare_a_tmp if fare_a_tmp and total_tmp > fare_a_tmp else total_tmp
-            _PERIOD_HOURS_TMP = {
-                "09:00-16:00": 6, "09:00-18:00": 8, "08:30-12:30": 4,
-                "09:00-12:00": 3, "09:00-11:00": 2,
-                "14:00-16:00": 2, "14:00-17:00": 3, "14:00-18:00": 4,
-            }
-            _h = _PERIOD_HOURS_TMP.get((period_a_raw or "").replace(" ", ""), 0)
-            if service_amt_tmp and _h:
-                # 嘗試平日(600)和週末(700)
-                for unit in (600, 700):
-                    price_no_tax = service_amt_tmp / 1.05
-                    ph = price_no_tax / unit
-                    p = round(ph / _h)
-                    if p > 0 and abs(p * _h * unit * 1.05 - service_amt_tmp) < 50:
-                        person_a = p
-                        break
-        except Exception:
-            pass
+        # 備援：從訂單文字解析
+        _person_str, _ = _extract_person_hour_line(joined_a)
+        if _person_str and _person_str.isdigit():
+            person_a = int(_person_str)
 
     if not person_a:
         person_a = len(new_orders)  # 最後 fallback
@@ -1953,17 +1949,7 @@ def convert_order_multi(
             _update_order_note(session, base_url, r["order_no"], note_text)
 
     # ── Step 6: 金額驗證 ─────────────────────────────────────────
-    # 用原訂單A的含稅金額 vs 新訂單含稅金額加總比較
-    try:
-        _service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
-    except Exception:
-        _service_amount_a = 0
-    # 若仍為 0，直接從原始字串再解析一次
-    if not _service_amount_a:
-        try:
-            _service_amount_a = int(float(str(service_amount_a).replace(",", "")))
-        except Exception:
-            _service_amount_a = 0
+    _service_amount_a = service_amount_a_int  # 已在 Step 1 解析
 
     new_amount_total = sum(
         int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
