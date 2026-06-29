@@ -1563,7 +1563,7 @@ def convert_order(
     block_a = _fetch_purchase_block_for_order_no(session, order_no_a)
     lines_a = block_a.get("lines", [])
     joined_a = "\n".join(lines_a)
-    service_date_a, _ = _parse_service_date_time_loose(joined_a)
+    service_date_a, period_a_raw = _parse_service_date_time_loose(joined_a)
     address_a = _extract_address_line(lines_a)
     payway_a = _extract_payway_line(joined_a)
     fare_a = _extract_fare_line(joined_a) or "0"
@@ -1880,13 +1880,16 @@ def convert_order_multi(
 
     # ── Step 6: 金額驗證 ─────────────────────────────────────────
     # 用原訂單A的含稅金額 vs 新訂單含稅金額加總比較
-    # 不依賴 person_a（配班人員行可能已被改動，數量不準確）
     try:
-        _fare_a = int(float(str(fare_a or "0").replace(",", "")))
         _service_amount_a = int(float(str(service_amount_a or "0").replace(",", "")))
     except Exception:
-        _fare_a = 0
         _service_amount_a = 0
+    # coupon_discount 是在 Step 1 從 service_amount_a 計算的，應與 _service_amount_a 一致
+    if not _service_amount_a:
+        try:
+            _service_amount_a = int(coupon_discount)
+        except Exception:
+            _service_amount_a = 0
 
     new_amount_total = sum(
         int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
