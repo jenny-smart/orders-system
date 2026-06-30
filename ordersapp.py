@@ -849,26 +849,28 @@ else:
 
             # 步驟3摘要（只要原訂單人時或金額任一有值就顯示）
             new_ph_detail = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok) if new_orders_ok else "（無）"
-            new_amt_detail = "＋".join(f"${r['price_with_tax']}" for r in new_orders_ok) if new_orders_ok else "$0"
+            new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
 
             if orig_ph or orig_amount:
-                orig_ph_str = f"{orig_person}人×{orig_hour}小時 共{orig_ph}人時" if orig_ph else f"{orig_person}人×?小時（無法計算人時）"
-                orig_amt_str = f"${orig_amount}" if orig_amount else "（金額未知）"
-                step3_orig = f"原訂單 {orig_ph_str} {orig_amt_str}"
-                step3_new = f"新訂單 {new_ph_detail} 共{new_ph}人時 {new_amt_detail}＝${new_amount}"
+                orig_ph_str = f"{orig_person}人x{orig_hour}小時共{orig_ph}人時" if orig_ph else f"{orig_person}人x未知小時（無法計算人時）"
+                orig_amt_str = f"{orig_amount}元" if orig_amount else "金額未知"
+                step3_orig = f"原訂單：{orig_ph_str}，{orig_amt_str}"
+                step3_new = f"新訂單：{new_ph_detail} 共{new_ph}人時，{new_amt_detail} = {new_amount}元"
 
                 if orig_ph and orig_amount and diff_ph == 0 and diff_amt == 0:
-                    st.success(f"✅ 步驟3：{step3_orig}　＝　{step3_new}")
+                    st.success(f"步驟3：{step3_orig} ＝ {step3_new}")
                 else:
                     diff_parts = []
                     if orig_ph and diff_ph != 0:
                         diff_parts.append(f"{abs(diff_ph)}人時")
                     if orig_amount and diff_amt != 0:
-                        diff_parts.append(f"${abs(diff_amt)}")
-                    diff_str = f"共差 {' '.join(diff_parts)}" if diff_parts else ""
-                    st.warning(f"⚠️ 步驟3：{step3_orig}\n{step3_new}\n{diff_str}，請確認是否需要補建新訂單。")
+                        diff_parts.append(f"{abs(diff_amt)}元")
+                    diff_str = f"共差 {'、'.join(diff_parts)}" if diff_parts else ""
+                    full_msg = "步驟3：\n\n" + step3_orig + "\n\n" + step3_new + "\n\n" + diff_str + "，請確認是否需要補建新訂單。"
+                    st.warning(full_msg)
             else:
-                st.warning(f"⚠️ 步驟3：原訂單人數/時段/金額解析失敗，無法比較。\n新訂單 {new_ph_detail} 共{new_ph}人時 {new_amt_detail}＝${new_amount}\n請手動核對原訂單金額是否與新訂單合計相符。")
+                full_msg = "步驟3：原訂單人數/時段/金額解析失敗，無法比較。\n\n新訂單：" + new_ph_detail + f" 共{new_ph}人時，" + new_amt_detail + f" = {new_amount}元\n\n請手動核對原訂單金額是否與新訂單合計相符。"
+                st.warning(full_msg)
 
             # ── 細項 ────────────────────────────────────────────
             with st.expander("🔍 細項", expanded=False):
