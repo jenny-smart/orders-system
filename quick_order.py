@@ -1423,6 +1423,7 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
     need_lemon_count = 0
 
     # 第一輪：看排班頁有沒有檸檬人可選
+    # shift_choices 和 assigned_names 必須同步增長（用 None 佔位），避免索引錯位
     for i, slot_map in enumerate(slots):
         if i >= n:
             break
@@ -1434,6 +1435,7 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
         else:
             # 這個槽位排班頁沒有檸檬人，需要先去勾班
             shift_choices.append(None)
+            assigned_names.append(None)
             need_lemon_count += 1
 
     # 若有槽位沒有檸檬人可選，先勾班再重取頁面
@@ -1465,8 +1467,8 @@ def assign_lemon_cleaners_to_order(session, base_url, order_no_a, service_date, 
                         "pre_shift_result": pre_shift_result,
                     }
 
-    # assigned_names 長度補齊（避免 None）
-    assigned_names = [n for n in assigned_names if n]
+    # 過濾掉 None（避免 None 混入名單；同時不覆蓋 n=person_count）
+    assigned_names = [name for name in assigned_names if name]
 
     fields = [("_token", csrf), ("_method", "PUT")]
     for oid in origin_ids[:n]:
