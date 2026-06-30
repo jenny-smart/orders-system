@@ -1832,18 +1832,11 @@ def convert_order_multi(
         new_person = str(new_order["person"])
 
         try:
-            # 4a. calculate_hour 取含稅金額
-            calc_data = dict(base_calc_data)
-            calc_data["hour"] = new_hour
-            calc_data["person"] = new_person
-            calc_data["date_s"] = new_date_s
-            calc_data["period_s"] = new_period_s
-            calc_data["discount_code"] = ""
-            calc_result = calculate_hour(session, calc_data, token_for_calc)
-            if not calc_result:
-                raise Exception("calculate_hour 失敗")
-            calc_fields = extract_calc_fields(calc_result, fallback_hours=new_hour, fallback_fare="0")
-            price_no_tax = str(calc_fields.get("price") or "0")
+            # 4a. 用固定公式算含稅金額：人時 × 600(平日)/700(週末) × 1.05
+            _day_type_new = _day_type_from_date(new_date_s)
+            _unit_price_new = 700 if _day_type_new == "週末" else 600
+            _person_hours_new = int(new_person) * int(float(new_hour))
+            price_no_tax = str(_unit_price_new * _person_hours_new)
             try:
                 price_with_tax = int(round(float(price_no_tax) * TAX_RATE))
             except Exception:
