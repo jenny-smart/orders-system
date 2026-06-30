@@ -791,11 +791,19 @@ else:
             new_orders_ok = [r for r in conv_result.get("new_order_results", []) if r.get("order_no")]
 
             # 人時金額計算
-            orig_person = int(conv_result.get("person_a_count", 0) or 0)
-            orig_hour = int(conv_result.get("hour_per_person_a", 0) or 0)
-            orig_ph = int(conv_result.get("original_ph_calc", 0) or 0)
-            if not orig_ph and orig_person and orig_hour:
-                orig_ph = orig_person * orig_hour
+            _PERIOD_HOURS_UI = {
+                "09:00-16:00": 6, "09:00-18:00": 8,
+                "08:30-12:30": 4, "09:00-12:00": 3, "09:00-11:00": 2,
+                "14:00-18:00": 4, "14:00-17:00": 3, "14:00-16:00": 2,
+            }
+            # 人數：優先用 actual_person_count（originShiftId 數量）
+            orig_person = int(lr_a.get("actual_person_count", 0) or conv_result.get("person_a_count", 0) or 0)
+            # 時數：從 period_a_raw 直接查表
+            _period_raw_ui = str(conv_result.get("period_a_raw", "")).strip().replace(" ", "")
+            orig_hour = _PERIOD_HOURS_UI.get(_period_raw_ui, 0)
+            if not orig_hour:
+                orig_hour = int(conv_result.get("hour_per_person_a", 0) or 0)
+            orig_ph = orig_person * orig_hour if orig_person and orig_hour else 0
             try:
                 orig_amount = int(float(str(conv_result.get("service_amount_a_display", 0) or 0)))
             except Exception:
@@ -804,6 +812,7 @@ else:
             new_amount = sum(int(r.get("price_with_tax", 0)) for r in new_orders_ok)
             diff_ph = orig_ph - new_ph if orig_ph else 0
             diff_amt = orig_amount - new_amount if orig_amount else 0
+            st.caption(f"debug: orig_person={orig_person} orig_hour={orig_hour} orig_ph={orig_ph} orig_amount={orig_amount} period_a_raw={repr(conv_result.get('period_a_raw'))}")
 
             # ── 摘要區塊 ─────────────────────────────────────────
             st.markdown("<hr>", unsafe_allow_html=True)
@@ -811,7 +820,7 @@ else:
 
             # 步驟1摘要
             lemon_names = lr_a.get("assigned", [])
-            actual_count = lr_a.get("actual_person_count", len(lemon_names)) or len(lemon_names)
+            actual_count = int(lr_a.get("actual_person_count", 0) or len(lemon_names) or 0)
             new_svc_date = lr_a.get("new_service_date", "")
             period_a = str(conv_result.get("period_a_raw", "")).replace(" ", "")
             date_ok = lr_a.get("date_change_ok", True)
@@ -838,17 +847,28 @@ else:
             for r in [r for r in conv_result.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 步驟2 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
 
-            # 步驟3摘要
-            if orig_ph and orig_amount:
-                new_ph_detail = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok)
-                new_amt_detail = "＋".join(f"${r['price_with_tax']}" for r in new_orders_ok)
-                step3_orig = f"原訂單 {orig_person}人×{orig_hour}小時 共{orig_ph}人時 ${orig_amount}"
+            # 步驟3摘要（只要原訂單人時或金額任一有值就顯示）
+            new_ph_detail = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok) if new_orders_ok else "（無）"
+            new_amt_detail = "＋".join(f"${r['price_with_tax']}" for r in new_orders_ok) if new_orders_ok else "$0"
+
+            if orig_ph or orig_amount:
+                orig_ph_str = f"{orig_person}人×{orig_hour}小時 共{orig_ph}人時" if orig_ph else f"{orig_person}人×?小時（無法計算人時）"
+                orig_amt_str = f"${orig_amount}" if orig_amount else "（金額未知）"
+                step3_orig = f"原訂單 {orig_ph_str} {orig_amt_str}"
                 step3_new = f"新訂單 {new_ph_detail} 共{new_ph}人時 {new_amt_detail}＝${new_amount}"
-                if diff_ph == 0 and diff_amt == 0:
+
+                if orig_ph and orig_amount and diff_ph == 0 and diff_amt == 0:
                     st.success(f"✅ 步驟3：{step3_orig}　＝　{step3_new}")
                 else:
-                    diff_str = f"共差 {abs(diff_ph)}人時 ${abs(diff_amt)}" if diff_ph and diff_amt else (f"共差 {abs(diff_ph)}人時" if diff_ph else f"共差 ${abs(diff_amt)}")
+                    diff_parts = []
+                    if orig_ph and diff_ph != 0:
+                        diff_parts.append(f"{abs(diff_ph)}人時")
+                    if orig_amount and diff_amt != 0:
+                        diff_parts.append(f"${abs(diff_amt)}")
+                    diff_str = f"共差 {' '.join(diff_parts)}" if diff_parts else ""
                     st.warning(f"⚠️ 步驟3：{step3_orig}\n{step3_new}\n{diff_str}，請確認是否需要補建新訂單。")
+            else:
+                st.warning(f"⚠️ 步驟3：原訂單人數/時段/金額解析失敗，無法比較。\n新訂單 {new_ph_detail} 共{new_ph}人時 {new_amt_detail}＝${new_amount}\n請手動核對原訂單金額是否與新訂單合計相符。")
 
             # ── 細項 ────────────────────────────────────────────
             with st.expander("🔍 細項", expanded=False):
