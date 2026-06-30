@@ -1832,15 +1832,11 @@ def convert_order_multi(
         new_person = str(new_order["person"])
 
         try:
-            # 4a. 用固定公式算含稅金額：人時 × 600(平日)/700(週末) × 1.05
+            # 4a. 用固定公式算含稅金額：人時 × 600(平日)/700(週末)（單價已含稅，不再乘1.05）
             _day_type_new = _day_type_from_date(new_date_s)
             _unit_price_new = 700 if _day_type_new == "週末" else 600
             _person_hours_new = int(new_person) * int(float(new_hour))
-            price_no_tax = str(_unit_price_new * _person_hours_new)
-            try:
-                price_with_tax = int(round(float(price_no_tax) * TAX_RATE))
-            except Exception:
-                price_with_tax = 0
+            price_with_tax = _unit_price_new * _person_hours_new
             if price_with_tax <= 0 and payway_a != "儲值金":
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
 
