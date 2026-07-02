@@ -2716,13 +2716,24 @@ def parse_new_customer_text(text):
     _carrier_m = _re.search(r"(/[\.\-A-Z0-9]{5,8})", (_invoice_raw + " " + text).upper())
     result["carrier"] = _carrier_m.group(1) if _carrier_m else ""
 
-    # 統編
-    _tax_m = _re.search(r"統一編號[：:]*\s*(\d{8})", text) or _re.search(r"(\d{8})", _invoice_raw)
-    result["company_no"] = _tax_m.group(1) if _tax_m else ""
+    # 統編（8位數字）
+    _tax_m = _re.search(r"統一編號[：:]*\s*(\d{8})", text) or _re.search(r"(\d{8})", _invoice_raw)
+    # 若發票載具欄位本身就是8位數字，也當作統編
+    _carrier_str = _invoice_raw.strip()
+    if not _tax_m and _re.fullmatch(r"\d{8}", _carrier_str):
+        result["company_no"] = _carrier_str
+        result["carrier"] = ""
+    elif _tax_m:
+        result["company_no"] = _tax_m.group(1)
+    else:
+        result["company_no"] = ""
 
-    # 公司抬頭
+    # 公司抬頭（先從文字找，若無則需呼叫統編查詢 API）
     _title_m = _re.search(r"(?:公司抬頭|抬頭)[：:]*\s*(.+?)(?:及|與|統|$)", _invoice_raw + " " + text)
     result["company_title"] = _title_m.group(1).strip() if _title_m else ""
+
+    # 有統編但無抬頭 → 旗標，讓呼叫方去查抬頭
+    result["need_lookup_title"] = bool(result.get("company_no") and not result.get("company_title"))
 
     return result
 
@@ -2748,6 +2759,24 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     phone = normalize_phone(str(customer["phone"]).strip())
     name = str(customer["name"]).strip()
     email = str(customer["email"]).strip()
+
+    # 若有統編但無抬頭，自動查詢公司名稱
+    _company_no_tmp = str(customer.get("company_no", "")).strip()
+    _company_title_tmp = str(customer.get("company_title", "")).strip()
+    if _company_no_tmp and not _company_title_tmp:
+        try:
+            import requests as _req
+            _r = _req.get(
+                "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
+                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {_company_no_tmp}"},
+                timeout=5,
+            )
+            _d = _r.json()
+            if _d and isinstance(_d, list) and _d[0].get("Company_Name"):
+                customer = dict(customer)
+                customer["company_title"] = _d[0]["Company_Name"]
+        except Exception:
+            pass
     tel = str(customer.get("tel", "")).strip()
     line = str(customer.get("line", "")).strip()
     address = str(customer["address"]).strip()
@@ -2772,15 +2801,18 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         payway_code = "1"  # 預設信用卡
 
     # 發票設定
-    if company_no and company_title:
+    if company_no:
+        # 有統編 → 三聯式發票
         invoice_type = "3"
         carrier_type_id = "1"
         carrier_info = email
     elif carrier and carrier.startswith("/"):
+        # 手機載具
         invoice_type = "2"
         carrier_type_id = "2"
         carrier_info = carrier
     else:
+        # 預設二聯式會員載具（email）
         invoice_type = "2"
         carrier_type_id = "1"
         carrier_info = email
