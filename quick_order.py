@@ -2630,17 +2630,10 @@ def parse_new_customer_order_text(raw_text):
 
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
     """
-    新客建單完整流程：
-    1. 後台登入
-    2. POST /ajax/create_member 建立會員
-    3. GET /ajax/get_member 取得 member_id / addressId
-    4. POST /ajax/check_contain 取得 area_id / company_id
-    5. 走 quick_create_order 建單
-
+    新客建單：完整模擬後台 /booking/single 表單送出流程。
     customer dict 必填：name, phone, email, address, payway, clean_type_id,
                         date_s, period_s, hour, person
-    選填：ping（坪數代號，預設4=21~40）, company_title, company_no,
-          carrier（手機載具）, tel
+    選填：ping, service_type, carrier, company_title, company_no, tel, line
     """
     required = ["name", "phone", "email", "address", "payway", "clean_type_id",
                 "date_s", "period_s", "hour", "person"]
@@ -2651,12 +2644,13 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     base_url = _configure_environment(env_name)
     session = requests.Session()
     if not login(session, backend_email, backend_password):
-        raise Exception("後台登入失敗，請確認帳號密碼")
+        raise Exception("後台登入失敗")
 
     phone = normalize_phone(str(customer["phone"]).strip())
     name = str(customer["name"]).strip()
     email = str(customer["email"]).strip()
     tel = str(customer.get("tel", "")).strip()
+    line = str(customer.get("line", "")).strip()
     address = str(customer["address"]).strip()
     payway = str(customer["payway"]).strip()
     clean_type_id = str(customer["clean_type_id"]).strip()
@@ -2664,120 +2658,200 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     period_s = str(customer["period_s"]).strip()
     hour = str(customer["hour"]).strip()
     person = str(customer["person"]).strip()
-    ping = str(customer.get("ping", "4")).strip()  # 預設 21~40
+    ping = str(customer.get("ping", "4")).strip()
+    service_type = str(customer.get("service_type", "")).strip()
+    carrier = str(customer.get("carrier", "")).strip()
     company_title = str(customer.get("company_title", "")).strip()
     company_no = str(customer.get("company_no", "")).strip()
-    carrier = str(customer.get("carrier", "")).strip()
 
-    # Step 1: 取 CSRF token
+    # payway: 信用卡=2, ATM=3
+    payway_code = "2" if "信用卡" in payway or payway == "2" else "3"
+
+    # 發票設定
+    if company_no and company_title:
+        invoice_type = "3"
+        carrier_type_id = "1"
+        carrier_info = email
+    elif carrier and carrier.startswith("/"):
+        invoice_type = "2"
+        carrier_type_id = "2"
+        carrier_info = carrier
+    else:
+        invoice_type = "2"
+        carrier_type_id = "1"
+        carrier_info = email
+
+    # Step 1: 取 CSRF token 和 is_backend（登入者ID）
     booking_page = session.get(f"{base_url}/booking/single", headers=HEADERS, allow_redirects=True)
     token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', booking_page.text)
     csrf = token_m.group(1) if token_m else ""
     if not csrf:
         raise Exception("無法取得 CSRF token")
 
-    # Step 2: 建立會員
-    create_resp = session.post(
-        f"{base_url}/ajax/create_member",
-        data={"name": name, "phone": phone, "tel": tel, "email": email, "_token": csrf},
-        headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
-        allow_redirects=True,
-    )
-    try:
-        create_data = create_resp.json()
-    except Exception:
-        raise Exception(f"建立會員 API 回應非 JSON：{create_resp.text[:200]}")
-    if str(create_data.get("err_no", "")) != "0":
-        desc = create_data.get("description", "未知錯誤")
-        raise Exception(f"建立會員失敗：{desc}")
+    # 取 is_backend（後台員工ID，藏在頁面 JS 裡）
+    backend_id_m = re.search(r"is_backend[^0-9]*([0-9]+)", booking_page.text)
+    is_backend = backend_id_m.group(1) if backend_id_m else ""
 
-    # Step 3: 查詢會員取得 member_payload
-    token_booking = get_csrf_token(session)
-    member_payload = get_member(session, phone, token_booking, clean_type_id)
+    # Step 2: 查會員或建立會員
+    member_payload = get_member(session, phone, csrf, clean_type_id)
     if not member_payload:
-        raise Exception(f"建立會員後查詢失敗：{phone}")
+        # 建立新會員
+        create_resp = session.post(
+            f"{base_url}/ajax/create_member",
+            data={"name": name, "phone": phone, "tel": tel, "email": email, "_token": csrf},
+            headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        )
+        try:
+            cdata = create_resp.json()
+        except Exception:
+            raise Exception(f"建立會員失敗：{create_resp.text[:200]}")
+        if str(cdata.get("err_no", "")) != "0":
+            raise Exception(f"建立會員失敗：{cdata.get('description', '未知')}")
+        member_payload = get_member(session, phone, csrf, clean_type_id)
+        if not member_payload:
+            raise Exception("建立會員後仍查無會員")
 
-    # Step 4: 新增地址（透過 check_contain 取 area_id，但新客沒有 addressId，
-    # 需要先用 geocode 取座標再呼叫 check_contain）
-    geo_lat, geo_lng = geocode_address(address)
-    member = member_payload.get("member", {})
+    member = member_payload.get("member", {}) or {}
     member_id = str(member.get("member_id", ""))
 
-    addr_check = check_contain(session, member_id, address, geo_lat or "", geo_lng or "", token_booking, clean_type_id)
-    if not addr_check:
-        raise Exception(f"查詢地址/地區失敗（地址可能不在服務範圍）：{address}")
+    # Step 3: 查或建地址，取 addressId / area_id / company_id / lat / lng
+    addr_list = member.get("memberAddressList", []) or []
+    address_norm = normalize_addr_for_match(address)
+    matched_addr = None
+    for a in addr_list:
+        if normalize_addr_for_match(a.get("address", "")) == address_norm:
+            matched_addr = a
+            break
 
-    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+    if matched_addr:
+        address_id = str(matched_addr.get("addressId") or matched_addr.get("id", ""))
+        area_id = str(matched_addr.get("areaId", ""))
+        country_id = str(matched_addr.get("countryId", "12"))
+        lat = str(matched_addr.get("lat", ""))
+        lng = str(matched_addr.get("lng", ""))
+        purchase_info = matched_addr.get("purchase", {}) or {}
+        company_id = str(purchase_info.get("company_id", "1"))
+    else:
+        # 新地址：用 check_contain 取 area_id
+        geo_lat, geo_lng = geocode_address(address)
+        check_resp = session.post(
+            f"{base_url}/ajax/check_contain",
+            data={
+                "_token": csrf, "member_id": member_id,
+                "address": address, "lat": geo_lat or "", "lng": geo_lng or "",
+                "clean_type_id": clean_type_id,
+            },
+            headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        )
+        try:
+            check_data = check_resp.json()
+        except Exception:
+            raise Exception(f"查詢地址區域失敗：{check_resp.text[:200]}")
+        area_info = (check_data.get("area") or {})
+        area_id = str(area_info.get("area_id", "25"))
+        company_id = str(area_info.get("company_id", "1"))
+        country_id = str(area_info.get("country_id", "12"))
+        lat = str(geo_lat or "")
+        lng = str(geo_lng or "")
+        address_id = ""
 
-    # 建立一個臨時的 best_addr 供 quick_create_order 使用
-    best_addr = {
+    # Step 4: 組 datePeriod（格式：2026-07-11_14:00-18:00）
+    date_period = f"{date_s}_{period_s}"
+
+    # 計算 price（未稅，用固定公式）
+    day_type = _day_type_from_date(date_s)
+    unit_price = 700 if day_type == "週末" else 600
+    ph = int(person) * int(float(hour))
+    price_with_tax = unit_price * ph
+    price_no_tax = int(round(price_with_tax / 1.05)) if False else price_with_tax  # 已含稅，直接用
+
+    # Step 5: POST /booking/single
+    post_data = {
+        "_token": csrf,
+        "clean_type_id": clean_type_id,
+        "phone": phone,
+        "name": name,
+        "email": email,
+        "tel": tel,
+        "line": line,
+        "fbName": "",
+        "fb": "",
+        "memoProcess": "",
+        "memoFinance": "",
+        "addressId": address_id,
+        "last_area": "",
+        "country_id": country_id,
         "address": address,
-        "addressId": "",
-        "lat": geo_lat or "",
-        "lng": geo_lng or "",
-        "area_id": area_info.get("area_id", ""),
-        "company_id": area_info.get("company_id", ""),
-        "country_id": area_info.get("country_id", "12"),
-        "notice": "",
-        "purchase": {
-            "ping": ping, "room": "0", "bathroom": "0", "balcony": "0",
-            "livingroom": "0", "kitchen": "0", "window": "", "shutter": "",
-            "clothes": "0", "dyson": "0", "refrigerator": "0",
-            "disinfection": "0", "go_abord": "0", "home_move": "0",
-            "storage": "0", "cabinet": "0", "quintuple": "0",
-            "fare": area_info.get("fare", "0"),
-            "country_id": area_info.get("country_id", "12"),
-            "company_id": area_info.get("company_id", "1"),
-            "area_id": area_info.get("area_id", "25"),
-        },
-    }
-
-    # 將 best_addr 注入 member_payload，讓 quick_create_order 能找到地址
-    member_payload["member"]["memberAddressList"] = [{
-        "id": 0, "addressId": 0,
-        "address": address,
-        "lat": geo_lat or "", "lng": geo_lng or "",
-        "areaId": area_info.get("area_id", ""),
-        "countryId": area_info.get("country_id", "12"),
-        "city": address[:3],
-        "purchase": best_addr["purchase"],
+        "ping": ping,
+        "serviceType": service_type,
+        "room": "", "bathroom": "", "balcony": "",
+        "livingroom": "", "kitchen": "", "window": "",
+        "hour": hour,
+        "price": str(price_with_tax),
+        "price_vvip": "0",
+        "person": person,
+        "date_s": "",
+        "period_s": period_s,
+        "cycle": "1",
+        "fare": "0",
+        "datePeriod": date_period,
+        "period": "",
         "memo": "",
         "notice": "",
-    }]
-
-    lookup_result = {
-        "session": session, "token": token_booking, "phone": phone,
-        "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
+        "discount_code": "",
+        "payway": payway_code,
+        "invoice_type": invoice_type,
+        "donate_code": "",
+        "carrier_type_id": carrier_type_id,
+        "carrier_info": carrier_info,
+        "company_title": company_title,
+        "company_no": company_no,
+        "is_backend": is_backend,
+        "member_id": member_id,
+        "company_id": company_id,
+        "area_id": area_id,
+        "lat": lat,
+        "lng": lng,
     }
 
-    # 判斷發票類型
-    if company_no and company_title:
-        invoice_type_override = "3"
-        carrier_type_id_override = "1"
-        carrier_info = ""
-    elif carrier and carrier.startswith("/"):
-        invoice_type_override = "2"
-        carrier_type_id_override = "2"
-        carrier_info = carrier
-    else:
-        invoice_type_override = "2"
-        carrier_type_id_override = "1"
-        carrier_info = email
-
-    region = get_region_by_address(address, ACCOUNTS) or "台北"
-
-    # serviceType 僅裝修細清（clean_type_id=3）需要：1=裝修細清 2=搬出清潔 3=搬入清潔
-    service_type = str(customer.get("service_type", "")).strip()
-
-    order_result = quick_create_order(
-        env_name=env_name, payway=payway, region=region,
-        lookup_result=lookup_result, address=address,
-        clean_type_id=clean_type_id, date_s=date_s, period_s=period_s,
-        hour=hour, person=person,
-        invoice_type_override=invoice_type_override,
-        carrier_type_id_override=carrier_type_id_override,
-        carrier_info=carrier_info,
-        company_title=company_title, company_no=company_no,
-        extra_fields={"serviceType": service_type} if service_type else {},
+    resp = session.post(
+        f"{base_url}/booking/single",
+        data=post_data,
+        headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded",
+                 "Referer": f"{base_url}/booking/single"},
+        allow_redirects=True,
     )
-    return order_result
+
+    # 從重定向後的頁面取訂單編號
+    order_no = ""
+    order_no_m = re.search(r"(TT\d{8}|LC\d{9})", resp.url + resp.text)
+    if order_no_m:
+        order_no = order_no_m.group(1)
+
+    if not order_no:
+        # 嘗試從 /purchase 頁取最新訂單
+        purchase_resp = session.get(
+            f"{base_url}/purchase",
+            params={"phone": phone, "orderNo": "", "date_s": "", "date_e": ""},
+            headers=HEADERS,
+        )
+        blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
+        if blocks:
+            order_no = blocks[0].get("order_no", "")
+
+    if not order_no:
+        raise Exception(f"建單後無法取得訂單編號，HTTP {resp.status_code}，URL: {resp.url}")
+
+    return {
+        "order_no": order_no,
+        "member_id": member_id,
+        "address": address,
+        "date_s": date_s,
+        "period_s": period_s,
+        "hour": hour,
+        "person": person,
+        "price_with_tax": price_with_tax,
+        "payway": payway,
+        "day_type": day_type,
+        "session": session,
+    }
