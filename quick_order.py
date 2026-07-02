@@ -2661,10 +2661,15 @@ def parse_new_customer_text(text):
         r"信箱[：:]\s*(\S+)",
     ], text)
 
-    result["address"] = _find([
-        r"服務地址[：:]\s*(.+)",
-        r"地址[：:]\s*(.+)",
-    ], text)
+    # 地址只取當行內容，不跨行
+    _addr_lines = []
+    for _line in text.splitlines():
+        _line = _line.strip()
+        if _re.match(r"服務地址[：:]", _line) or _re.match(r"地址[：:]", _line):
+            _addr_val = _re.sub(r"^(服務)?地址[：:]\s*", "", _line).strip()
+            if _addr_val:
+                _addr_lines.append(_addr_val)
+    result["address"] = _addr_lines[0] if _addr_lines else ""
 
     # 坪數 → ping 代號
     _ping_raw = _find([
@@ -2687,14 +2692,19 @@ def parse_new_customer_text(text):
     result["ping"] = ping
 
     # 付款方式
-    _payway_raw = _find([r"付款方式[：:]\s*(.+)"], text)
-    result["payway"] = "ATM" if "ATM" in str(_payway_raw) or "匯款" in str(_payway_raw) else "信用卡"
+    _payway_raw = _find([r"付款方式[：:]\s*(.+)"], text) or ""
+    if "信用卡" in _payway_raw:
+        result["payway"] = "信用卡"
+    elif "ATM" in _payway_raw or "匯款" in _payway_raw or "轉帳" in _payway_raw:
+        result["payway"] = "ATM"
+    else:
+        result["payway"] = "信用卡"  # 預設信用卡
 
     # 發票
     _invoice_raw = _find([r"發票[^：:]*[：:]\s*(.+)"], text) or ""
 
-    # 手機載具
-    _carrier_m = _re.search(r"(/[A-Z0-9+]{7,8})", _invoice_raw + " " + text)
+    # 手機載具（格式：/開頭，7-8碼英數字，可能有空格或括號）
+    _carrier_m = _re.search(r"(/[\.\-A-Z0-9]{5,8})", (_invoice_raw + " " + text).upper())
     result["carrier"] = _carrier_m.group(1) if _carrier_m else ""
 
     # 統編
@@ -2812,13 +2822,12 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         purchase_info = matched_addr.get("purchase", {}) or {}
         company_id = str(purchase_info.get("company_id", "1"))
     else:
-        # 新地址：用 check_contain 取 area_id
-        geo_lat, geo_lng = geocode_address(address)
+        # 新地址：用 check_contain 取 area_id，不做 geocode（避免地址被改動）
         check_resp = session.post(
             f"{base_url}/ajax/check_contain",
             data={
                 "_token": csrf, "member_id": member_id,
-                "address": address, "lat": geo_lat or "", "lng": geo_lng or "",
+                "address": address, "lat": "", "lng": "",
                 "clean_type_id": clean_type_id,
             },
             headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
@@ -2831,8 +2840,8 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         area_id = str(area_info.get("area_id", "25"))
         company_id = str(area_info.get("company_id", "1"))
         country_id = str(area_info.get("country_id", "12"))
-        lat = str(geo_lat or "")
-        lng = str(geo_lng or "")
+        lat = ""
+        lng = ""
         address_id = ""
 
     # Step 4: 組 datePeriod（格式：2026-07-11_14:00-18:00）
@@ -2936,6 +2945,9 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "lat": lat,
         "lng": lng,
     }
+
+    # 確保 POST 的 address 是 user 提供的原始地址，不被 geocode 結果覆蓋
+    post_data["address"] = address
 
     resp = session.post(
         f"{base_url}/booking/single",
