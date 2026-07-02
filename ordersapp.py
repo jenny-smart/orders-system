@@ -23,6 +23,7 @@
 __version__ = "8.4"
 
 import html
+import requests
 import json
 import streamlit as st
 import streamlit.components.v1 as components
@@ -770,11 +771,31 @@ else:
             parsed_invoice = st.text_input("發票/載具類型", value=parsed_customer.get("invoice_type", ""), key="parsed_new_invoice")
         with p4:
             parsed_carrier = st.text_input("載具號碼", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
-        i1, i2 = st.columns(2)
-        with i1:
-            parsed_invoice_title = st.text_input("發票抬頭", value=parsed_customer.get("invoice_title", ""), key="parsed_new_invoice_title")
+        i1, i2, i3 = st.columns([2, 2, 1])
         with i2:
             parsed_tax_id = st.text_input("統一編號", value=parsed_customer.get("tax_id", ""), key="parsed_new_tax_id")
+        with i3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("查抬頭", key="lookup_company_title"):
+                if parsed_tax_id.strip():
+                    try:
+                        _r = requests.get(
+                            f"https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
+                            params={"$format": "json", "$filter": f"Business_Accounting_NO eq {parsed_tax_id.strip()}"},
+                            timeout=5,
+                        )
+                        _data = _r.json()
+                        if _data and isinstance(_data, list) and _data[0].get("Company_Name"):
+                            st.session_state["_auto_company_title"] = _data[0]["Company_Name"]
+                        else:
+                            st.warning("查無此統編對應公司名稱")
+                    except Exception as _e:
+                        st.warning(f"查詢失敗：{_e}")
+                else:
+                    st.warning("請先輸入統一編號")
+        with i1:
+            _default_title = st.session_state.get("_auto_company_title", parsed_customer.get("invoice_title", ""))
+            parsed_invoice_title = st.text_input("發票抬頭", value=_default_title, key="parsed_new_invoice_title")
         parsed_requirement = st.text_input("服務需求", value=parsed_customer.get("requirement", ""), key="parsed_new_requirement")
         parsed_note = st.text_area("其他備註", value=parsed_customer.get("note", ""), height=100, key="parsed_new_note")
         formatted_text = "\\n".join([
@@ -786,6 +807,71 @@ else:
             f"服務需求：{parsed_requirement}", f"其他備註：{parsed_note}",
         ])
         st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
+
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("6", "建立新客訂單")
+        info_panel("說明", ["補填服務日期、時段、人數後直接建單，不需先到後台建會員。"])
+        sb1, sb2, sb3, sb4 = st.columns(4)
+        with sb1:
+            nc_date = st.date_input("服務日期", value=date.today() + timedelta(days=1), key="nc_date2")
+        with sb2:
+            nc_period = st.selectbox("時段", PERIOD_OPTIONS, key="nc_period2")
+        with sb3:
+            nc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="nc_person2")
+        with sb4:
+            nc_hour = PERIOD_HOUR_MAP.get(nc_period, 3)
+            st.markdown(f"<br><b>{nc_hour} 小時</b>", unsafe_allow_html=True)
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            nc_payway2 = st.selectbox("付款方式", ["信用卡", "ATM"], key="nc_payway2")
+        with sc2:
+            nc_clean_type2 = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type2")
+
+        # 發票資訊從拆解欄位帶入
+        _nc_carrier2 = parsed_carrier
+        _nc_company_title2 = parsed_invoice_title
+        _nc_company_no2 = parsed_tax_id
+
+        if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn2"):
+            _nc_phone = parsed_phone.strip()
+            _nc_name = parsed_name.strip()
+            _nc_email = parsed_email.strip()
+            _nc_address = parsed_address.strip()
+            if not _nc_name or not _nc_email or not _nc_address or not _nc_phone:
+                st.error("請確認姓名、電話、Email、服務地址都已填寫（從上方拆解欄位取得）")
+            elif not backend_email.strip() or not backend_password.strip():
+                st.error("請先輸入後台帳號密碼")
+            else:
+                try:
+                    with st.spinner("建立會員 → 查詢地址 → 建立訂單…"):
+                        nc_result2 = qo.quick_create_new_customer_order(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            customer={
+                                "name": _nc_name,
+                                "phone": _nc_phone,
+                                "email": _nc_email,
+                                "address": _nc_address,
+                                "payway": nc_payway2,
+                                "clean_type_id": CLEAN_TYPE_ID_MAP[nc_clean_type2],
+                                "date_s": nc_date.strftime("%Y-%m-%d"),
+                                "period_s": nc_period,
+                                "hour": str(nc_hour),
+                                "person": str(int(nc_person)),
+                                "carrier": _nc_carrier2,
+                                "company_title": _nc_company_title2,
+                                "company_no": _nc_company_no2,
+                            }
+                        )
+                        ok2, mail_msg2 = send_confirmation(nc_result2)
+                        nc_result2["mail_sent"] = ok2
+                        nc_result2["mail_msg"] = mail_msg2
+                    st.session_state.q_order_result = nc_result2
+                    st.success(f"✅ 訂單建立成功：{nc_result2['order_no']}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"建單失敗：{e}")
 
     # --------------------------------------------------
     # 訂單轉換（v8.4 一對多）
