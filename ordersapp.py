@@ -622,7 +622,6 @@ else:
                                 # 不立即發確認信，等 user 確認後再發
                                 nc_result["mail_sent"] = False
                                 nc_result["mail_msg"] = "尚未發送"
-                                nc_result["mail_msg"] = mail_msg
                             st.session_state.q_order_result = nc_result
                             st.success(f"✅ 訂單建立成功：{nc_result['order_no']}")
                         except Exception as e:
@@ -706,7 +705,6 @@ else:
                                     # 不立即發確認信，等 user 確認後再發
                                     result["mail_sent"] = False
                                     result["mail_msg"] = "尚未發送"
-                                    result["mail_msg"] = mail_msg
                                 st.session_state.q_order_result = result
                             except Exception as e:
                                 st.error(f"建單失敗：{e}")
