@@ -2782,6 +2782,7 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
                 "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
                 params={"$format": "json", "$filter": f"Business_Accounting_NO eq {company_no}"},
                 timeout=5,
+                verify=False,
             )
             _d2 = _r2.json()
             if _d2 and isinstance(_d2, list) and _d2[0].get("Company_Name"):
