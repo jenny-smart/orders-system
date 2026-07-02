@@ -2838,12 +2838,41 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     # Step 4: 組 datePeriod（格式：2026-07-11_14:00-18:00）
     date_period = f"{date_s}_{period_s}"
 
-    # 計算 price（未稅，用固定公式）
+    # 計算 price（已含稅，用固定公式：人時 × 600平日/700週末）
     day_type = _day_type_from_date(date_s)
     unit_price = 700 if day_type == "週末" else 600
     ph = int(person) * int(float(hour))
     price_with_tax = unit_price * ph
-    price_no_tax = int(round(price_with_tax / 1.05)) if False else price_with_tax  # 已含稅，直接用
+
+    # Step 4b: 查班表，若無人或人數不足則先勾檸檬人班表
+    try:
+        token_for_section = get_csrf_token(session)
+        _base_data_check = {
+            "clean_type_id": clean_type_id,
+            "area_id": area_id,
+            "company_id": company_id,
+            "country_id": country_id,
+            "lat": lat, "lng": lng,
+            "address": address,
+            "person": person, "hour": hour,
+            "date_s": date_s, "period_s": period_s,
+        }
+        _slot = f"{date_s}_{period_s}"
+        _raw_section = get_section_raw(session, _base_data_check, token_for_section, _slot)
+        _slot_found = slot_exists_in_section_response(_raw_section, _slot)
+        _cleaners = extract_cleaners_from_section_response(_raw_section, _slot) if _slot_found else []
+        _need = int(person)
+        if not _slot_found or len(_cleaners) < _need:
+            # 勾檸檬人班表
+            _short = _need - len(_cleaners) if _slot_found else _need
+            ensure_lemon_cleaner_shifts(
+                session=session, base_url=base_url,
+                service_date=date_s, period_s=period_s,
+                person_count=str(_short),
+            )
+            time.sleep(2)
+    except Exception:
+        pass  # 查班表失敗不擋建單
 
     # Step 5: POST /booking/single
     post_data = {
