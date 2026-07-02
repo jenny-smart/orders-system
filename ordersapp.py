@@ -826,6 +826,15 @@ else:
             st.markdown(f"**{nc_hour}小時 / {_day_type_nc}**")
             st.markdown(f"預估：**{_total_nc:,}元**")
 
+        step("4", "備註欄位（選填）")
+        nb1, nb2, nb3 = st.columns(3)
+        with nb1:
+            nc_actual_time = st.text_input("簡訊實際服務時間", placeholder="例：09:00-12:00", key="nc_actual_time_d")
+        with nb2:
+            nc_memo = st.text_area("客人備註", height=80, key="nc_memo_d")
+        with nb3:
+            nc_notice = st.text_area("客服備註", height=80, key="nc_notice_d")
+
         if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_d", type="primary"):
             if not nc_raw.strip():
                 st.error("請貼上客人資料")
@@ -878,6 +887,9 @@ else:
                                     "carrier": _nc_carrier,
                                     "company_title": _nc_company_title,
                                     "company_no": _nc_company_no,
+                                    "memo": nc_memo,
+                                    "notice": nc_notice,
+                                    "actual_time": nc_actual_time,
                                 }
                             )
                             # 不立即發確認信，等 user 確認後再發
