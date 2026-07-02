@@ -2763,8 +2763,13 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     company_title = str(customer.get("company_title", "")).strip()
     company_no = str(customer.get("company_no", "")).strip()
 
-    # payway: 信用卡=2, ATM=3
-    payway_code = "2" if "信用卡" in payway or payway == "2" else "3"
+    # payway: 信用卡=1, ATM=2（與 PAYWAY_MAP 一致）
+    if "信用卡" in payway or payway == "1":
+        payway_code = "1"
+    elif "ATM" in payway or "匯款" in payway or "轉帳" in payway or payway == "2":
+        payway_code = "2"
+    else:
+        payway_code = "1"  # 預設信用卡
 
     # 發票設定
     if company_no and company_title:
@@ -2823,7 +2828,12 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
             break
 
     if matched_addr:
-        address_id = str(matched_addr.get("addressId") or matched_addr.get("id", ""))
+        # 確認後台存的地址和原始地址一致才帶 addressId
+        stored_addr = matched_addr.get("address", "")
+        if normalize_addr_for_match(stored_addr) == address_norm:
+            address_id = str(matched_addr.get("addressId") or matched_addr.get("id", ""))
+        else:
+            address_id = ""  # 地址不一致，不帶舊 addressId 避免帶入錯誤地址
         area_id = str(matched_addr.get("areaId", ""))
         country_id = str(matched_addr.get("countryId", "12"))
         lat = str(matched_addr.get("lat", ""))
