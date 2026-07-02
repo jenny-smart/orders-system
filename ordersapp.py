@@ -745,144 +745,147 @@ else:
     # 新客資料拆解
     # --------------------------------------------------
     elif single_feature == "新客資料拆解":
-        info_panel("功能說明", ["此功能不直接建立訂單，避免與後台新客建單流程重複。", "客服貼上客人提供的制式文字後，系統會拆成欄位，方便檢查、修改與複製到後台。"])
-        step("4", "貼上新客制式資料")
-        raw_new_customer_text = st.text_area("請貼上客人提供的訂購資料", value="", height=220, placeholder="請貼上完整文字，例如：訂購人姓名、電話、Email、服務地址、坪數、付款方式、發票載具、服務需求等", key="new_customer_raw_text")
-        parsed_customer = parse_new_customer_order_text(raw_new_customer_text)
-        if st.button("拆解資料", use_container_width=True, key="parse_new_customer_text_btn"):
-            st.session_state.parsed_new_customer = parsed_customer
-            st.success("已拆解資料，請檢查下方欄位。")
-        parsed_customer = st.session_state.get("parsed_new_customer", parsed_customer)
-        step("5", "拆解後欄位（可修改）")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            parsed_name = st.text_input("訂購人姓名", value=parsed_customer.get("name", ""), key="parsed_new_name")
-        with c2:
-            parsed_phone = st.text_input("訂購人電話", value=parsed_customer.get("phone", ""), key="parsed_new_phone")
-        with c3:
-            parsed_email = st.text_input("訂購人 Email", value=parsed_customer.get("email", ""), key="parsed_new_email")
-        parsed_address = st.text_input("服務地址", value=parsed_customer.get("address", ""), key="parsed_new_address")
-        p1, p2, p3, p4 = st.columns(4)
-        with p1:
-            parsed_ping = st.text_input("室內坪數", value=parsed_customer.get("ping", ""), key="parsed_new_ping")
-        with p2:
-            parsed_payway = st.text_input("付款方式", value=parsed_customer.get("payway", ""), key="parsed_new_payway")
-        with p3:
-            parsed_invoice = st.text_input("發票/載具類型", value=parsed_customer.get("invoice_type", ""), key="parsed_new_invoice")
-        with p4:
-            parsed_carrier = st.text_input("載具號碼", value=parsed_customer.get("carrier", ""), key="parsed_new_carrier")
-        i1, i2, i3 = st.columns([2, 2, 1])
-        with i2:
-            parsed_tax_id = st.text_input("統一編號", value=parsed_customer.get("tax_id", ""), key="parsed_new_tax_id")
-        with i3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("查抬頭", key="lookup_company_title"):
-                if parsed_tax_id.strip():
-                    try:
-                        _r = requests.get(
-                            f"https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
-                            params={"$format": "json", "$filter": f"Business_Accounting_NO eq {parsed_tax_id.strip()}"},
-                            timeout=5,
-                        )
-                        _data = _r.json()
-                        if _data and isinstance(_data, list) and _data[0].get("Company_Name"):
-                            st.session_state["_auto_company_title"] = _data[0]["Company_Name"]
-                        else:
-                            st.warning("查無此統編對應公司名稱")
-                    except Exception as _e:
-                        st.warning(f"查詢失敗：{_e}")
-                else:
-                    st.warning("請先輸入統一編號")
-        with i1:
-            _default_title = st.session_state.get("_auto_company_title", parsed_customer.get("invoice_title", ""))
-            parsed_invoice_title = st.text_input("發票抬頭", value=_default_title, key="parsed_new_invoice_title")
-        parsed_requirement = st.text_input("服務需求", value=parsed_customer.get("requirement", ""), key="parsed_new_requirement")
-        parsed_note = st.text_area("其他備註", value=parsed_customer.get("note", ""), height=100, key="parsed_new_note")
-        formatted_text = "\\n".join([
-            f"訂購人姓名：{parsed_name}", f"訂購人電話：{parsed_phone}",
-            f"訂購人Email：{parsed_email}", f"服務地址：{parsed_address}",
-            f"室內坪數：{parsed_ping}", f"付款方式：{parsed_payway}",
-            f"發票/載具：{parsed_invoice}", f"發票抬頭：{parsed_invoice_title}",
-            f"統一編號：{parsed_tax_id}", f"載具號碼：{parsed_carrier}",
-            f"服務需求：{parsed_requirement}", f"其他備註：{parsed_note}",
+        info_panel("功能說明", [
+            "直接填寫新客資料，系統自動建立會員並送出訂單，無須手動到後台操作。",
+            "若會員已存在，直接沿用現有會員資料建單。",
         ])
-        st.text_area("整理後文字", formatted_text, height=220, key="parsed_new_formatted_text")
 
-        st.markdown("<hr>", unsafe_allow_html=True)
-        step("6", "建立新客訂單")
-        info_panel("說明", ["補填服務日期、時段、人數後直接建單，不需先到後台建會員。"])
-        sb1, sb2, sb3, sb4 = st.columns(4)
-        with sb1:
-            nc_date = st.date_input("服務日期", value=date.today() + timedelta(days=1), key="nc_date2")
-        with sb2:
-            nc_period = st.selectbox("時段", PERIOD_OPTIONS, key="nc_period2")
-        with sb3:
-            nc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="nc_person2")
-        with sb4:
-            nc_hour = PERIOD_HOUR_MAP.get(nc_period, 3)
-            st.markdown(f"<br><b>{nc_hour} 小時</b>", unsafe_allow_html=True)
+        step("1", "新客基本資料")
+        na1, na2, na3 = st.columns(3)
+        with na1:
+            nc_name = st.text_input("訂購人姓名", key="nc_name_direct")
+        with na2:
+            nc_phone = st.text_input("訂購人電話", key="nc_phone_direct")
+        with na3:
+            nc_email = st.text_input("訂購人Email", key="nc_email_direct")
+        nc_address = st.text_input("服務地址", key="nc_address_direct")
+        nb1, nb2 = st.columns(2)
+        with nb1:
+            nc_tel = st.text_input("市內電話（選填）", key="nc_tel_direct")
+        with nb2:
+            _ping_options = {"1~10坪": "1", "11~20坪": "2", "21~30坪": "3", "21~40坪": "4", "31~40坪": "4", "41~50坪": "5", "51坪以上": "6"}
+            nc_ping_label = st.selectbox("室內坪數", list(_ping_options.keys()), index=3, key="nc_ping_direct")
+            nc_ping = _ping_options[nc_ping_label]
+
+        step("2", "服務設定")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
-            nc_payway2 = st.selectbox("付款方式", ["信用卡", "ATM"], key="nc_payway2")
+            nc_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type_direct")
         with sc2:
-            nc_clean_type2 = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type2")
+            nc_payway = st.selectbox("付款方式", ["信用卡", "ATM"], key="nc_payway_direct")
         with sc3:
-            nc_service_type2 = ""
-            if nc_clean_type2 == "裝修細清":
+            nc_service_type = ""
+            if nc_clean_type == "裝修細清":
                 _stype_map = {"裝修細清": "1", "搬出清潔": "2", "搬入清潔": "3"}
-                _stype_sel = st.selectbox("裝修類型", list(_stype_map.keys()), key="nc_stype2")
-                nc_service_type2 = _stype_map[_stype_sel]
+                _stype_sel = st.selectbox("裝修類型", list(_stype_map.keys()), key="nc_stype_direct")
+                nc_service_type = _stype_map[_stype_sel]
 
-        # 發票資訊從拆解欄位帶入
-        _nc_carrier2 = parsed_carrier
-        _nc_company_title2 = parsed_invoice_title
-        _nc_company_no2 = parsed_tax_id
+        step("3", "日期與時段")
+        sd1, sd2, sd3, sd4 = st.columns(4)
+        with sd1:
+            nc_date = st.date_input("服務日期", value=date.today() + timedelta(days=1), key="nc_date_direct")
+        with sd2:
+            nc_period = st.selectbox("時段", PERIOD_OPTIONS, key="nc_period_direct")
+        with sd3:
+            nc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="nc_person_direct")
+        with sd4:
+            nc_hour = PERIOD_HOUR_MAP.get(nc_period, 3)
+            _day_type_nc = "週末" if nc_date.weekday() >= 5 else "平日"
+            _unit_nc = 700 if _day_type_nc == "週末" else 600
+            _total_nc = int(nc_person) * nc_hour * _unit_nc
+            st.markdown(f"**{nc_hour} 小時 / {_day_type_nc}**")
+            st.markdown(f"預估金額：**{_total_nc:,} 元**")
 
-        if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn2"):
-            _nc_phone = parsed_phone.strip()
-            _nc_name = parsed_name.strip()
-            _nc_email = parsed_email.strip()
-            _nc_address = parsed_address.strip()
-            if not _nc_name or not _nc_email or not _nc_address or not _nc_phone:
-                st.error("請確認姓名、電話、Email、服務地址都已填寫（從上方拆解欄位取得）")
+        step("4", "發票資訊")
+        ie1, ie2 = st.columns(2)
+        with ie1:
+            nc_invoice = st.selectbox("發票類型", ["會員載具（email）", "手機載具", "三聯式統編"], key="nc_invoice_direct")
+        nc_carrier = ""
+        nc_company_title = ""
+        nc_company_no = ""
+        if nc_invoice == "手機載具":
+            nc_carrier = st.text_input("手機條碼", placeholder="/ABC1234", key="nc_carrier_direct")
+        elif nc_invoice == "三聯式統編":
+            ie3, ie4, ie5 = st.columns([2, 2, 1])
+            with ie4:
+                nc_company_no = st.text_input("統一編號", key="nc_company_no_direct")
+            with ie5:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("查抬頭", key="nc_lookup_title_direct"):
+                    if nc_company_no.strip():
+                        try:
+                            _r = requests.get(
+                                "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
+                                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {nc_company_no.strip()}"},
+                                timeout=5,
+                            )
+                            _d = _r.json()
+                            if _d and isinstance(_d, list) and _d[0].get("Company_Name"):
+                                st.session_state["_nc_auto_title"] = _d[0]["Company_Name"]
+                            else:
+                                st.warning("查無此統編對應公司名稱")
+                        except Exception as _e:
+                            st.warning(f"查詢失敗：{_e}")
+                    else:
+                        st.warning("請先輸入統一編號")
+            with ie3:
+                nc_company_title = st.text_input("公司抬頭", value=st.session_state.get("_nc_auto_title", ""), key="nc_company_title_direct")
+
+        if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn_direct", type="primary"):
+            _err = []
+            if not nc_name.strip(): _err.append("姓名")
+            if not nc_phone.strip(): _err.append("電話")
+            if not nc_email.strip(): _err.append("Email")
+            if not nc_address.strip(): _err.append("服務地址")
+            if _err:
+                st.error(f"請填寫：{'、'.join(_err)}")
             elif not backend_email.strip() or not backend_password.strip():
-                st.error("請先輸入後台帳號密碼")
+                st.error("請先在上方輸入後台帳號密碼")
             else:
                 try:
                     with st.spinner("建立會員 → 查詢地址 → 建立訂單…"):
-                        nc_result2 = qo.quick_create_new_customer_order(
+                        nc_result = qo.quick_create_new_customer_order(
                             env_name=env,
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
                             customer={
-                                "name": _nc_name,
-                                "phone": _nc_phone,
-                                "email": _nc_email,
-                                "address": _nc_address,
-                                "payway": nc_payway2,
-                                "clean_type_id": CLEAN_TYPE_ID_MAP[nc_clean_type2],
-                                        "service_type": nc_service_type2,
+                                "name": nc_name.strip(),
+                                "phone": nc_phone.strip(),
+                                "email": nc_email.strip(),
+                                "tel": nc_tel.strip(),
+                                "address": nc_address.strip(),
+                                "ping": nc_ping,
+                                "payway": nc_payway,
+                                "clean_type_id": CLEAN_TYPE_ID_MAP[nc_clean_type],
+                                "service_type": nc_service_type,
                                 "date_s": nc_date.strftime("%Y-%m-%d"),
                                 "period_s": nc_period,
                                 "hour": str(nc_hour),
                                 "person": str(int(nc_person)),
-                                "carrier": _nc_carrier2,
-                                "company_title": _nc_company_title2,
-                                "company_no": _nc_company_no2,
+                                "carrier": nc_carrier,
+                                "company_title": nc_company_title,
+                                "company_no": nc_company_no,
                             }
                         )
-                        ok2, mail_msg2 = send_confirmation(nc_result2)
-                        nc_result2["mail_sent"] = ok2
-                        nc_result2["mail_msg"] = mail_msg2
-                    st.session_state.q_order_result = nc_result2
-                    st.success(f"✅ 訂單建立成功：{nc_result2['order_no']}")
+                        ok_mail, mail_msg = send_confirmation(nc_result)
+                        nc_result["mail_sent"] = ok_mail
+                        nc_result["mail_msg"] = mail_msg
+                    st.session_state.q_order_result = nc_result
                     st.rerun()
                 except Exception as e:
                     st.error(f"建單失敗：{e}")
 
-    # --------------------------------------------------
-    # 訂單轉換（v8.4 一對多）
-    # --------------------------------------------------
+        # 顯示建單結果
+        if st.session_state.get("q_order_result"):
+            _r = st.session_state.q_order_result
+            if _r.get("order_no"):
+                st.success(f"✅ 訂單建立成功：{_r['order_no']}")
+                st.info(f"日期：{_r.get('date_s')}　時段：{_r.get('period_s')}　{_r.get('person')}人{_r.get('hour')}小時　金額：{_r.get('price_with_tax', 0):,} 元")
+                if _r.get("line_message"):
+                    st.text_area("LINE 訊息", _r["line_message"], height=300, key="nc_line_msg_out")
+                    copy_button("複製 LINE 訊息", _r["line_message"], "copy_nc_line")
+
+
     elif single_feature == "訂單轉換":
         info_panel(
             "功能說明",
