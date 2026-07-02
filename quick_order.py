@@ -2593,12 +2593,151 @@ def parse_new_customer_order_text(raw_text):
 
 
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
-    required = ["name", "phone", "email", "address", "payway", "clean_type_id"]
-    missing = [key for key in required if not str((customer or {}).get(key, "")).strip()]
+    """
+    新客建單完整流程：
+    1. 後台登入
+    2. POST /ajax/create_member 建立會員
+    3. GET /ajax/get_member 取得 member_id / addressId
+    4. POST /ajax/check_contain 取得 area_id / company_id
+    5. 走 quick_create_order 建單
+
+    customer dict 必填：name, phone, email, address, payway, clean_type_id,
+                        date_s, period_s, hour, person
+    選填：ping（坪數代號，預設4=21~40）, company_title, company_no,
+          carrier（手機載具）, tel
+    """
+    required = ["name", "phone", "email", "address", "payway", "clean_type_id",
+                "date_s", "period_s", "hour", "person"]
+    missing = [k for k in required if not str((customer or {}).get(k, "")).strip()]
     if missing:
         raise Exception("新客資料不足，請補齊：" + "、".join(missing))
-    carrier = str((customer or {}).get("carrier", "")).strip()
-    invoice_type = str((customer or {}).get("invoice_type", "")).strip()
-    if invoice_type == "手機載具" and not carrier.startswith("/"):
-        raise Exception("手機載具格式可能不正確，範例：/T8K346B")
-    raise Exception("新客資料已完成前端收集與驗證；但目前 quick_order.py 的既有建單核心需要會員 addressId，尚未接上新客建立會員/地址或新客訂單送出 API。")
+
+    base_url = _configure_environment(env_name)
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    phone = normalize_phone(str(customer["phone"]).strip())
+    name = str(customer["name"]).strip()
+    email = str(customer["email"]).strip()
+    tel = str(customer.get("tel", "")).strip()
+    address = str(customer["address"]).strip()
+    payway = str(customer["payway"]).strip()
+    clean_type_id = str(customer["clean_type_id"]).strip()
+    date_s = str(customer["date_s"]).strip()
+    period_s = str(customer["period_s"]).strip()
+    hour = str(customer["hour"]).strip()
+    person = str(customer["person"]).strip()
+    ping = str(customer.get("ping", "4")).strip()  # 預設 21~40
+    company_title = str(customer.get("company_title", "")).strip()
+    company_no = str(customer.get("company_no", "")).strip()
+    carrier = str(customer.get("carrier", "")).strip()
+
+    # Step 1: 取 CSRF token
+    booking_page = session.get(f"{base_url}/booking/single", headers=HEADERS, allow_redirects=True)
+    token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', booking_page.text)
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf:
+        raise Exception("無法取得 CSRF token")
+
+    # Step 2: 建立會員
+    create_resp = session.post(
+        f"{base_url}/ajax/create_member",
+        data={"name": name, "phone": phone, "tel": tel, "email": email, "_token": csrf},
+        headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        allow_redirects=True,
+    )
+    try:
+        create_data = create_resp.json()
+    except Exception:
+        raise Exception(f"建立會員 API 回應非 JSON：{create_resp.text[:200]}")
+    if str(create_data.get("err_no", "")) != "0":
+        desc = create_data.get("description", "未知錯誤")
+        raise Exception(f"建立會員失敗：{desc}")
+
+    # Step 3: 查詢會員取得 member_payload
+    token_booking = get_csrf_token(session)
+    member_payload = get_member(session, phone, token_booking, clean_type_id)
+    if not member_payload:
+        raise Exception(f"建立會員後查詢失敗：{phone}")
+
+    # Step 4: 新增地址（透過 check_contain 取 area_id，但新客沒有 addressId，
+    # 需要先用 geocode 取座標再呼叫 check_contain）
+    geo_lat, geo_lng = geocode_address(address)
+    member = member_payload.get("member", {})
+    member_id = str(member.get("member_id", ""))
+
+    addr_check = check_contain(session, member_id, address, geo_lat or "", geo_lng or "", token_booking, clean_type_id)
+    if not addr_check:
+        raise Exception(f"查詢地址/地區失敗（地址可能不在服務範圍）：{address}")
+
+    area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
+
+    # 建立一個臨時的 best_addr 供 quick_create_order 使用
+    best_addr = {
+        "address": address,
+        "addressId": "",
+        "lat": geo_lat or "",
+        "lng": geo_lng or "",
+        "area_id": area_info.get("area_id", ""),
+        "company_id": area_info.get("company_id", ""),
+        "country_id": area_info.get("country_id", "12"),
+        "notice": "",
+        "purchase": {
+            "ping": ping, "room": "0", "bathroom": "0", "balcony": "0",
+            "livingroom": "0", "kitchen": "0", "window": "", "shutter": "",
+            "clothes": "0", "dyson": "0", "refrigerator": "0",
+            "disinfection": "0", "go_abord": "0", "home_move": "0",
+            "storage": "0", "cabinet": "0", "quintuple": "0",
+            "fare": area_info.get("fare", "0"),
+            "country_id": area_info.get("country_id", "12"),
+            "company_id": area_info.get("company_id", "1"),
+            "area_id": area_info.get("area_id", "25"),
+        },
+    }
+
+    # 將 best_addr 注入 member_payload，讓 quick_create_order 能找到地址
+    member_payload["member"]["memberAddressList"] = [{
+        "id": 0, "addressId": 0,
+        "address": address,
+        "lat": geo_lat or "", "lng": geo_lng or "",
+        "areaId": area_info.get("area_id", ""),
+        "countryId": area_info.get("country_id", "12"),
+        "city": address[:3],
+        "purchase": best_addr["purchase"],
+        "memo": "",
+        "notice": "",
+    }]
+
+    lookup_result = {
+        "session": session, "token": token_booking, "phone": phone,
+        "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
+    }
+
+    # 判斷發票類型
+    if company_no and company_title:
+        invoice_type_override = "3"
+        carrier_type_id_override = "1"
+        carrier_info = ""
+    elif carrier and carrier.startswith("/"):
+        invoice_type_override = "2"
+        carrier_type_id_override = "2"
+        carrier_info = carrier
+    else:
+        invoice_type_override = "2"
+        carrier_type_id_override = "1"
+        carrier_info = email
+
+    region = get_region_by_address(address, ACCOUNTS) or "台北"
+
+    order_result = quick_create_order(
+        env_name=env_name, payway=payway, region=region,
+        lookup_result=lookup_result, address=address,
+        clean_type_id=clean_type_id, date_s=date_s, period_s=period_s,
+        hour=hour, person=person,
+        invoice_type_override=invoice_type_override,
+        carrier_type_id_override=carrier_type_id_override,
+        carrier_info=carrier_info,
+        company_title=company_title, company_no=company_no,
+    )
+    return order_result
