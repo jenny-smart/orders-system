@@ -2774,8 +2774,8 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     company_no = str(customer.get("company_no", "")).strip()
     company_title = str(customer.get("company_title", "")).strip()
 
-    # 有統編但無抬頭 → 自動查公司名稱
-    if company_no and not company_title:
+    # 有統編 → 一律查詢公司抬頭（確保正確），查不到就擋住建單
+    if company_no:
         try:
             import requests as _req2
             _r2 = _req2.get(
@@ -2786,8 +2786,12 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
             _d2 = _r2.json()
             if _d2 and isinstance(_d2, list) and _d2[0].get("Company_Name"):
                 company_title = _d2[0]["Company_Name"]
-        except Exception:
-            pass
+            else:
+                raise Exception(f"統編 {company_no} 查無公司抬頭，請確認統編是否正確，建單已停止")
+        except Exception as _e2:
+            if "查無公司抬頭" in str(_e2):
+                raise
+            raise Exception(f"統編查詢失敗（{_e2}），請確認網路或統編是否正確，建單已停止")
 
     # 其他選填欄位
     memo = str(customer.get("memo", "")).strip()        # 客人備註
@@ -2983,7 +2987,7 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "period": "",
         "memo": memo,
         "notice": notice,
-        "sms_time": actual_time,
+        "period": actual_time,   # 簡訊實際服務時間
         "discount_code": "",
         "payway": payway_code,
         "invoice_type": invoice_type,
