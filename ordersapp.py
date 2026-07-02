@@ -552,7 +552,79 @@ else:
             member_payload = lookup.get("member_payload")
             st.markdown("<hr>", unsafe_allow_html=True)
             if not member_payload:
-                st.warning("查無此會員。請改用上方『新客資料拆解』功能，直接輸入訂購人資料、服務地址、付款方式與載具資料。")
+                st.warning("查無此會員，請填寫下方資料建立新客訂單。")
+                st.markdown("**新客資料**")
+                nc1, nc2, nc3 = st.columns(3)
+                with nc1:
+                    nc_name = st.text_input("姓名", key="nc_name")
+                with nc2:
+                    nc_email = st.text_input("Email", key="nc_email")
+                with nc3:
+                    nc_tel = st.text_input("市內電話（選填）", key="nc_tel")
+                nc_address = st.text_input("服務地址", key="nc_address")
+                na1, na2, na3, na4 = st.columns(4)
+                with na1:
+                    nc_date = st.date_input("服務日期", value=date.today() + timedelta(days=1), key="nc_date")
+                with na2:
+                    nc_period = st.selectbox("時段", PERIOD_OPTIONS, key="nc_period")
+                with na3:
+                    nc_person = st.number_input("人數", min_value=1, max_value=8, value=2, key="nc_person")
+                with na4:
+                    nc_hour = PERIOD_HOUR_MAP.get(nc_period, 3)
+                    st.markdown(f"<br><b>{nc_hour} 小時</b>", unsafe_allow_html=True)
+                nb1, nb2 = st.columns(2)
+                with nb1:
+                    nc_payway = st.selectbox("付款方式", ["信用卡", "ATM"], key="nc_payway")
+                with nb2:
+                    nc_invoice = st.selectbox("發票", ["會員載具（email）", "手機載具", "三聯式統編"], key="nc_invoice")
+                nc_carrier = ""
+                nc_company_title = ""
+                nc_company_no = ""
+                if nc_invoice == "手機載具":
+                    nc_carrier = st.text_input("手機條碼", placeholder="/ABC1234", key="nc_carrier")
+                elif nc_invoice == "三聯式統編":
+                    nci1, nci2 = st.columns(2)
+                    with nci1:
+                        nc_company_title = st.text_input("公司抬頭", key="nc_company_title")
+                    with nci2:
+                        nc_company_no = st.text_input("統一編號", key="nc_company_no")
+                nc_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type")
+                if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn"):
+                    if not nc_name.strip() or not nc_email.strip() or not nc_address.strip():
+                        st.error("請填寫姓名、Email、服務地址")
+                    elif not backend_email.strip() or not backend_password.strip():
+                        st.error("請先輸入後台帳號密碼")
+                    else:
+                        try:
+                            with st.spinner("建立會員 → 查詢地址 → 建立訂單…"):
+                                nc_result = qo.quick_create_new_customer_order(
+                                    env_name=env,
+                                    backend_email=backend_email.strip(),
+                                    backend_password=backend_password.strip(),
+                                    customer={
+                                        "name": nc_name.strip(),
+                                        "phone": q_phone.strip(),
+                                        "email": nc_email.strip(),
+                                        "tel": nc_tel.strip(),
+                                        "address": nc_address.strip(),
+                                        "payway": nc_payway,
+                                        "clean_type_id": CLEAN_TYPE_ID_MAP[nc_clean_type],
+                                        "date_s": nc_date.strftime("%Y-%m-%d"),
+                                        "period_s": nc_period,
+                                        "hour": str(nc_hour),
+                                        "person": str(int(nc_person)),
+                                        "carrier": nc_carrier,
+                                        "company_title": nc_company_title,
+                                        "company_no": nc_company_no,
+                                    }
+                                )
+                                ok, mail_msg = send_confirmation(nc_result)
+                                nc_result["mail_sent"] = ok
+                                nc_result["mail_msg"] = mail_msg
+                            st.session_state.q_order_result = nc_result
+                            st.success(f"✅ 訂單建立成功：{nc_result['order_no']}")
+                        except Exception as e:
+                            st.error(f"建單失敗：{e}")
             else:
                 member = member_payload.get("member", {})
                 addr_list = member_payload.get("member", {}).get("memberAddressList", [])
