@@ -821,11 +821,17 @@ else:
         with sb4:
             nc_hour = PERIOD_HOUR_MAP.get(nc_period, 3)
             st.markdown(f"<br><b>{nc_hour} 小時</b>", unsafe_allow_html=True)
-        sc1, sc2 = st.columns(2)
+        sc1, sc2, sc3 = st.columns(3)
         with sc1:
             nc_payway2 = st.selectbox("付款方式", ["信用卡", "ATM"], key="nc_payway2")
         with sc2:
             nc_clean_type2 = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type2")
+        with sc3:
+            nc_service_type2 = ""
+            if nc_clean_type2 == "裝修細清":
+                _stype_map = {"裝修細清": "1", "搬出清潔": "2", "搬入清潔": "3"}
+                _stype_sel = st.selectbox("裝修類型", list(_stype_map.keys()), key="nc_stype2")
+                nc_service_type2 = _stype_map[_stype_sel]
 
         # 發票資訊從拆解欄位帶入
         _nc_carrier2 = parsed_carrier
@@ -855,6 +861,7 @@ else:
                                 "address": _nc_address,
                                 "payway": nc_payway2,
                                 "clean_type_id": CLEAN_TYPE_ID_MAP[nc_clean_type2],
+                                        "service_type": nc_service_type2,
                                 "date_s": nc_date.strftime("%Y-%m-%d"),
                                 "period_s": nc_period,
                                 "hour": str(nc_hour),
