@@ -111,9 +111,18 @@ def _format_period_display(period_raw, person="", display_override=""):
         break_note = "，中間休息1小時" if has_break else ""
         if person_str and person_str != "0":
             inner = f"{person_str}人{hour_str}{break_note}"
+            # 計算並加上「共X人時」
+            try:
+                h = int(float(hour_str.replace("小時", "")))
+                p = int(person_str)
+                ph = h * p
+                ph_note = f"，共{ph}人時"
+            except Exception:
+                ph_note = ""
         else:
             inner = f"{hour_str}{break_note}"
-        return f"{display}（{inner}）"
+            ph_note = ""
+        return f"{display}（{inner}）{ph_note}"
     if person_str and person_str != "0":
         return f"{display}（{person_str}人）"
     return display
@@ -2066,7 +2075,7 @@ def build_line_message(order_result):
     except Exception:
         has_fare = bool(str(fare or "").strip())
     vip_fare_line = f"車馬費：{fare}\n" if has_fare else ""
-    card_fare_line = f"車馬費： {fare}   (服務完後收取)\n" if has_fare else ""
+    card_fare_line = f"車馬費：{fare}（請現場支付給專員）\n" if has_fare else ""
     taipei_atm_fare_line = f"車馬費：{fare}（請現場支付給專員）\n" if has_fare else ""
     taichung_atm_fare_line = f"\n車馬費:{fare}（請現場支付給專員）" if has_fare else ""
     common_footer = """**當您完成付款後即表示服務已完成預約，
