@@ -2628,6 +2628,86 @@ def parse_new_customer_order_text(raw_text):
     return result
 
 
+def parse_new_customer_text(text):
+    """
+    從客人提供的制式文字拆解出建單所需欄位。
+    支援格式：「訂購人姓名：XXX」「電話：09...」「Email：...」等。
+    回傳 dict：name, phone, email, address, ping, payway, carrier, company_title, company_no
+    """
+    import re as _re
+    result = {}
+
+    def _find(patterns, text):
+        for p in patterns:
+            m = _re.search(p, text, _re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    result["name"] = _find([
+        r"(?:訂購人)?姓名[：:]\s*(.+)",
+        r"姓名[：:]\s*(.+)",
+    ], text)
+
+    _raw_phone = _find([
+        r"(?:訂購人)?電話[：:]\s*([\d\-\s]+)",
+        r"手機[：:]\s*([\d\-\s]+)",
+    ], text)
+    result["phone"] = normalize_phone(_raw_phone) if _raw_phone else ""
+
+    result["email"] = _find([
+        r"(?:訂購人)?[Ee]mail[：:]\s*(\S+)",
+        r"[Ee]-mail[：:]\s*(\S+)",
+        r"信箱[：:]\s*(\S+)",
+    ], text)
+
+    result["address"] = _find([
+        r"服務地址[：:]\s*(.+)",
+        r"地址[：:]\s*(.+)",
+    ], text)
+
+    # 坪數 → ping 代號
+    _ping_raw = _find([
+        r"(?:室內)?坪數[：:]\s*(.+)",
+        r"坪數[：:]\s*(.+)",
+    ], text)
+    _ping_map = {"10": "1", "11": "2", "20": "2", "21": "3", "25": "4", "30": "4",
+                 "31": "5", "40": "4", "41": "5", "50": "5", "51": "6"}
+    ping = "4"
+    if _ping_raw:
+        nums = _re.findall(r"\d+", _ping_raw)
+        if nums:
+            n = int(nums[0])
+            if n <= 10: ping = "1"
+            elif n <= 20: ping = "2"
+            elif n <= 30: ping = "3"
+            elif n <= 40: ping = "4"
+            elif n <= 50: ping = "5"
+            else: ping = "6"
+    result["ping"] = ping
+
+    # 付款方式
+    _payway_raw = _find([r"付款方式[：:]\s*(.+)"], text)
+    result["payway"] = "ATM" if "ATM" in str(_payway_raw) or "匯款" in str(_payway_raw) else "信用卡"
+
+    # 發票
+    _invoice_raw = _find([r"發票[^：:]*[：:]\s*(.+)"], text) or ""
+
+    # 手機載具
+    _carrier_m = _re.search(r"(/[A-Z0-9+]{7,8})", _invoice_raw + " " + text)
+    result["carrier"] = _carrier_m.group(1) if _carrier_m else ""
+
+    # 統編
+    _tax_m = _re.search(r"統一編號[：:]*\s*(\d{8})", text) or _re.search(r"(\d{8})", _invoice_raw)
+    result["company_no"] = _tax_m.group(1) if _tax_m else ""
+
+    # 公司抬頭
+    _title_m = _re.search(r"(?:公司抬頭|抬頭)[：:]*\s*(.+?)(?:及|與|統|$)", _invoice_raw + " " + text)
+    result["company_title"] = _title_m.group(1).strip() if _title_m else ""
+
+    return result
+
+
 def quick_create_new_customer_order(env_name, backend_email, backend_password, customer):
     """
     新客建單：完整模擬後台 /booking/single 表單送出流程。
