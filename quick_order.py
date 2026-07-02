@@ -757,6 +757,7 @@ def quick_create_order(
     date_s, period_s, hour, person="2", fallback_fare="0", discount_code="",
     payment_type="", carrier_info="", company_no="", company_title="",
     invoice_type_override="", carrier_type_id_override="",
+    extra_fields=None,
 ):
     base_url = _configure_environment(env_name)
     session = lookup_result["session"]
@@ -844,6 +845,8 @@ def quick_create_order(
         "lat": str(best_addr.get("lat") or pick("lat", "")),
         "lng": str(best_addr.get("lng") or pick("lng", "")),
     }
+    if extra_fields:
+        base_data.update(extra_fields)
     calc_result = calculate_hour(session, base_data, token)
     if not calc_result:
         raise Exception("計算時數失敗")
@@ -2392,6 +2395,39 @@ def get_stored_value(env_name, backend_email, backend_password, phone, clean_typ
     return 0, None
 
 
+
+def lookup_company_name_by_tax_id(tax_id):
+    """
+    用統編查公司名稱，透過經濟部商工開放資料平台。
+    回傳公司名稱字串，查無則回傳空字串。
+    """
+    try:
+        import urllib.parse
+        tax_id = str(tax_id).strip()
+        # 商業登記（行號）
+        url_biz = (
+            f"https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6"
+            f"?%24format=json&%24filter=Business_Accounting_NO%20eq%20{tax_id}&%24top=1"
+        )
+        resp = requests.get(url_biz, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and data[0].get("Company_Name"):
+                return data[0]["Company_Name"]
+        # 公司登記（有限公司/股份有限公司）
+        url_co = (
+            f"https://data.gcis.nat.gov.tw/od/data/api/236EE382-4942-41A9-BD03-CA0709025E7C"
+            f"?%24format=json&%24filter=Business_Accounting_NO%20eq%20{tax_id}&%24top=1"
+        )
+        resp2 = requests.get(url_co, timeout=5)
+        if resp2.status_code == 200:
+            data2 = resp2.json()
+            if data2 and data2[0].get("Company_Name"):
+                return data2[0]["Company_Name"]
+    except Exception:
+        pass
+    return ""
+
 def _day_type_from_date(date_text):
     try:
         d = datetime.strptime(str(date_text), "%Y-%m-%d").date()
@@ -2730,6 +2766,9 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
 
     region = get_region_by_address(address, ACCOUNTS) or "台北"
 
+    # serviceType 僅裝修細清（clean_type_id=3）需要：1=裝修細清 2=搬出清潔 3=搬入清潔
+    service_type = str(customer.get("service_type", "")).strip()
+
     order_result = quick_create_order(
         env_name=env_name, payway=payway, region=region,
         lookup_result=lookup_result, address=address,
@@ -2739,5 +2778,6 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         carrier_type_id_override=carrier_type_id_override,
         carrier_info=carrier_info,
         company_title=company_title, company_no=company_no,
+        extra_fields={"serviceType": service_type} if service_type else {},
     )
     return order_result
