@@ -2759,24 +2759,6 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     phone = normalize_phone(str(customer["phone"]).strip())
     name = str(customer["name"]).strip()
     email = str(customer["email"]).strip()
-
-    # 若有統編但無抬頭，自動查詢公司名稱
-    _company_no_tmp = str(customer.get("company_no", "")).strip()
-    _company_title_tmp = str(customer.get("company_title", "")).strip()
-    if _company_no_tmp and not _company_title_tmp:
-        try:
-            import requests as _req
-            _r = _req.get(
-                "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
-                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {_company_no_tmp}"},
-                timeout=5,
-            )
-            _d = _r.json()
-            if _d and isinstance(_d, list) and _d[0].get("Company_Name"):
-                customer = dict(customer)
-                customer["company_title"] = _d[0]["Company_Name"]
-        except Exception:
-            pass
     tel = str(customer.get("tel", "")).strip()
     line = str(customer.get("line", "")).strip()
     address = str(customer["address"]).strip()
@@ -2789,8 +2771,28 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     ping = str(customer.get("ping", "4")).strip()
     service_type = str(customer.get("service_type", "")).strip()
     carrier = str(customer.get("carrier", "")).strip()
-    company_title = str(customer.get("company_title", "")).strip()
     company_no = str(customer.get("company_no", "")).strip()
+    company_title = str(customer.get("company_title", "")).strip()
+
+    # 有統編但無抬頭 → 自動查公司名稱
+    if company_no and not company_title:
+        try:
+            import requests as _req2
+            _r2 = _req2.get(
+                "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6",
+                params={"$format": "json", "$filter": f"Business_Accounting_NO eq {company_no}"},
+                timeout=5,
+            )
+            _d2 = _r2.json()
+            if _d2 and isinstance(_d2, list) and _d2[0].get("Company_Name"):
+                company_title = _d2[0]["Company_Name"]
+        except Exception:
+            pass
+
+    # 其他選填欄位
+    memo = str(customer.get("memo", "")).strip()        # 客人備註
+    notice = str(customer.get("notice", "")).strip()    # 客服備註
+    actual_time = str(customer.get("actual_time", "")).strip()  # 簡訊實際服務時間
 
     # payway: 信用卡=1, ATM=2（與 PAYWAY_MAP 一致）
     if "信用卡" in payway or payway == "1":
@@ -2979,8 +2981,9 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "fare": "0",
         "datePeriod": date_period,
         "period": "",
-        "memo": "",
-        "notice": "",
+        "memo": memo,
+        "notice": notice,
+        "sms_time": actual_time,
         "discount_code": "",
         "payway": payway_code,
         "invoice_type": invoice_type,
