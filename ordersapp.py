@@ -1,10 +1,19 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.16
+# 版本：v8.17
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-04
 #
 # Change Log
+# v8.17
+# - 修正「新客資料拆解」與「訂單轉換」的 LINE 訊息文字框，成立新訂單後畫面還
+#   停留在上一張訂單內容的問題：這幾個 st.text_area 原本帶了固定 key
+#   （nc_line_out / conv_line_{index} / conv_combined_line），Streamlit 的
+#   規則是「帶 key 的 widget 只有第一次渲染時吃 value 參數，之後即使傳入新的
+#   value，畫面仍以 session_state 裡的舊值為準」，導致訂單編號/金額/日期都已經
+#   換成新訂單了，LINE 訊息內文卻還是前一張訂單的。修法：拿掉這三處不需要保留
+#   使用者編輯狀態的固定 key，改成跟舊客快速建單、儲值金補價差的 LINE 訊息
+#   一樣不帶 key，每次都用最新的 value 重新渲染。
 # v8.16
 # - 修正 v8.15 造成的 AttributeError：清空舊結果時原本寫成
 #   `st.session_state.nc_result = None`，但下面讀取是
@@ -88,7 +97,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.16"
+__version__ = "8.17"
 
 import html
 import requests
@@ -1113,7 +1122,10 @@ else:
             if _r.get("line_message"):
                 col_nc_msg, col_nc_memo = st.columns([3, 1])
                 with col_nc_msg:
-                    st.text_area("LINE 訊息", _r["line_message"], height=320, label_visibility="collapsed", key="nc_line_out")
+                    # v8.17：拿掉固定 key——帶 key 的 st.text_area 一旦畫過一次，
+                    # 之後即使傳入新的 value 也不會更新畫面，只會顯示 session_state
+                    # 裡的舊內容，導致新訂單成立後 LINE 訊息還停留在上一張訂單。
+                    st.text_area("LINE 訊息", _r["line_message"], height=320, label_visibility="collapsed")
                     copy_button("複製 LINE 訊息", _r["line_message"], "copy_nc_line_d")
                 with col_nc_memo:
                     st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_nc_result")
@@ -1293,13 +1305,14 @@ else:
                 st.markdown("**步驟2 新訂單 LINE 訊息**")
                 for r in new_orders_ok:
                     if r.get("line_message"):
-                        st.text_area(f"B{r['index']} LINE（{r['order_no']}）", r["line_message"], height=300, label_visibility="collapsed", key=f"conv_line_{r['index']}")
+                        # v8.17：拿掉固定 key，避免新一輪轉換的 LINE 訊息被舊內容卡住不更新。
+                        st.text_area(f"B{r['index']} LINE（{r['order_no']}）", r["line_message"], height=300, label_visibility="collapsed")
                         copy_button(f"複製 B{r['index']} LINE 訊息", r["line_message"], f"copy_conv_line_{r['index']}")
 
                 combined_msg = conv_result.get("combined_line_message", "")
                 if combined_msg:
                     st.markdown("**💬 合併 LINE 訊息（全部新訂單）**")
-                    st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed", key="conv_combined_line")
+                    st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed")
                     copy_button("複製合併 LINE 訊息", combined_msg, "copy_conv_combined_line")
 
                 st.markdown("**備註文字**")
