@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.14
+# 版本：v8.15
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-04
 #
 # Change Log
+# v8.15
+# - 修正五個成單流程（舊客快速建單、新客資料拆解、訂單轉換、儲值金補價差兩段）
+#   按下執行按鈕時沒有先清空上一次殘留在 session_state 的舊結果，導致這次執行
+#   失敗（或還在拆解資料階段）時，畫面下方還顯示上一次成功的舊訂單資訊，
+#   跟這次的錯誤訊息重疊在一起造成混淆。現在改為：每個「執行」按鈕一按下，
+#   立刻清空自己那個結果區塊，再開始新的一次嘗試。
 # v8.14
 # - 批次建單（Google Sheet）補上「查無班表時自動補檸檬人排班」勾選框，預設不勾選，
 #   與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致（配合 orders.py
@@ -74,7 +80,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.14"
+__version__ = "8.15"
 
 import html
 import requests
@@ -691,6 +697,9 @@ else:
                 # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
                 nc_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="nc_allow_auto_lemon")
                 if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn"):
+                    # v8.15：開始新的一次建單嘗試前，先清空上一次殘留在畫面下方的舊結果，
+                    # 避免這次失敗時，舊的成功訊息還留在畫面上跟新的錯誤訊息重疊混淆。
+                    st.session_state.q_order_result = None
                     if not nc_name.strip() or not nc_email.strip() or not nc_address.strip():
                         st.error("請填寫姓名、Email、服務地址")
                     elif not backend_email.strip() or not backend_password.strip():
@@ -821,6 +830,8 @@ else:
                         # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
                         old_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="old_allow_auto_lemon")
                         if st.button("🚀 建立訂單", use_container_width=True, key="old_create_known"):
+                            # v8.15：開始新的一次建單嘗試前，先清空上一次殘留的舊結果。
+                            st.session_state.q_order_result = None
                             try:
                                 with st.spinner("建單中，請稍候…"):
                                     result = quick_create_order(env_name=env, payway=q_payway, region=q_region, lookup_result=lookup, address=q_address, clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm], date_s=q_date.strftime("%Y-%m-%d"), period_s=q_period, hour=q_hour, person=q_person, allow_auto_lemon_shift=old_allow_auto_lemon)
@@ -985,6 +996,10 @@ else:
         nc_d_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="nc_d_allow_auto_lemon")
 
         if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_d", type="primary"):
+            # v8.15：開始新的一次建單嘗試前，先清空上一次殘留在畫面下方的舊結果
+            # （包含成功訊息、LINE 訊息），避免這次失敗/拆解失敗時，
+            # 舊的成功結果還留在畫面上跟新的錯誤訊息重疊混淆。
+            st.session_state.nc_result = None
             if not nc_raw.strip():
                 st.error("請貼上客人資料")
             elif not backend_email.strip() or not backend_password.strip():
@@ -1147,6 +1162,8 @@ else:
         conv_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="conv_allow_auto_lemon")
 
         if st.button("🔄 執行訂單轉換", use_container_width=True, key="run_convert_btn"):
+            # v8.15：開始新的一次轉換前，先清空上一次殘留的舊結果。
+            st.session_state.conv_result = None
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not conv_order_no_a.strip():
@@ -1347,6 +1364,9 @@ else:
         sv_stored_total_preview = sv_unit_price * sv_person_hours
         st.markdown(f'<div class="hint-box">儲值金清零訂單會送到 <b>/booking/stored_value_routine</b>。服務總額為 <b>{sv_unit_price} × {sv_person_hours} = {sv_stored_total_preview}</b>；優惠券A會用「服務總額 - 儲值金餘額」計算，剩餘金額由儲值金扣抵後歸零。</div>', unsafe_allow_html=True)
         if st.button("① 建立儲值金清零訂單（stored_value_routine）", use_container_width=True, key="sv_create_stored_btn"):
+            # v8.15：開始新的一次嘗試前，先清空上一次殘留的舊結果（含第二段）。
+            st.session_state.sv_stored_stage = None
+            st.session_state.sv_paid_stage = None
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not sv_phone.strip():
@@ -1387,6 +1407,8 @@ else:
             step("6", "第二段：建立客付補價差訂單")
             st.markdown(f'<div class="hint-box">客付補價差單會建立優惠券B，面額為原儲值金餘額 <b>{stored_stage["balance"]}</b> 元，付款方式為 <b>{sv_customer_payway}</b>。</div>', unsafe_allow_html=True)
             if st.button("② 建立客付補價差訂單（single）", use_container_width=True, key="sv_create_paid_btn"):
+                # v8.15：開始新的一次嘗試前，先清空上一次殘留的舊結果。
+                st.session_state.sv_paid_stage = None
                 try:
                     with st.spinner("第二段執行中：建優惠券B → 建客付補價差訂單…"):
                         paid_stage = stored_value_makeup_create_paid_order(
