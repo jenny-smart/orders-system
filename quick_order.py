@@ -1,9 +1,17 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.9
+# 版本：v8.11
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.11
+# - 修正新客建單（quick_create_new_customer_order）地址被誤標成錯誤區域（例如
+#   一律變成「大安區」）的根因：新地址查詢區域時（check_contain）原本 lat/lng
+#   永遠送空字串，未先呼叫 geocode_address 取得經緯度，導致 check_contain 查無
+#   正確結果，area_id 掉進寫死的 fallback "25"（該編號在後台對應到錯誤區域）。
+#   現在改為先 geocode 取得經緯度再查詢，且查無正確 area_id 時直接丟出明確錯誤，
+#   不再默默套用可能錯誤的固定值。此問題只影響全新地址（會員從未購買過的地址），
+#   後台手動建單或既有地址不受影響，符合實際觀察到的現象。
 # v8.9
 # - quick_create_new_customer_order 建單後回查同時比對地址：若後台實際地址與我們
 #   送出的地址不同（例如後台自動判斷區域時加了不正確的市/區前綴，如「台北市大安區」
@@ -47,7 +55,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.9"
+__version__ = "8.11"
 
 import time
 import re
@@ -3062,12 +3070,16 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         purchase_info = matched_addr.get("purchase", {}) or {}
         company_id = str(purchase_info.get("company_id", "1"))
     else:
-        # 新地址：用 check_contain 取 area_id，不做 geocode（避免地址被改動）
+        # v8.11：新地址一定要先 geocode 取得經緯度，check_contain 才有辦法正確判斷區域。
+        # 原本 lat/lng 永遠送空字串，導致 check_contain 查無結果，area_id 掉進寫死的
+        # fallback "25"，若 25 剛好對應到錯誤區域（例如大安區），會造成每一筆新客訂單
+        # 不論實際地址為何，全部被誤標成同一個錯誤區域。
+        geo_lat, geo_lng = geocode_address(address)
         check_resp = session.post(
             f"{base_url}/ajax/check_contain",
             data={
                 "_token": csrf, "member_id": member_id,
-                "address": address, "lat": "", "lng": "",
+                "address": address, "lat": str(geo_lat or ""), "lng": str(geo_lng or ""),
                 "clean_type_id": clean_type_id,
             },
             headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
@@ -3077,11 +3089,19 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         except Exception:
             raise Exception(f"查詢地址區域失敗：{check_resp.text[:200]}")
         area_info = (check_data.get("area") or {})
-        area_id = str(area_info.get("area_id", "25"))
+        if not area_info.get("area_id"):
+            # v8.11：查無正確區域時直接擋下，不再默默套用可能錯誤的固定值，
+            # 避免地址被誤標成錯誤區域（例如一律變成大安區）。
+            raise Exception(
+                f"查詢地址區域失敗：地址「{address}」無法判斷所屬區域"
+                f"（check_contain 回傳無 area_id，地址是否正確或是否為服務涵蓋範圍？）"
+                f"，請確認地址格式或改用後台手動建單。"
+            )
+        area_id = str(area_info.get("area_id"))
         company_id = str(area_info.get("company_id", "1"))
         country_id = str(area_info.get("country_id", "12"))
-        lat = ""
-        lng = ""
+        lat = str(geo_lat or "")
+        lng = str(geo_lng or "")
         address_id = ""
 
     # Step 4: 組 datePeriod（格式：2026-07-11_14:00-18:00）
