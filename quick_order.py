@@ -1,9 +1,18 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.5
+# 版本：v8.6
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.6
+# - 修正 _build_combined_period_display：單筆訂單合併時不再重複附加「，共X人時」
+#   （原本每筆訂單自帶一次人時小計，加總後又整體附加一次，單筆時造成完全重複顯示）。
+# - quick_create_new_customer_order 回傳值補齊 date/period/region/fare/service_amount/
+#   actual_period 等 build_line_message 需要的欄位，避免呼叫端組 LINE 訊息時 KeyError
+#   或缺少地址所屬區域資訊。
+# - 新增 _fix_address_district_order 與 _lookup_district_via_geocode：新客地址若完全缺少
+#   行政區（區/鄉/鎮），會嘗試查詢並補在「市/縣」之後；若地址本身區域順序錯誤
+#   （例如「大安區台北市...」），會自動對調為「台北市大安區...」。查詢失敗不會擋住建單。
 # v8.5
 # - 新增 _fetch_csrf_from_url：儲值金訂單地址檢查（check_contain）失敗時，
 #   改向 /booking/single 借一個可靠的 CSRF token 重試，不影響 orders.BOOKING_URL。
@@ -26,7 +35,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.5"
+__version__ = "8.6"
 
 import time
 import re
@@ -155,7 +164,8 @@ def _extract_phone_from_block_lines(lines):
 def _build_combined_period_display(orders_data):
     parts = []
     total_ph = 0
-    for o in sorted(orders_data, key=lambda x: str(x.get("period_s") or "").replace(" ", "")):
+    orders_list = list(orders_data)
+    for o in sorted(orders_list, key=lambda x: str(x.get("period_s") or "").replace(" ", "")):
         period_raw = str(o.get("period_s") or "").replace(" ", "")
         actual = str(o.get("actual_period") or "").replace(" ", "")
         person_str = str(o.get("person") or "").strip()
@@ -170,7 +180,9 @@ def _build_combined_period_display(orders_data):
             except Exception:
                 pass
     combined = "＋".join(parts)
-    if total_ph:
+    # v8.6：每筆訂單經 _format_period_display 已自帶一次「，共X人時」小計，
+    # 只有在合併「多筆」訂單時才需要再附加一次整體加總，否則單筆訂單會重複顯示兩次。
+    if total_ph and len(parts) > 1:
         combined += f"，共{total_ph}人時"
     return combined
 
@@ -384,13 +396,100 @@ def _count_staff_from_lines(lines):
     return str(count) if count > 0 else ""
 
 
+def _fix_address_district_order(address, fallback_district=""):
+    """
+    v8.6：確保地址格式為「市/縣 → 區/鄉/鎮 → 其餘地址」。
+    - 情況一：區/鄉/鎮 出現在 市/縣 之前（例如「大安區台北市羅斯福路...」，順序錯誤），
+      自動對調為「台北市大安區羅斯福路...」。
+    - 情況二：市/縣 後方已經有區/鄉/鎮，順序正確，不需處理。
+    - 情況三：地址完全沒有區/鄉/鎮，若有提供 fallback_district（例如查詢取得），
+      補在「市/縣」之後。
+    任何情況解析失敗都直接回傳原始地址，不擋住建單流程。
+    """
+    address = str(address or "").strip()
+    if not address:
+        return address
+    try:
+        city_m = re.search(r"(?P<city>[^市縣區鄉鎮]{1,6}[市縣])", address)
+        if not city_m:
+            return address
+        city = city_m.group("city")
+        before_city = address[:city_m.start()]
+        after_city = address[city_m.end():]
+        district_m = re.match(r"^(?P<district>[^區鄉鎮市]{1,6}[區鄉鎮])", before_city)
+        if district_m:
+            district = district_m.group("district")
+            rest_before = before_city[district_m.end():]
+            return f"{rest_before}{city}{district}{after_city}".strip()
+        if re.match(r"^[^區鄉鎮]{0,6}[區鄉鎮]", after_city):
+            return address
+        if fallback_district:
+            return f"{before_city}{city}{fallback_district}{after_city}".strip()
+        return address
+    except Exception:
+        return address
+
+
+def _lookup_district_via_geocode(address):
+    """
+    v8.6：查詢地址對應的行政區（區/鄉/鎮），用於補齊新客地址缺少區域的情況。
+    優先嘗試沿用 orders 模組既有的 Google 地圖 API 金鑰（若可取得），
+    查無金鑰則退回 Nominatim（OpenStreetMap）reverse geocode 作為備援。
+    查詢失敗一律回傳空字串，不會擋住建單流程。
+    """
+    address = str(address or "").strip()
+    if not address:
+        return ""
+    _google_key = None
+    for _attr in ("GOOGLE_API_KEY", "GOOGLE_MAPS_API_KEY", "GOOGLE_GEOCODE_API_KEY", "MAPS_API_KEY"):
+        _google_key = getattr(orders, _attr, None)
+        if _google_key:
+            break
+    try:
+        if _google_key:
+            resp = requests.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"address": address, "key": _google_key, "region": "tw", "language": "zh-TW"},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for result in data.get("results", []):
+                    for comp in result.get("address_components", []):
+                        types = comp.get("types", [])
+                        if "administrative_area_level_3" in types or "administrative_area_level_2" in types:
+                            name = comp.get("long_name", "")
+                            if re.search(r"(區|鄉|鎮)$", name):
+                                return name
+    except Exception:
+        pass
+    try:
+        resp2 = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "json", "countrycodes": "tw", "addressdetails": 1, "limit": 1},
+            headers={"User-Agent": "LemonCleanOrderSystem/1.0"},
+            timeout=5,
+        )
+        if resp2.status_code == 200:
+            results2 = resp2.json()
+            if results2:
+                addr_detail = results2[0].get("address", {}) or {}
+                for key in ("city_district", "suburb", "town", "county"):
+                    name = addr_detail.get(key, "")
+                    if name and re.search(r"(區|鄉|鎮)$", name):
+                        return name
+    except Exception:
+        pass
+    return ""
+
+
 def _extract_address_line(lines):
     for line in lines:
         text = str(line or "").strip()
         if not text or "@" in text or text.upper() == "LINE":
             continue
         if re.search(r"(台|臺|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|嘉義|苗栗|彰化|南投|雲林|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江).*(市|縣).*(區|鄉|鎮|市)", text):
-            return text
+            return _fix_address_district_order(text)
     return ""
 
 
@@ -1977,11 +2076,23 @@ def convert_order_multi(
             all_same_date = len(unique_dates) == 1
             if all_same_date:
                 period_parts = []
+                _total_ph_same_date = 0
                 for o in orders_info:
                     p_compact = str(o["period_s"] or "").replace(" ", "")
                     p_disp = _format_period_display(p_compact, str(o["person"] or ""))
                     period_parts.append(p_disp)
+                    _info_sd = PERIOD_DISPLAY_INFO.get(p_compact)
+                    if _info_sd:
+                        try:
+                            _h_sd = int(float(_info_sd[0].replace("小時", "")))
+                            _p_sd = int(str(o["person"] or "0"))
+                            _total_ph_same_date += _h_sd * _p_sd
+                        except Exception:
+                            pass
                 combined_period = "＋".join(period_parts)
+                # v8.6：此區塊固定合併多筆訂單（b_nos_for_line > 1），不會有單筆重複問題
+                if _total_ph_same_date and len(period_parts) > 1:
+                    combined_period += f"，共{_total_ph_same_date}人時"
                 multi_date = False
             else:
                 period_lines = []
@@ -2814,6 +2925,13 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     tel = str(customer.get("tel", "")).strip()
     line = str(customer.get("line", "")).strip()
     address = str(customer["address"]).strip()
+    # v8.6：地址若完全缺少行政區（區/鄉/鎮），嘗試查詢並補在「市/縣」之後；
+    # 若地址區域順序錯誤（例如「大安區台北市...」），自動對調為「台北市大安區...」。
+    if not re.search(r"[區鄉鎮]", address):
+        _fallback_district = _lookup_district_via_geocode(address)
+    else:
+        _fallback_district = ""
+    address = _fix_address_district_order(address, fallback_district=_fallback_district)
     payway = str(customer["payway"]).strip()
     clean_type_id = str(customer["clean_type_id"]).strip()
     date_s = str(customer["date_s"]).strip()
@@ -3116,16 +3234,25 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
             f"請至後台訂單管理確認電話 {phone} 是否已有新訂單，若有請直接使用該訂單號碼。"
         )
 
+    # v8.6：補齊 build_line_message 需要的欄位（date/period/region/fare/service_amount/
+    # actual_period），避免呼叫端組 LINE 訊息時因缺少欄位而 KeyError 或漏掉地址所屬區域。
+    _region_computed = get_region_by_address(address, ACCOUNTS) or "台北"
     return {
         "order_no": order_no,
         "member_id": member_id,
         "address": address,
         "date_s": date_s,
+        "date": date_s,
         "period_s": period_s,
+        "period": period_s,
+        "actual_period": actual_time,
         "hour": hour,
         "person": person,
         "price_with_tax": price_with_tax,
+        "service_amount": price_with_tax,
+        "fare": "0",
         "payway": payway,
+        "region": _region_computed,
         "day_type": day_type,
         "session": session,
     }
