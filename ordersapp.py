@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.4
+# 版本：v8.5
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-06-29
+# 最後更新：2026-07-03
 #
 # Change Log
+# v8.5
+# - 舊客快速建單：付款方式選單改為永遠顯示（信用卡／ATM／儲值金），
+#   預設值帶上次付款紀錄，但客服可隨時切換，不再被歷史紀錄鎖死。
+# - 建單介面 caption 加上送單網址顯示，方便確認 /booking/single 或
+#   /booking/stored_value_routine 是否選對。
 # v8.4
 # - 訂單轉換改為一對多：可設定多筆新訂單（日期/時段/人數各自選）。
 #   每筆新單各建一張折價券（面額=該筆含稅金額）。
@@ -20,7 +25,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.4"
+__version__ = "8.5"
 
 import html
 import requests
@@ -71,7 +76,7 @@ _REQUIRED_QUICK_ORDER_NAMES = [
 _missing_quick_order_names = [name for name in _REQUIRED_QUICK_ORDER_NAMES if not hasattr(qo, name)]
 if _missing_quick_order_names:
     st.error(
-        "quick_order.py 版本不完整，請用 v8.4 覆蓋 GitHub 上的 quick_order.py。"
+        "quick_order.py 版本不完整，請用 v8.5 覆蓋 GitHub 上的 quick_order.py。"
         + "\n缺少："
         + "、".join(_missing_quick_order_names)
     )
@@ -655,9 +660,18 @@ else:
                     default_clean_type = last_summary["clean_type"] if last_summary and last_summary.get("clean_type") in CLEAN_TYPE_ID_MAP else "居家清潔"
                     default_person = int(last_summary["person"]) if last_summary and str(last_summary.get("person", "")).isdigit() else 2
                     q_clean_type_confirm = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), index=list(CLEAN_TYPE_ID_MAP.keys()).index(default_clean_type), key="old_clean_confirm")
-                    q_payway = last_summary.get("payway") if last_summary and last_summary.get("payway") else st.selectbox("付款方式", ["信用卡", "ATM", "儲值金"], key="old_payway")
+                    # v8.5：付款方式選單永遠顯示，預設帶上次紀錄，客服可隨時切換
+                    _payway_options = ["信用卡", "ATM", "儲值金"]
+                    _default_payway = last_summary.get("payway") if last_summary and last_summary.get("payway") in _payway_options else "信用卡"
+                    q_payway = st.selectbox(
+                        "付款方式",
+                        _payway_options,
+                        index=_payway_options.index(_default_payway),
+                        key="old_payway",
+                    )
                     q_region = get_region_by_address(q_address, ACCOUNTS) or "台北"
-                    st.caption(f"建單介面：{booking_route_display(q_payway)[0]}　｜　區域：{q_region}")
+                    _route_label, _route_url = booking_route_display(q_payway)
+                    st.caption(f"建單介面：{_route_label}　｜　送單網址：{_route_url}　｜　區域：{q_region}")
                     if last_summary:
                         st.markdown(last_summary_card_html(last_summary), unsafe_allow_html=True)
                     upcoming_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options, today_value=date.today())
