@@ -1,9 +1,17 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.4
-# 最後更新：2026-06-29
+# 版本：v8.5
+# 最後更新：2026-07-03
 #
 # Change Log
+# v8.5
+# - 新增 _fetch_csrf_from_url：儲值金訂單地址檢查（check_contain）失敗時，
+#   改向 /booking/single 借一個可靠的 CSRF token 重試，不影響 orders.BOOKING_URL。
+# - _build_booking_submit_data：儲值金訂單不再帶 payway/invoice_type/carrier_type_id/
+#   carrier_info/company_title/company_no/donate_code 等付款與發票欄位。
+# - quick_create_order：新增 _booking_balance_error，偵測後台回傳的儲值金餘額不足
+#   JSON（stored_value_balance 存在且 count=0），直接明確告知餘額不足與目前餘額，
+#   不再顯示模糊的「count>0 但查無新單」錯誤。
 # v8.4
 # - 新增 _assign_mixed_cleaners_to_order：配班優先用排班頁現有一般專員，不足再補檸檬人。
 # - 新增 convert_order_multi：一張原單A → 多筆新單B1/B2/B3，每筆各建一張折價券。
@@ -18,7 +26,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.4"
+__version__ = "8.5"
 
 import time
 import re
@@ -192,13 +200,27 @@ def _get_booking_token_for_payway(session, base_url, payway):
     return get_csrf_token(session)
 
 
+def _fetch_csrf_from_url(session, url):
+    """從指定頁面抓 CSRF token，不影響 orders.BOOKING_URL 等全域設定。
+    v8.5：用於儲值金訂單 check_contain 失敗時，向 /booking/single 借一個可靠的 token。"""
+    resp = session.get(url, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return ""
+    m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
+    return m.group(1) if m else ""
+
+
 def _build_booking_submit_data(base_data, token, payway, slot):
     data = {**base_data, "_token": token}
     if payway in ("信用卡", "ATM"):
         data["date_s"] = ""
         data["datePeriod"] = slot
     else:
+        # 儲值金訂單：不需要付款方式/發票相關欄位
         data["date_list[]"] = [slot]
+        for _k in ("payway", "invoice_type", "carrier_type_id", "carrier_info",
+                   "company_title", "company_no", "donate_code"):
+            data.pop(_k, None)
     return data
 
 
@@ -695,6 +717,14 @@ def quick_check_available_slots(env_name, payway, lookup_result, address, clean_
     addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), token, clean_type_id)
     if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
         addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), lookup_result["token"], clean_type_id)
+    if not addr_check and payway == "儲值金":
+        # v8.5：stored_value_routine 頁面的 token 有時無法用於 check_contain，
+        # 改向 /booking/single 借一個可靠的 token 重試
+        _fallback_token = _fetch_csrf_from_url(session, f"{base_url}/booking/single")
+        if _fallback_token and _fallback_token != token and _fallback_token != lookup_result.get("token"):
+            addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), _fallback_token, clean_type_id)
+            if addr_check:
+                token = _fallback_token
     if not addr_check:
         raise Exception(f"查詢地址/地區失敗：{selected_address}")
     area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
@@ -788,6 +818,14 @@ def quick_create_order(
     addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), token, clean_type_id)
     if not addr_check and lookup_result.get("token") and lookup_result.get("token") != token:
         addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), lookup_result["token"], clean_type_id)
+    if not addr_check and payway == "儲值金":
+        # v8.5：stored_value_routine 頁面的 token 有時無法用於 check_contain，
+        # 改向 /booking/single 借一個可靠的 token 重試
+        _fallback_token = _fetch_csrf_from_url(session, f"{base_url}/booking/single")
+        if _fallback_token and _fallback_token != token and _fallback_token != lookup_result.get("token"):
+            addr_check = check_contain(session, member.get("member_id", ""), selected_address, best_addr.get("lat", ""), best_addr.get("lng", ""), _fallback_token, clean_type_id)
+            if addr_check:
+                token = _fallback_token
     if not addr_check:
         route = BOOKING_ENDPOINT_MAP.get(payway, "/booking/single")
         raise Exception(f"查詢地址/地區失敗（{payway}：{route}）：{selected_address}")
@@ -916,6 +954,17 @@ def quick_create_order(
         except Exception:
             return False
 
+    def _booking_balance_error(resp):
+        """v8.5：儲值金訂單若餘額不足，後台會回 JSON 帶 stored_value_balance 且 count=0。
+        找到就回傳餘額數字，否則回傳 None（代表不是餘額不足的情況）。"""
+        try:
+            payload = resp.json()
+        except Exception:
+            return None
+        if isinstance(payload, dict) and payload.get("stored_value_balance") is not None and int(payload.get("count", 1)) == 0:
+            return payload.get("stored_value_balance", 0)
+        return None
+
     def _find_matching_order_after_submit():
         blocks = _fetch_purchase_blocks_for_phone(session, phone, name=member_name)
         target_addr_norm = normalize_addr_for_match(selected_address)
@@ -947,6 +996,9 @@ def quick_create_order(
         return matched[0] if matched else None
 
     if not new_order_nos:
+        _balance_err = _booking_balance_error(booking_resp) if payway == "儲值金" else None
+        if _balance_err is not None:
+            raise Exception(f"儲值金餘額不足（目前餘額：{_balance_err} 元），無法建立此訂單，請改用信用卡或ATM付款方式。")
         order_no = _find_matching_order_after_submit() if _booking_count_success(booking_resp) else None
         if not order_no:
             debug_snippet = booking_resp.text[:300].replace("\n", " ").strip()
