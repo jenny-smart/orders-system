@@ -3008,9 +3008,13 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     # 確保 POST 的 address 是 user 提供的原始地址，不被 geocode 結果覆蓋
     post_data["address"] = address
 
-    # 依付款方式選 endpoint
+    # 依付款方式選 endpoint 和欄位
     if payway_code == "4":  # 儲值金
         booking_endpoint = f"{base_url}/booking/stored_value_routine"
+        # 儲值金不帶付款/發票欄位
+        for _k in ["payway", "invoice_type", "donate_code", "carrier_type_id",
+                   "carrier_info", "company_title", "company_no"]:
+            post_data.pop(_k, None)
     else:  # 信用卡=1, ATM=2
         booking_endpoint = f"{base_url}/booking/single"
 
@@ -3022,23 +3026,42 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         allow_redirects=True,
     )
 
-    # 從重定向後的頁面取訂單編號
+    # 建單後統一從回應和 /purchase 列表取訂單號
     order_no = ""
-    order_no_m = re.search(r"(TT\d{8}|LC\d{9})", resp.url + resp.text)
+
+    # 先試從回應內容取（HTML redirect 含訂單號）
+    order_no_m = re.search(r"(TT\d{8}|LC\d{9})", resp.url + resp.text[:5000])
     if order_no_m:
         order_no = order_no_m.group(1)
 
+    # 若回應是 JSON（儲值金流程：{"count":1} 或餘額不足）
     if not order_no:
-        # 從 /purchase 撈最新訂單（依電話/姓名過濾，取最新一筆）
-        time.sleep(2)  # 等後台建完單
+        try:
+            _resp_json = resp.json()
+            if isinstance(_resp_json, dict):
+                # 餘額不足
+                if _resp_json.get("stored_value_balance") is not None and _resp_json.get("count", 1) == 0:
+                    balance = _resp_json.get("stored_value_balance", 0)
+                    raise Exception(f"儲值金餘額不足（目前餘額：{balance} 元），無法建單")
+                # 建單成功（count > 0）
+                if _resp_json.get("count", 0) > 0:
+                    pass  # 繼續往下從 /purchase 撈
+        except Exception as _je:
+            if "儲值金餘額不足" in str(_je):
+                raise
+
+    # 等後台完成，再從訂單列表撈最新訂單
+    if not order_no:
+        time.sleep(3)
         blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
+        # 取最新一筆（blocks 已依時間倒序）
         if blocks:
             order_no = blocks[0].get("order_no", "")
 
     if not order_no:
         raise Exception(
-            f"建單後無法取得訂單編號，HTTP {resp.status_code}，URL: {resp.url}\n"
-            f"請至後台確認是否已建立訂單（電話：{phone}），若已建立請直接使用該訂單號碼。"
+            f"建單後無法取得訂單編號（HTTP {resp.status_code}）\n"
+            f"請至後台訂單管理確認電話 {phone} 是否已有新訂單，若有請直接使用該訂單號碼。"
         )
 
     return {
