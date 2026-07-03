@@ -1,10 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.9
+# 版本：v8.10
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.10
+# - 「新客資料拆解」流程的 LINE 訊息旁補上「複製 N-J Memo」區塊，
+#   與「舊客快速建單」版面一致（原本只有舊單有，新單沒有）。
 # v8.9
 # - 新客建單結果加上「地址比對警示」：若後台實際地址與送出地址不同（例如後台自動
 #   判斷區域時加了不正確的市/區前綴），會直接顯示警示文字並附上後台實際地址，
@@ -49,7 +52,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.9"
+__version__ = "8.10"
 
 import html
 import requests
@@ -980,8 +983,13 @@ else:
             else:
                 st.success("✅ 確認信已發送")
             if _r.get("line_message"):
-                st.text_area("LINE 訊息", _r["line_message"], height=320, key="nc_line_out")
-                copy_button("複製 LINE 訊息", _r["line_message"], "copy_nc_line_d")
+                col_nc_msg, col_nc_memo = st.columns([3, 1])
+                with col_nc_msg:
+                    st.text_area("LINE 訊息", _r["line_message"], height=320, label_visibility="collapsed", key="nc_line_out")
+                    copy_button("複製 LINE 訊息", _r["line_message"], "copy_nc_line_d")
+                with col_nc_memo:
+                    st.text_area("N-J Memo", NJ_MEMO, height=200, label_visibility="collapsed", key="nj_memo_nc_result")
+                    copy_button("複製 N-J Memo", NJ_MEMO, "copy-nj-memo-nc-result")
 
 
     elif single_feature == "訂單轉換":
