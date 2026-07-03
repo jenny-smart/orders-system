@@ -1,10 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.10
+# 版本：v8.12
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.12
+# - 「新客資料拆解」貼上文字後即時顯示拆解預覽（姓名/電話/地址）；若判斷不出付款
+#   方式，直接顯示手動選擇的下拉選單，未選擇前擋下「建立新客訂單」按鈕，
+#   不再默默預設成信用卡（配合 quick_order v8.12 的 need_ask_payway）。
 # v8.10
 # - 「新客資料拆解」流程的 LINE 訊息旁補上「複製 N-J Memo」區塊，
 #   與「舊客快速建單」版面一致（原本只有舊單有，新單沒有）。
@@ -52,7 +56,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.10"
+__version__ = "8.12"
 
 import html
 import requests
@@ -809,6 +813,30 @@ else:
             placeholder="訂購人姓名：XXX\n訂購人電話：09XXXXXXXX\n訂購人Email：xxx@xxx.com\n服務地址：台北市...\n室內坪數：約25坪\n付款方式：信用卡\n發票載具：手機載具 /XXXXXXX",
         )
 
+        # v8.12：不管有沒有「訂購人姓名：」等標籤都要能辨識欄位，貼上後即時拆解預覽。
+        # 付款方式若判斷不出來，不可默默預設，直接請客服在這裡手動選擇。
+        _nc_live_parsed = {}
+        if nc_raw.strip():
+            try:
+                _nc_live_parsed = qo.parse_new_customer_text(nc_raw)
+            except Exception:
+                _nc_live_parsed = {}
+        if _nc_live_parsed:
+            _preview_bits = []
+            if _nc_live_parsed.get("name"):
+                _preview_bits.append(f"姓名：{_nc_live_parsed['name']}")
+            if _nc_live_parsed.get("phone"):
+                _preview_bits.append(f"電話：{_nc_live_parsed['phone']}")
+            if _nc_live_parsed.get("address"):
+                _preview_bits.append(f"地址：{_nc_live_parsed['address']}")
+            if _preview_bits:
+                st.caption("已辨識　" + "　".join(_preview_bits))
+            if _nc_live_parsed.get("need_ask_payway"):
+                st.warning("⚠️ 無法從貼上的資料中判斷付款方式，請手動選擇：")
+                st.selectbox("付款方式（手動選擇）", ["信用卡", "ATM"], key="nc_payway_manual_select")
+            elif _nc_live_parsed.get("payway"):
+                st.caption(f"✅ 已偵測付款方式：{_nc_live_parsed['payway']}")
+
         step("2", "服務設定")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -902,13 +930,17 @@ else:
                 _nc_email = _parsed.get("email", "")
                 _nc_address = _parsed.get("address", "")
                 _nc_ping = _parsed.get("ping", "4")
-                _nc_payway = _parsed.get("payway", "信用卡")
+                # v8.12：付款方式偵測不到時，改用上方手動選擇的值；兩者皆無則擋下建單，
+                # 不可默默預設成信用卡。
+                _nc_payway = _parsed.get("payway", "") or st.session_state.get("nc_payway_manual_select", "")
                 _nc_carrier = _parsed.get("carrier", "")
                 _nc_company_title = _parsed.get("company_title", "")
                 _nc_company_no = _parsed.get("company_no", "")
 
                 _missing = [k for k, v in [("姓名", _nc_name), ("電話", _nc_phone), ("Email", _nc_email), ("地址", _nc_address)] if not v.strip()]
-                if _missing:
+                if not _nc_payway:
+                    st.error("無法判斷付款方式，請於上方「付款方式（手動選擇）」選單選擇信用卡或ATM後再建單。")
+                elif _missing:
                     st.error(f"資料拆解失敗，請確認以下欄位：{'、'.join(_missing)}\n\n拆解結果：{_parsed}")
                 else:
                     try:
