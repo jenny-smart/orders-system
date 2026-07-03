@@ -1081,6 +1081,269 @@ def slot_exists_in_section_response(raw_text, date_slot):
 
 
 # =========================
+# 檸檬人勾班工具函式（v2026-07：與 quick_order.py 保持一致邏輯，供批次流程共用）
+# =========================
+VALUE_TO_SHIFT_CODE = {
+    "6": "全6", "8": "全8",
+    "0830-1230": "上4", "0900-1200": "上3", "0900-1100": "上2",
+    "1400-1600": "下2", "1400-1700": "下3", "1400-1800": "下4",
+    "1900-2100": "晚2",
+}
+SHIFT_CONFLICT_TABLE = {
+    "全6": {"上3", "上4", "上2", "全6", "全8"},
+    "全8": {"上3", "上4", "上2", "下2", "下3", "下4", "全6", "全8"},
+    "上3": {"上3", "上4", "上2", "全6", "全8"},
+    "上4": {"上3", "上4", "上2", "全6", "全8"},
+    "上2": {"上3", "上4", "上2", "全6", "全8"},
+    "下3": {"下2", "下3", "下4", "全6", "全8"},
+    "下4": {"下2", "下3", "下4", "全6", "全8"},
+    "下2": {"下2", "下3", "下4", "全6", "全8"},
+}
+PERIOD_TO_SHIFT_CODE = {
+    "09:00-12:00": "上3", "08:30-12:30": "上4", "09:00-11:00": "上2",
+    "14:00-16:00": "下2", "14:00-17:00": "下3", "14:00-18:00": "下4",
+    "09:00-16:00": "全6", "09:00-18:00": "全8",
+}
+
+
+def _period_to_shift_code(period_s):
+    compact = str(period_s or "").replace(" ", "")
+    return PERIOD_TO_SHIFT_CODE.get(compact, "")
+
+
+def _shift_value_to_code(value):
+    value = str(value or "").strip()
+    return VALUE_TO_SHIFT_CODE.get(value, value)
+
+
+def _shift_code_to_value(code):
+    code = str(code or "").strip()
+    for value, mapped in VALUE_TO_SHIFT_CODE.items():
+        if mapped == code:
+            return value
+    return code
+
+
+def _shift_code_to_group(code):
+    code = str(code or "").strip()
+    if code in {"全6", "全8"}:
+        return "all"
+    if code in {"上2", "上3", "上4"}:
+        return "1"
+    if code in {"下2", "下3", "下4"}:
+        return "2"
+    if code in {"晚2"}:
+        return "3"
+    return "1"
+
+
+def _shift_codes_conflict(existing_code, target_code):
+    existing_code = _shift_value_to_code(existing_code)
+    target_code = _shift_value_to_code(target_code)
+    if not existing_code or not target_code:
+        return False
+    if existing_code == target_code:
+        return False
+    if existing_code in {"全6", "全8"} or target_code in {"全6", "全8"}:
+        return True
+    return target_code in SHIFT_CONFLICT_TABLE.get(existing_code, set())
+
+
+def _parse_cleaner_shift_page(html_text, date_str=None):
+    token_m = re.search(r'name=["\']_token["\'][^>]*value=["\']([^"\']+)["\']', html_text or "")
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf:
+        meta_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html_text or "")
+        csrf = meta_m.group(1) if meta_m else ""
+    checked_fields = []
+    checked_codes_on_date = set()
+    for m in re.finditer(r'<input\b[^>]*\bchecked\b[^>]*>', html_text or "", re.I):
+        tag = m.group(0)
+        name_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.I)
+        value_m = re.search(r'\bvalue=["\']?([^"\'\s>]+)', tag, re.I)
+        date_m = re.search(r'\bdate=["\']([^"\']+)["\']', tag, re.I)
+        if not name_m or not value_m:
+            continue
+        name = name_m.group(1)
+        value = value_m.group(1)
+        checked_fields.append((name, value))
+        d = date_m.group(1) if date_m else ""
+        if date_str and d == date_str:
+            checked_codes_on_date.add(_shift_value_to_code(value))
+    return csrf, checked_fields, checked_codes_on_date
+
+
+def _get_cleaner_shift_form_info(session, base_url, cleaner_id, date_str):
+    ym = str(date_str)[:7]
+    resp = session.get(f"{base_url}/cleaner1/{cleaner_id}/shift", params={"month": ym}, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return "", [], set(), f"HTTP {resp.status_code}"
+    csrf, checked_fields, checked_codes = _parse_cleaner_shift_page(resp.text, date_str)
+    return csrf, checked_fields, checked_codes, ""
+
+
+def _search_lemon_cleaners(session, base_url, target_month=None, min_needed=0):
+    entries = []
+    seen_ids = set()
+    seen_names = set()
+    target_month = str(target_month or datetime.today().strftime("%Y-%m"))[:7]
+    min_needed = int(min_needed or 0)
+
+    def lemon_sort_key(item):
+        m = re.search(r"檸檬人\s*(\d+)", item[1])
+        return int(m.group(1)) if m else 9999
+
+    def add_entry(cid, name):
+        cid = str(cid or "").strip()
+        name = re.sub(r"\s+", "", str(name or "").strip())
+        m = re.search(r"檸檬人\d+", name)
+        if m:
+            name = m.group(0)
+        if not cid or cid in seen_ids or "檸檬人" not in name:
+            return
+        if name in seen_names:
+            return
+        seen_ids.add(cid)
+        seen_names.add(name)
+        entries.append((cid, name))
+
+    candidate_ids = []
+
+    def add_candidate(cid):
+        cid = str(cid or "").strip()
+        if cid.isdigit() and cid not in candidate_ids:
+            candidate_ids.append(cid)
+
+    try:
+        resp = session.get(f"{base_url}/cleaner1", params={"area_id": "", "keyword": "檸檬"}, headers=HEADERS, allow_redirects=True)
+    except Exception:
+        resp = None
+
+    if resp is not None and resp.status_code == 200:
+        page_html = resp.text or ""
+        row_blocks = re.split(r"<tr\b", page_html, flags=re.I)
+        for row in row_blocks:
+            if "檸檬人" not in row:
+                continue
+            name_m = re.search(r"檸檬人\d+", row)
+            ids = re.findall(r"/cleaner1/(\d+)(?=[/'\"?#])", row, re.I)
+            ids += re.findall(r"cleaner[_-]?id[=:'\" ]+(\d+)", row, re.I)
+            for cid in ids:
+                add_candidate(cid)
+                if name_m:
+                    add_entry(cid, name_m.group(0))
+        for m in re.finditer(r"/cleaner1/(\d+)(?=[/'\"?#])", page_html, re.I):
+            cid = m.group(1)
+            ctx = page_html[max(0, m.start() - 1000): m.end() + 1000]
+            name_m = re.search(r"檸檬人\d+", ctx)
+            add_candidate(cid)
+            if name_m:
+                add_entry(cid, name_m.group(0))
+
+    entries.sort(key=lemon_sort_key)
+    if min_needed and len(entries) >= min_needed:
+        return entries
+
+    for cid in list(range(1, 501)):
+        add_candidate(cid)
+
+    for cid in candidate_ids:
+        if str(cid) in seen_ids:
+            continue
+        try:
+            r = session.get(f"{base_url}/cleaner1/{cid}/shift", params={"month": target_month}, headers=HEADERS, allow_redirects=True)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        txt = r.text or ""
+        name_m = re.search(r"專員\s*[：:]\s*(?:<[^>]+>\s*)*(檸檬人\d+)", txt)
+        if not name_m:
+            name_m = re.search(r"<label>\s*(檸檬人\d+)\s*</label>", txt)
+        if name_m:
+            add_entry(cid, name_m.group(1))
+            entries.sort(key=lemon_sort_key)
+            if min_needed and len(entries) >= min_needed:
+                break
+
+    entries.sort(key=lemon_sort_key)
+    return entries
+
+
+def _set_cleaner_shift_if_available(session, base_url, cleaner_id, cleaner_name, date_str, target_shift_code):
+    csrf, checked_fields, checked_codes, err = _get_cleaner_shift_form_info(session, base_url, cleaner_id, date_str)
+    if err:
+        return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": err, "checked": sorted(checked_codes)}
+    target_shift_code = _shift_value_to_code(target_shift_code)
+    conflicts = sorted(c for c in checked_codes if _shift_codes_conflict(c, target_shift_code))
+    if conflicts:
+        return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": f"{date_str} 已勾 {'、'.join(conflicts)}，與 {target_shift_code} 衝突", "checked": sorted(checked_codes)}
+    if target_shift_code in checked_codes:
+        return {"success": False, "name": cleaner_name, "id": cleaner_id, "reason": f"{date_str} {target_shift_code} 已勾班（可能已有其他訂單使用），換下一位", "checked": sorted(checked_codes), "already_checked": True}
+    target_name = f"shift_{date_str}_{_shift_code_to_group(target_shift_code)}"
+    target_value = _shift_code_to_value(target_shift_code)
+    fields = []
+    if csrf:
+        fields.append(("_token", csrf))
+    seen = set()
+    for name, value in checked_fields:
+        key = (name, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        fields.append((name, value))
+    if (target_name, target_value) not in seen:
+        fields.append((target_name, target_value))
+    resp = session.post(f"{base_url}/cleaner1/{cleaner_id}/shift", params={"month": str(date_str)[:7]}, data=fields, headers=HEADERS, allow_redirects=True)
+    ok = resp.status_code in (200, 302)
+    return {
+        "success": ok, "name": cleaner_name, "id": cleaner_id,
+        "message": f"{cleaner_name} 已補勾 {date_str} {target_shift_code}" if ok else f"POST 失敗：HTTP {resp.status_code}",
+        "checked": sorted(checked_codes), "target": target_shift_code,
+    }
+
+
+def ensure_lemon_cleaner_shifts(session, base_url, service_date, period_s, person_count):
+    """
+    v2026-07：查無班表時補勾檸檬人排班。與 quick_order.py 的同名函式邏輯一致，
+    供批次（Google Sheet）流程共用，確保五個成單功能行為一致。
+    呼叫端必須自行決定是否要在「查無班表」時呼叫本函式（由
+    allow_auto_lemon_shift 參數控制），本函式本身不做開關判斷。
+    """
+    target_shift_code = _period_to_shift_code(period_s)
+    if not target_shift_code:
+        return {"success": False, "message": f"無法判斷服務時段 {period_s} 對應班別", "assigned": [], "skipped": []}
+    cleaners = _search_lemon_cleaners(session, base_url, target_month=str(service_date)[:7], min_needed=int(person_count))
+    if not cleaners:
+        return {"success": False, "message": "找不到檸檬人清單", "assigned": [], "skipped": []}
+    need = int(person_count)
+    assigned = []
+    assigned_ids = []
+    skipped = []
+    seen_candidate_names = set()
+    seen_candidate_ids = set()
+    for cleaner_id, cleaner_name in cleaners:
+        if str(cleaner_id) in seen_candidate_ids or str(cleaner_name) in seen_candidate_names:
+            continue
+        seen_candidate_ids.add(str(cleaner_id))
+        seen_candidate_names.add(str(cleaner_name))
+        if len(assigned) >= need:
+            break
+        result = _set_cleaner_shift_if_available(session, base_url, cleaner_id, cleaner_name, service_date, target_shift_code)
+        if result.get("success"):
+            assigned.append(cleaner_name)
+            assigned_ids.append(str(cleaner_id))
+        else:
+            skipped.append(result)
+    ok = len(assigned) >= need
+    return {
+        "success": ok,
+        "message": f"已預先補勾檸檬人：{'、'.join(assigned)}" if ok else f"可用檸檬人不足：需要 {need} 位，找到 {len(assigned)} 位",
+        "assigned": assigned, "assigned_ids": assigned_ids, "skipped": skipped, "target_shift_code": target_shift_code,
+    }
+
+
+# =========================
 # Purchase 頁解析
 # =========================
 def extract_order_cards_from_purchase_html(html):
@@ -1105,17 +1368,40 @@ def extract_order_cards_from_purchase_html(html):
     return blocks
 
 
-def match_order_from_purchase_page(html, target_date, target_period):
+def match_order_from_purchase_page(html, target_date, target_period, phone="", exclude_order_nos=None):
+    """
+    v2026-07：比對日期＋時段，且若有提供 phone 則同時比對電話，避免只用
+    日期+時段配對到別人的訂單（這是造成同一個訂單編號被誤寫進兩列
+    Google Sheet「M欄重複」的根因——原本完全沒有比對電話）。
+    exclude_order_nos 可排除本次批次已經用掉的訂單編號，進一步降低誤配對機率。
+    """
+    exclude_order_nos = exclude_order_nos or set()
+    target_phone_norm = normalize_phone(phone) if phone else ""
+    fallback_candidate = None
     for block in extract_order_cards_from_purchase_html(html):
+        order_no_candidate = block.get("order_no")
+        if not order_no_candidate or order_no_candidate in exclude_order_nos:
+            continue
         joined = "\n".join(block["lines"])
-        if target_date in joined and target_period in joined:
-            return block["order_no"]
-    return None
+        if target_date not in joined or target_period not in joined:
+            continue
+        if not target_phone_norm:
+            return order_no_candidate
+        joined_compact = re.sub(r"[-\s]", "", joined)
+        if target_phone_norm in joined_compact:
+            return order_no_candidate
+        if fallback_candidate is None:
+            fallback_candidate = order_no_candidate
+    # 找不到電話完全相符的訂單時，退回原本「只比對日期+時段」的第一筆結果，
+    # 並由呼叫端的一致性檢查（verify_batch_order_consistency）事後抓出異常。
+    return fallback_candidate
 
 
-def fetch_order_no_by_date_and_period(session, target_date, target_period):
+def fetch_order_no_by_date_and_period(session, target_date, target_period, phone="", exclude_order_nos=None):
     resp = session.get(PURCHASE_URL, headers=HEADERS, allow_redirects=True)
-    return None if resp.status_code != 200 else match_order_from_purchase_page(resp.text, target_date, target_period)
+    if resp.status_code != 200:
+        return None
+    return match_order_from_purchase_page(resp.text, target_date, target_period, phone=phone, exclude_order_nos=exclude_order_nos)
 
 
 def _extract_staff_line(lines):
@@ -1228,6 +1514,100 @@ def fetch_order_meta_by_order_no(session, order_no):
         "服務日期": "",
         "服務時間": "",
     }
+
+
+def verify_batch_order_consistency(session, df, all_row_results):
+    """
+    v2026-07：批次執行完後，逐列比對 Google Sheet 上「電話、日期、時段」是否跟
+    寫回的訂單編號實際對應的後台訂單一致，抓出：
+    1. 同一個訂單編號被寫進超過一列（M欄重複）。
+    2. 訂單編號在後台查無資料。
+    3. 訂單編號查得到，但電話/日期/時段跟這一列 Google Sheet 的資料對不上
+       （代表訂單編號很可能誤配對到別人的訂單，這一列實際上沒有真的成單）。
+    回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
+    查詢過程中任何單筆錯誤都不中斷整體檢查，只會跳過該筆。
+    """
+    problems = []
+    row_lookup = {}
+    for _, row in df.iterrows():
+        try:
+            row_lookup[int(row["__sheet_row__"])] = row
+        except Exception:
+            continue
+
+    seen_order_nos = {}
+
+    for row_num, result in all_row_results.items():
+        order_no = str(result.get("訂單編號", "") or "").strip()
+        if not order_no:
+            continue
+
+        row_num_int = int(row_num)
+        row = row_lookup.get(row_num_int)
+
+        # 同一個訂單編號被寫進超過一列 → 直接標記重複（這是「M欄重複」最直接的證據）
+        if order_no in seen_order_nos:
+            problems.append({
+                "row_num": row_num_int,
+                "order_no": order_no,
+                "issue": f"訂單編號 {order_no} 與第 {seen_order_nos[order_no]} 列重複，這兩列很可能只有一列真的成單，另一列請重新確認。",
+            })
+        else:
+            seen_order_nos[order_no] = row_num_int
+
+        if row is None:
+            continue
+
+        try:
+            phone = normalize_phone(row.get("電話", ""))
+            date_s = get_date_str(row["日期"])
+            period_s = normalize_sheet_period(row["開始時間"], row["結束時間"])
+            display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
+        except Exception:
+            continue
+
+        try:
+            resp = session.get(PURCHASE_URL, params={"orderNo": order_no}, headers=HEADERS, allow_redirects=True)
+        except Exception:
+            continue
+        if resp.status_code != 200:
+            continue
+
+        actual_block = None
+        for block in extract_order_cards_from_purchase_html(resp.text):
+            if block.get("order_no") == order_no:
+                actual_block = block
+                break
+
+        if not actual_block:
+            problems.append({
+                "row_num": row_num_int,
+                "order_no": order_no,
+                "issue": f"訂單編號 {order_no} 在後台查無資料，第 {row_num_int} 列很可能其實沒有真的成單。",
+            })
+            continue
+
+        joined = "\n".join(actual_block.get("lines", []))
+        joined_compact = re.sub(r"[-\s]", "", joined)
+        phone_match = (not phone) or (phone in joined_compact)
+        date_match = date_s in joined
+        period_match = (
+            display_period.replace(" ", "") in joined.replace(" ", "")
+            or period_s.replace(" ", "") in joined.replace(" ", "")
+        )
+
+        if not (phone_match and date_match and period_match):
+            problems.append({
+                "row_num": row_num_int,
+                "order_no": order_no,
+                "issue": (
+                    f"訂單 {order_no} 實際內容跟 Google Sheet 第 {row_num_int} 列不符"
+                    f"（電話符合：{phone_match}，日期符合：{date_match}，時段符合：{period_match}），"
+                    f"很可能是訂單編號誤配對到別人的訂單，此列可能其實沒有真的成單，請人工確認。"
+                ),
+            })
+
+    return problems
 
 
 def send_confirmation_mail(session, order_no):
@@ -1601,7 +1981,7 @@ def process_existing_order_only(row, gcal_service, region, session, selected_act
     return result
 
 
-def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None):
+def process_one_group(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None):
     _, row0 = rows_with_idx[0]
 
     purchase_item = str(row0["購買項目"]).strip()
@@ -1903,6 +2283,25 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         raw = get_section_raw(session, detail["payload"], token, detail["slot"])
         slot_ok = slot_exists_in_section_response(raw, detail["slot"])
         cleaners = extract_cleaners_from_section_response(raw, detail["slot"])
+
+        # v2026-07：查無班表時，若客服有勾選「查無班表時自動補檸檬人排班」
+        # （allow_auto_lemon_shift），才嘗試補勾檸檬人班表後重查一次；
+        # 未勾選則維持原行為，直接標記為「無班表」。與舊客/新客/訂單轉換/
+        # 儲值金補價差四個成單功能的行為保持一致。
+        if not slot_ok and allow_auto_lemon_shift:
+            try:
+                ensure_lemon_cleaner_shifts(
+                    session=session, base_url=BASE_URL,
+                    service_date=detail["date"], period_s=system_period,
+                    person_count=str(people),
+                )
+                time.sleep(2)
+                raw = get_section_raw(session, detail["payload"], token, detail["slot"])
+                slot_ok = slot_exists_in_section_response(raw, detail["slot"])
+                cleaners = extract_cleaners_from_section_response(raw, detail["slot"])
+            except Exception as _e_lemon:
+                print(f"[DEBUG] 自動補檸檬人排班失敗：{_e_lemon}")
+
         detail["section_cleaners"] = cleaners
         detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
 
@@ -1985,6 +2384,11 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
     if not send_details:
         return row_results
 
+    # v2026-07：追蹤「本次呼叫」已配對過的訂單編號，避免比對日期+時段+電話時
+    # 誤配對到本次批次自己前面幾筆剛建立、但實際上不同列的訂單。
+    if used_order_nos is None:
+        used_order_nos = set()
+
     # 每筆單獨送出，避免日期互相污染
     for detail in send_details:
         payload = detail["payload"].copy()
@@ -2011,7 +2415,15 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
         time.sleep(1)
 
-        order_no = fetch_order_no_by_date_and_period(session, detail["date"], detail["display_period"])
+        # v2026-07：比對時同時帶入電話 + 已排除本次用過的訂單編號，避免
+        # 只用日期+時段配對到別人的訂單，造成同一個訂單編號被誤寫進兩列
+        # Google Sheet（M欄重複、實際上只有一列真的成單）。
+        order_no = fetch_order_no_by_date_and_period(
+            session, detail["date"], detail["display_period"],
+            phone=phone, exclude_order_nos=used_order_nos,
+        )
+        if order_no:
+            used_order_nos.add(order_no)
         sms_time, customer_note = build_time_fields()
         service_notice = str(payload.get("notice") or "")
 
@@ -2069,7 +2481,7 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 # =========================
 # 主執行
 # =========================
-def run_process(sheet_name, start_row, end_row, env_name_from_ui=None):
+def run_process(sheet_name, start_row, end_row, env_name_from_ui=None, allow_auto_lemon_shift=False):
     print(f"目前環境：{ENV}")
     print(f"BASE_URL：{BASE_URL}")
     print(f"執行工作表：{sheet_name}")
@@ -2143,6 +2555,8 @@ def run_process(sheet_name, start_row, end_row, env_name_from_ui=None):
             print("登入失敗，略過該區域")
             continue
 
+        used_order_nos_this_region = set()
+
         for group_no, (_, rows_with_idx) in enumerate(group_items, start=1):
             _, first_row = rows_with_idx[0]
             print(f"\n--- 處理第 {group_no} 組：{first_row['姓名']}，共 {len(rows_with_idx)} 筆 ---")
@@ -2157,6 +2571,8 @@ def run_process(sheet_name, start_row, end_row, env_name_from_ui=None):
                     region,
                     None,
                     ["建單", "寄確認信", "改 Google 日曆"],
+                    allow_auto_lemon_shift=allow_auto_lemon_shift,
+                    used_order_nos=used_order_nos_this_region,
                 )
                 all_row_results.update(row_results)
             except Exception as e:
@@ -2176,6 +2592,15 @@ def run_process(sheet_name, start_row, end_row, env_name_from_ui=None):
     update_sheet_rows(ws, all_row_results)
     print("已回填 Google Sheet。")
 
+    try:
+        consistency_problems = verify_batch_order_consistency(session, df, all_row_results)
+        if consistency_problems:
+            print(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常")
+            for p in consistency_problems:
+                print(f"  第 {p['row_num']} 列：{p['issue']}")
+    except Exception as e:
+        print(f"訂單一致性檢查失敗：{e}")
+
 
 def get_runtime_config(env_name: str):
     if env_name == "dev":
@@ -2189,7 +2614,7 @@ def get_runtime_config(env_name: str):
     }
 
 
-def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print):
+def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
     global BASE_URL, ORDER_PREFIX
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
@@ -2247,6 +2672,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
             "success": True,
             "message": "沒有符合條件的資料",
             "failed_records": [],
+            "consistency_problems": [],
         }
 
     filtered_rows = [row for _, row in df.iterrows() if get_region_by_address(str(row["地址"]), ACCOUNTS) == region]
@@ -2256,6 +2682,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
             "success": True,
             "message": f"沒有 {region} 區域資料",
             "failed_records": [],
+            "consistency_problems": [],
         }
 
     df = pd.DataFrame(filtered_rows)
@@ -2315,13 +2742,20 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
                 "error": f"補處理失敗: {e}",
             })
 
+    # v2026-07：本次呼叫累計已配對過的訂單編號，避免跨組別誤配對到同一張訂單
+    used_order_nos_this_run = set()
+
     for group_no, (_, rows_with_idx) in enumerate(grouped_orders.items(), start=1):
         _, first_row = rows_with_idx[0]
         logger(f"處理第 {group_no} 組：{first_row['姓名']}，共 {len(rows_with_idx)} 筆")
 
         try:
             token = get_csrf_token(session)
-            row_results = process_one_group(session, rows_with_idx, token, gcal_service, region, None, selected_actions)
+            row_results = process_one_group(
+                session, rows_with_idx, token, gcal_service, region, None, selected_actions,
+                allow_auto_lemon_shift=allow_auto_lemon_shift,
+                used_order_nos=used_order_nos_this_run,
+            )
             all_row_results.update(row_results)
 
             for row_num, row in rows_with_idx:
@@ -2354,6 +2788,21 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
     update_sheet_rows(ws, all_row_results)
     logger("已回填 Google Sheet。")
 
+    # v2026-07：批次全部執行完後，比對 Google Sheet 該列的電話/日期/時段
+    # 是否跟寫回的訂單編號實際對應的後台訂單一致，抓出訂單編號誤配對
+    # （M欄重複、或該列其實沒有真的成單）的情況。
+    consistency_problems = []
+    try:
+        consistency_problems = verify_batch_order_consistency(session, df, all_row_results)
+        if consistency_problems:
+            logger(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常，請人工確認：")
+            for p in consistency_problems:
+                logger(f"  第 {p['row_num']} 列（訂單 {p['order_no']}）：{p['issue']}")
+        else:
+            logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/日期/時段相符。")
+    except Exception as e:
+        logger(f"訂單一致性檢查失敗：{e}")
+
     success_count = sum(1 for v in all_row_results.values() if v.get("結果") == "成功")
     fail_count = sum(1 for v in all_row_results.values() if v.get("結果") == "失敗")
 
@@ -2366,4 +2815,5 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         "fail_count": fail_count,
         "total_processed": len(all_row_results),
         "failed_records": failed_records,
+        "consistency_problems": consistency_problems,
     }
