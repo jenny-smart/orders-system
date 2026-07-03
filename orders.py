@@ -1,3 +1,28 @@
+# ============================================================
+# 檔名：orders.py
+# 版本：v2026.07.04
+# 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
+# 最後更新：2026-07-04
+#
+# Change Log
+# v2026.07.04
+# - 新增檸檬人排班工具函式（VALUE_TO_SHIFT_CODE / ensure_lemon_cleaner_shifts 等，
+#   邏輯與 quick_order.py 一致），process_one_group 新增 allow_auto_lemon_shift
+#   參數（預設 False）：查無班表時，只有客服明確勾選才會自動補檸檬人排班，
+#   不再查不到班表就自動嘗試。run_process_web / run_process 皆已貫穿此參數，
+#   讓「批次」跟「舊客/新客/訂單轉換/儲值金補價差」五個成單功能共用同一套邏輯。
+# - 修正 fetch_order_no_by_date_and_period / match_order_from_purchase_page：
+#   原本只比對「日期＋時段」，未比對電話，導致同一天同時段有多筆不同客人訂單時，
+#   可能誤配對到別人的訂單編號，造成 Google Sheet 訂單編號欄（M欄）重複、
+#   實際上這一列並沒有真的成單。現在改為同時比對電話，並排除本次批次已用過的
+#   訂單編號。
+# - 新增 verify_batch_order_consistency：批次執行完畢、回填 Google Sheet 後，
+#   自動逐列比對「電話、日期、時段」是否跟寫回的訂單編號實際對應的後台訂單一致，
+#   抓出訂單編號誤配對、重複寫入、或該列其實沒有真的成單的情況，結果會透過
+#   run_process_web 回傳的 consistency_problems 提供給 ordersapp.py 顯示。
+# 開發歷史（此版本之前無版本標示紀錄，檔案主體邏輯延續既有「儲值金系統設定」）：
+# - 原始檔案標示：儲值金系統設定.py 版本：2026-05-03-final-staff-notice-aa
+# ============================================================
 # -*- coding: utf-8 -*-
 import os
 import re
