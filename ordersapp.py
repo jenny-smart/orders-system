@@ -1,10 +1,21 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.6
+# 版本：v8.8
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.8
+# - 修正「舊客快速建單」結果區塊（訂單編號/金額/車馬費/確認信 metrics + LINE 訊息）
+#   原本沒有限定分頁，導致切到「新客資料拆解」等其他分頁後，session_state 裡
+#   殘留的舊訂單結果還黏在畫面下方，跟當前分頁剛建立的訂單混在一起顯示
+#   （例如畫面同時出現兩筆不同訂單、不同日期、不同金額，造成混淆）。
+#   現在改為只在「舊客快速建單」分頁才顯示。
+# v8.7
+# - 新客建單結果（舊客快速建單>查無會員 / 新客資料拆解）加上金額比對警示：
+#   若後台實際金額與人時公式（600平日/700週末，不含車馬費）算出的金額不同，
+#   會直接顯示警示文字，方便立即發現金額被後台另行計價覆蓋的情況
+#   （配合 quick_order v8.7 的 price_mismatch_warning）。
 # v8.6
 # - 舊客快速建單：付款方式選單改為「信用卡/ATM」「信用卡」「ATM」「儲值金」四選一。
 #   選「信用卡/ATM」時沿用上次付款紀錄（僅限信用卡或ATM，查無則預設信用卡）；
@@ -32,7 +43,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.6"
+__version__ = "8.8"
 
 import html
 import requests
@@ -943,6 +954,8 @@ else:
         _r = st.session_state.get("nc_result", {})
         if _r.get("order_no"):
             st.success(f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元")
+            if _r.get("price_mismatch_warning"):
+                st.warning(_r["price_mismatch_warning"])
             if not _r.get("mail_sent"):
                 if st.button("📧 發送確認信", key="nc_send_mail_btn", type="primary"):
                     try:
@@ -1281,8 +1294,11 @@ else:
 
     # --------------------------------------------------
     # 舊客快速建單：建單後結果顯示
+    # v8.8：限定只在「舊客快速建單」分頁顯示，避免切到其他分頁後，
+    # session_state 裡殘留的舊訂單結果（q_order_result）還黏在畫面下方，
+    # 跟當前分頁剛建立的訂單（例如「新客資料拆解」的 nc_result）混在一起顯示。
     # --------------------------------------------------
-    order_result = st.session_state.get("q_order_result")
+    order_result = st.session_state.get("q_order_result") if single_feature == "舊客快速建單" else None
     if order_result:
         st.markdown("<hr>", unsafe_allow_html=True)
         step("5", "執行結果")
@@ -1292,6 +1308,8 @@ else:
         c3.metric("車馬費", order_result.get("fare") or "0")
         c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "未發送")
         st.success(f"✅ 訂單建立成功：{order_result['order_no']}")
+        if order_result.get("price_mismatch_warning"):
+            st.warning(order_result["price_mismatch_warning"])
         if not order_result.get("mail_sent"):
             if st.button("📧 發送確認信", key="send_mail_btn", type="primary"):
                 try:
