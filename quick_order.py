@@ -3008,11 +3008,17 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     # 確保 POST 的 address 是 user 提供的原始地址，不被 geocode 結果覆蓋
     post_data["address"] = address
 
+    # 依付款方式選 endpoint
+    if payway_code == "4":  # 儲值金
+        booking_endpoint = f"{base_url}/booking/stored_value_routine"
+    else:  # 信用卡=1, ATM=2
+        booking_endpoint = f"{base_url}/booking/single"
+
     resp = session.post(
-        f"{base_url}/booking/single",
+        booking_endpoint,
         data=post_data,
         headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded",
-                 "Referer": f"{base_url}/booking/single"},
+                 "Referer": booking_endpoint},
         allow_redirects=True,
     )
 
@@ -3023,18 +3029,17 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         order_no = order_no_m.group(1)
 
     if not order_no:
-        # 嘗試從 /purchase 頁取最新訂單
-        purchase_resp = session.get(
-            f"{base_url}/purchase",
-            params={"phone": phone, "orderNo": "", "date_s": "", "date_e": ""},
-            headers=HEADERS,
-        )
+        # 從 /purchase 撈最新訂單（依電話/姓名過濾，取最新一筆）
+        time.sleep(2)  # 等後台建完單
         blocks = _fetch_purchase_blocks_for_phone(session, phone, name=name)
         if blocks:
             order_no = blocks[0].get("order_no", "")
 
     if not order_no:
-        raise Exception(f"建單後無法取得訂單編號，HTTP {resp.status_code}，URL: {resp.url}")
+        raise Exception(
+            f"建單後無法取得訂單編號，HTTP {resp.status_code}，URL: {resp.url}\n"
+            f"請至後台確認是否已建立訂單（電話：{phone}），若已建立請直接使用該訂單號碼。"
+        )
 
     return {
         "order_no": order_no,
