@@ -1,10 +1,28 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.12
+# 版本：v8.14
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-03
+# 最後更新：2026-07-04
 #
 # Change Log
+# v8.14
+# - 批次建單（Google Sheet）補上「查無班表時自動補檸檬人排班」勾選框，預設不勾選，
+#   與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致（配合 orders.py
+#   process_one_group / run_process_web 新增的 allow_auto_lemon_shift 參數）。
+#   　※上次 v8.13 只更新了 quick_order.py，批次建單走的是 orders.py，
+#   　　這次才一併補上，五個成單功能現在才真的共用同一套邏輯。
+# - 批次建單執行完畢後，顯示訂單一致性檢查結果：若 Google Sheet 上寫回的訂單編號
+#   跟該列電話/日期/時段對不上（例如訂單編號重複寫入兩列、或該列其實沒有真的
+#   成單），會直接在畫面上列出異常，不用再自己肉眼比對（配合 orders.py 新增的
+#   verify_batch_order_consistency）。
+# v8.13
+# - 新增訂單編號重複提醒視窗（show_duplicate_order_warning）：建單成功後若偵測到
+#   訂單編號重複（配合 quick_order v8.13 的 order_no_duplicated），會用
+#   st.dialog 跳出提醒視窗（不支援 st.dialog 的 Streamlit 版本則退回醒目的
+#   st.error），涵蓋舊客快速建單、新客資料拆解、訂單轉換、儲值金補價差四個流程。
+# - 舊客快速建單、新客資料拆解、訂單轉換三個流程都新增「查無班表時自動補檸檬人
+#   排班」勾選框，預設不勾選；未勾選時查無班表不會自動嘗試勾檸檬人（配合
+#   quick_order v8.13 的 allow_auto_lemon_shift 參數）。
 # v8.12
 # - 「新客資料拆解」貼上文字後即時顯示拆解預覽（姓名/電話/地址）；若判斷不出付款
 #   方式，直接顯示手動選擇的下拉選單，未選擇前擋下「建立新客訂單」按鈕，
@@ -56,7 +74,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.12"
+__version__ = "8.14"
 
 import html
 import requests
@@ -322,6 +340,36 @@ def copy_button(label, text, key):
     )
 
 
+def show_duplicate_order_warning(order_no, count, dedup_key=""):
+    """
+    v8.13：訂單編號重複提醒視窗。
+    優先使用 st.dialog 跳出真正的提醒視窗（Streamlit 1.31+）；
+    若目前版本不支援 st.dialog，退回使用醒目的 st.error 區塊，
+    確保任何 Streamlit 版本都看得到警示，不會被畫面其他內容淹沒。
+    dedup_key 用來避免同一筆訂單在同一次畫面重繪中重複跳出視窗。
+    """
+    _seen_key = f"_dup_order_seen_{dedup_key or order_no}"
+    if st.session_state.get(_seen_key):
+        return
+    st.session_state[_seen_key] = True
+
+    message = (
+        f"訂單編號 **{order_no}** 目前查詢到 **{count}** 張不同的訂單卡片，"
+        f"這是後台偶發的「訂單編號重複」問題。\n\n"
+        f"請務必至後台人工確認這幾張訂單卡片的實際內容，避免訂單資料互相搞混或覆蓋！"
+    )
+
+    if hasattr(st, "dialog"):
+        @st.dialog("⚠️ 訂單編號重複警示")
+        def _dup_order_dialog():
+            st.error(message)
+            if st.button("我知道了", use_container_width=True, key=f"dup_ack_{dedup_key or order_no}"):
+                st.rerun()
+        _dup_order_dialog()
+    else:
+        st.error(f"⚠️ 訂單編號重複警示\n\n{message}")
+
+
 def step(num, title):
     st.markdown(f'<div class="step-pill"><span class="step-num">{num}</span>{title}</div>', unsafe_allow_html=True)
 
@@ -433,6 +481,9 @@ if mode == "批次建單（Google Sheet）":
     default_actions = (["建單", "寄確認信", "改 Google 日曆"] if env == "prod" else ["建單"])
     selected_actions = st.multiselect("執行項目", options=["建單", "寄確認信", "改 Google 日曆"], default=default_actions, label_visibility="collapsed")
     st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
+    # v8.14：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟。
+    # 與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致。
+    batch_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="batch_allow_auto_lemon")
     st.markdown("<hr>", unsafe_allow_html=True)
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
@@ -460,6 +511,7 @@ if mode == "批次建單（Google Sheet）":
         total_success = 0
         total_fail = 0
         total_processed = 0
+        all_consistency_problems = []
         with st.spinner("執行中，請稍候…"):
             for row_no in target_rows:
                 ui_log(f"▶ 開始執行第 {row_no} 列…")
@@ -469,11 +521,13 @@ if mode == "批次建單（Google Sheet）":
                         backend_email=backend_email.strip(), backend_password=backend_password.strip(),
                         sheet_name=sheet_name.strip(), start_row=row_no, end_row=row_no,
                         selected_actions=selected_actions, logger=ui_log,
+                        allow_auto_lemon_shift=batch_allow_auto_lemon,
                     )
                     if isinstance(result, dict):
                         total_success += result.get("success_count", 0)
                         total_fail += result.get("fail_count", 0)
                         total_processed += result.get("total_processed", 0)
+                        all_consistency_problems.extend(result.get("consistency_problems", []) or [])
                 except Exception as e:
                     total_fail += 1
                     ui_log(f"❌ 第 {row_no} 列失敗：{e}")
@@ -491,6 +545,14 @@ if mode == "批次建單（Google Sheet）":
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
+            # v8.14：訂單一致性檢查結果——訂單編號跟 Google Sheet 該列的電話/日期/
+            # 時段是否一致，抓出訂單編號誤配對（M欄重複、或該列其實沒有真的成單）。
+            if all_consistency_problems:
+                st.error(f"⚠️ 訂單一致性檢查發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
+                for _p in all_consistency_problems:
+                    st.warning(f"第 {_p.get('row_num')} 列（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
+            elif total_processed > 0:
+                st.success("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/日期/時段相符。")
 
 
 # =========================================================
@@ -626,6 +688,8 @@ else:
                     with nci2:
                         nc_company_no = st.text_input("統一編號", key="nc_company_no")
                 nc_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="nc_clean_type")
+                # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
+                nc_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="nc_allow_auto_lemon")
                 if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_btn"):
                     if not nc_name.strip() or not nc_email.strip() or not nc_address.strip():
                         st.error("請填寫姓名、Email、服務地址")
@@ -638,6 +702,7 @@ else:
                                     env_name=env,
                                     backend_email=backend_email.strip(),
                                     backend_password=backend_password.strip(),
+                                    allow_auto_lemon_shift=nc_allow_auto_lemon,
                                     customer={
                                         "name": nc_name.strip(),
                                         "phone": q_phone.strip(),
@@ -753,10 +818,12 @@ else:
                                     st.success(f"{r.get('date')} {r.get('period')} 可安排　服務人員：{r.get('staff') or '待確認'}")
                             else:
                                 st.warning("此日期/時段目前無可安排班表。")
+                        # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
+                        old_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="old_allow_auto_lemon")
                         if st.button("🚀 建立訂單", use_container_width=True, key="old_create_known"):
                             try:
                                 with st.spinner("建單中，請稍候…"):
-                                    result = quick_create_order(env_name=env, payway=q_payway, region=q_region, lookup_result=lookup, address=q_address, clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm], date_s=q_date.strftime("%Y-%m-%d"), period_s=q_period, hour=q_hour, person=q_person)
+                                    result = quick_create_order(env_name=env, payway=q_payway, region=q_region, lookup_result=lookup, address=q_address, clean_type_id=CLEAN_TYPE_ID_MAP[q_clean_type_confirm], date_s=q_date.strftime("%Y-%m-%d"), period_s=q_period, hour=q_hour, person=q_person, allow_auto_lemon_shift=old_allow_auto_lemon)
                                     # 不立即發確認信，等 user 確認後再發
                                     result["mail_sent"] = False
                                     result["mail_msg"] = "尚未發送"
@@ -914,6 +981,9 @@ else:
         with nb3:
             nc_notice = st.text_area("客服備註", height=80, key="nc_notice_d")
 
+        # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
+        nc_d_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="nc_d_allow_auto_lemon")
+
         if st.button("🚀 建立新客訂單", use_container_width=True, key="nc_create_d", type="primary"):
             if not nc_raw.strip():
                 st.error("請貼上客人資料")
@@ -949,6 +1019,7 @@ else:
                                 env_name=env,
                                 backend_email=backend_email.strip(),
                                 backend_password=backend_password.strip(),
+                                allow_auto_lemon_shift=nc_d_allow_auto_lemon,
                                 customer={
                                     "name": _nc_name, "phone": _nc_phone,
                                     "email": _nc_email, "address": _nc_address,
@@ -999,6 +1070,8 @@ else:
                 st.warning(_r["price_mismatch_warning"])
             if _r.get("address_mismatch_warning"):
                 st.warning(_r["address_mismatch_warning"])
+            if _r.get("order_no_duplicated"):
+                show_duplicate_order_warning(_r.get("order_no"), _r.get("order_no_duplicate_count", 2), dedup_key=f"nc_{_r.get('order_no')}")
             if not _r.get("mail_sent"):
                 if st.button("📧 發送確認信", key="nc_send_mail_btn", type="primary"):
                     try:
@@ -1070,6 +1143,9 @@ else:
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
+        # v8.13：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟
+        conv_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="conv_allow_auto_lemon")
+
         if st.button("🔄 執行訂單轉換", use_container_width=True, key="run_convert_btn"):
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
@@ -1085,6 +1161,7 @@ else:
                             order_no_a=conv_order_no_a.strip(),
                             new_orders=new_orders_input,
                             clean_type_id=CLEAN_TYPE_ID_MAP[conv_clean_type],
+                            allow_auto_lemon_shift=conv_allow_auto_lemon,
                         )
                     st.session_state.conv_result = conv_result
                 except Exception as e:
@@ -1150,6 +1227,12 @@ else:
             for r in new_orders_ok:
                 ph_str = f"{r['person']}人{r['hour']}小時"
                 st.success(f"✅ 步驟2：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，折價券 {r['coupon_code']}（{r['price_with_tax']}元）")
+                _r_order_result = r.get("order_result") or {}
+                if _r_order_result.get("order_no_duplicated"):
+                    show_duplicate_order_warning(
+                        r.get("order_no"), _r_order_result.get("order_no_duplicate_count", 2),
+                        dedup_key=f"conv_{r.get('order_no')}",
+                    )
             for r in [r for r in conv_result.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 步驟2 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
 
@@ -1294,6 +1377,8 @@ else:
             c4.metric("儲值金單", so.get("order_no", "—"))
             ca = stored_stage.get("coupon_a", {})
             st.success(f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。")
+            if so.get("order_no_duplicated"):
+                show_duplicate_order_warning(so.get("order_no"), so.get("order_no_duplicate_count", 2), dedup_key=f"sv_stored_{so.get('order_no')}")
             lemon_r = stored_stage.get("lemon_result", {})
             if lemon_r.get("success"):
                 st.success(lemon_r.get("message", "已改為檸檬人"))
@@ -1328,6 +1413,8 @@ else:
             po = paid_stage["paid_order"]
             cb = paid_stage.get("coupon_b", {})
             st.success(f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。")
+            if po.get("order_no_duplicated"):
+                show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")
             combined_note = ""
             if stored_stage:
@@ -1360,6 +1447,8 @@ else:
             st.warning(order_result["price_mismatch_warning"])
         if order_result.get("address_mismatch_warning"):
             st.warning(order_result["address_mismatch_warning"])
+        if order_result.get("order_no_duplicated"):
+            show_duplicate_order_warning(order_result.get("order_no"), order_result.get("order_no_duplicate_count", 2), dedup_key=f"old_{order_result.get('order_no')}")
         if not order_result.get("mail_sent"):
             if st.button("📧 發送確認信", key="send_mail_btn", type="primary"):
                 try:
