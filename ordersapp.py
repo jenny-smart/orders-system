@@ -1,10 +1,17 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.5
+# 版本：v8.6
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.6
+# - 舊客快速建單：付款方式選單改為「信用卡/ATM」「信用卡」「ATM」「儲值金」四選一。
+#   選「信用卡/ATM」時沿用上次付款紀錄（僅限信用卡或ATM，查無則預設信用卡）；
+#   選「信用卡」或「ATM」則直接以該選項作為付款方式；「儲值金」維持獨立選項。
+#   實際送單一律解析為信用卡／ATM／儲值金三者之一，caption 同步顯示解析結果。
+# - 修正「新客資料拆解」流程從未組出 LINE 訊息的問題（配合 quick_order v8.6
+#   quick_create_new_customer_order 補齊回傳欄位，這裡改為直接呼叫 build_line_message）。
 # v8.5
 # - 舊客快速建單：付款方式選單改為永遠顯示（信用卡／ATM／儲值金），
 #   預設值帶上次付款紀錄，但客服可隨時切換，不再被歷史紀錄鎖死。
@@ -25,7 +32,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.5"
+__version__ = "8.6"
 
 import html
 import requests
@@ -660,18 +667,28 @@ else:
                     default_clean_type = last_summary["clean_type"] if last_summary and last_summary.get("clean_type") in CLEAN_TYPE_ID_MAP else "居家清潔"
                     default_person = int(last_summary["person"]) if last_summary and str(last_summary.get("person", "")).isdigit() else 2
                     q_clean_type_confirm = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), index=list(CLEAN_TYPE_ID_MAP.keys()).index(default_clean_type), key="old_clean_confirm")
-                    # v8.5：付款方式選單永遠顯示，預設帶上次紀錄，客服可隨時切換
-                    _payway_options = ["信用卡", "ATM", "儲值金"]
-                    _default_payway = last_summary.get("payway") if last_summary and last_summary.get("payway") in _payway_options else "信用卡"
-                    q_payway = st.selectbox(
+                    # v8.6：付款方式選單新增「信用卡/ATM」選項——維持上次付款方式（僅限信用卡或ATM）
+                    # 選單顯示：信用卡/ATM、信用卡、ATM、儲值金
+                    # 實際送單時一律解析成「信用卡」「ATM」或「儲值金」三者之一
+                    _payway_ui_options = ["信用卡/ATM", "信用卡", "ATM", "儲值金"]
+                    _last_payway = last_summary.get("payway") if last_summary else ""
+                    _default_ui_payway = "儲值金" if _last_payway == "儲值金" else "信用卡/ATM"
+                    _q_payway_ui = st.selectbox(
                         "付款方式",
-                        _payway_options,
-                        index=_payway_options.index(_default_payway),
+                        _payway_ui_options,
+                        index=_payway_ui_options.index(_default_ui_payway),
                         key="old_payway",
                     )
+                    if _q_payway_ui == "信用卡/ATM":
+                        # 沿用上次付款方式；若上次不是信用卡或ATM（例如儲值金或查無紀錄），預設信用卡
+                        q_payway = _last_payway if _last_payway in ("信用卡", "ATM") else "信用卡"
+                        _payway_note = f"（沿用上次：{q_payway}）"
+                    else:
+                        q_payway = _q_payway_ui
+                        _payway_note = ""
                     q_region = get_region_by_address(q_address, ACCOUNTS) or "台北"
                     _route_label, _route_url = booking_route_display(q_payway)
-                    st.caption(f"建單介面：{_route_label}　｜　送單網址：{_route_url}　｜　區域：{q_region}")
+                    st.caption(f"建單介面：{_route_label}　｜　送單網址：{_route_url}　｜　實際付款方式：{q_payway}{_payway_note}　｜　區域：{q_region}")
                     if last_summary:
                         st.markdown(last_summary_card_html(last_summary), unsafe_allow_html=True)
                     upcoming_orders = get_unserved_paid_orders(lookup["session"], lookup["phone"], member_payload, addr_options, today_value=date.today())
@@ -909,6 +926,14 @@ else:
                             # 不立即發確認信，等 user 確認後再發
                             nc_result["mail_sent"] = False
                             nc_result["mail_msg"] = "尚未發送"
+                            # v8.6：quick_create_new_customer_order 已回傳 build_line_message
+                            # 所需的完整欄位（date/period/region/fare 等），這裡直接組出 LINE 訊息，
+                            # 修正原本此流程從未產生 line_message、畫面永遠不顯示的問題。
+                            try:
+                                nc_result["line_message"] = build_line_message(nc_result)
+                            except Exception as _e_line_nc:
+                                nc_result["line_message"] = ""
+                                st.warning(f"LINE 訊息組裝失敗：{_e_line_nc}")
                         st.session_state.nc_result = nc_result
                         st.rerun()
                     except Exception as e:
