@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.8
+# 版本：v8.9
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-03
 #
 # Change Log
+# v8.9
+# - 新客建單結果加上「地址比對警示」：若後台實際地址與送出地址不同（例如後台自動
+#   判斷區域時加了不正確的市/區前綴），會直接顯示警示文字並附上後台實際地址，
+#   方便立即發現、回報或至後台手動修正（配合 quick_order v8.9 的
+#   address_mismatch_warning）。經確認此類情況是後台端自身的地址正規化行為，
+#   並非本系統送出的地址資料有誤。
 # v8.8
 # - 修正「舊客快速建單」結果區塊（訂單編號/金額/車馬費/確認信 metrics + LINE 訊息）
 #   原本沒有限定分頁，導致切到「新客資料拆解」等其他分頁後，session_state 裡
@@ -43,7 +49,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.8"
+__version__ = "8.9"
 
 import html
 import requests
@@ -956,6 +962,8 @@ else:
             st.success(f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元")
             if _r.get("price_mismatch_warning"):
                 st.warning(_r["price_mismatch_warning"])
+            if _r.get("address_mismatch_warning"):
+                st.warning(_r["address_mismatch_warning"])
             if not _r.get("mail_sent"):
                 if st.button("📧 發送確認信", key="nc_send_mail_btn", type="primary"):
                     try:
@@ -1310,6 +1318,8 @@ else:
         st.success(f"✅ 訂單建立成功：{order_result['order_no']}")
         if order_result.get("price_mismatch_warning"):
             st.warning(order_result["price_mismatch_warning"])
+        if order_result.get("address_mismatch_warning"):
+            st.warning(order_result["address_mismatch_warning"])
         if not order_result.get("mail_sent"):
             if st.button("📧 發送確認信", key="send_mail_btn", type="primary"):
                 try:
