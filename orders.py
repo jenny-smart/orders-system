@@ -6,6 +6,11 @@
 #
 # Change Log
 # v2026.07.05
+# - 新增 run_batch_consistency_check：把一致性檢查從 run_process_web 內部抽出來，
+#   改成獨立函式，只在「整批列都執行完」之後由 ordersapp.py 呼叫一次，而不是
+#   原本每呼叫一次 run_process_web（每一列）就各自比對一次——原寫法會讓同一支
+#   電話在多列批次裡被重複查詢很多次，也不是真正「全部成單到一個段落後」的
+#   整批核對。run_process_web 不再自動觸發一致性檢查。
 # - verify_batch_order_consistency 擴充為雙向比對：
 #   方向一（從 Google Sheet 比對系統）：原本只比對電話/日期/時段，這次加入
 #   地址比對（依電話/地址/日期/時間四項），更嚴謹地確認訂單編號沒有誤配對。
@@ -2781,7 +2786,6 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
             "success": True,
             "message": "沒有符合條件的資料",
             "failed_records": [],
-            "consistency_problems": [],
         }
 
     filtered_rows = [row for _, row in df.iterrows() if get_region_by_address(str(row["地址"]), ACCOUNTS) == region]
@@ -2791,7 +2795,6 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
             "success": True,
             "message": f"沒有 {region} 區域資料",
             "failed_records": [],
-            "consistency_problems": [],
         }
 
     df = pd.DataFrame(filtered_rows)
@@ -2897,22 +2900,10 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
     update_sheet_rows(ws, all_row_results)
     logger("已回填 Google Sheet。")
 
-    # v2026.07.04：批次全部執行完後，雙向比對 Google Sheet 與後台系統訂單——
-    # 方向一從 Sheet 出發比對電話/地址/日期/時段，方向二從系統該電話的實際訂單
-    # 反查 Sheet，抓出訂單編號誤配對（M欄重複）或系統已成單但 Sheet 沒記錄的情況。
-    consistency_problems = []
-    try:
-        consistency_problems = verify_batch_order_consistency(session, df, all_row_results)
-        if consistency_problems:
-            logger(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常，請人工確認：")
-            for p in consistency_problems:
-                _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
-                logger(f"  {_row_label}（訂單 {p['order_no']}）：{p['issue']}")
-        else:
-            logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
-    except Exception as e:
-        logger(f"訂單一致性檢查失敗：{e}")
-
+    # v2026.07.05：一致性檢查改由呼叫端（ordersapp.py）在「整批列都執行完」後，
+    # 用 run_batch_consistency_check 統一做一次，而不是每呼叫一次 run_process_web
+    # 就各自比對一次（原本的寫法會讓同一支電話被重複查詢很多次，也不是真正
+    # 「全部成單到一個段落後」的整批核對）。這裡不再自動觸發。
     success_count = sum(1 for v in all_row_results.values() if v.get("結果") == "成功")
     fail_count = sum(1 for v in all_row_results.values() if v.get("結果") == "失敗")
 
@@ -2925,5 +2916,83 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         "fail_count": fail_count,
         "total_processed": len(all_row_results),
         "failed_records": failed_records,
-        "consistency_problems": consistency_problems,
     }
+
+
+def run_batch_consistency_check(env_name, region, backend_email, backend_password, sheet_name, target_rows, logger=print):
+    """
+    v2026.07.05：批次「整批列都執行完」之後，統一做一次雙向一致性比對，
+    取代原本掛在 run_process_web 裡、每呼叫一次就各自比對一次的寫法
+    （那樣同一支電話在多列批次裡會被重複查詢很多次，也不是真正「全部成單到
+    一個段落後」的整批核對）。
+
+    做法：重新讀一次 Google Sheet 目前的狀態（此時 M 欄等欄位應該都已經是
+    這批次執行完、回填後的最終結果），只取 target_rows 這些列、且屬於
+    region 這個區域的資料，組成 verify_batch_order_consistency 需要的
+    all_row_results（每一列目前 Sheet 上寫的訂單編號），再呼叫既有的雙向
+    比對邏輯。
+
+    target_rows: 這次批次實際跑過的列號，可以是不連續的 list，例如 [2, 5, 9]。
+    回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
+    """
+    global BASE_URL, ORDER_PREFIX
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+
+    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
+    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+
+    LOGIN_URL = f"{BASE_URL}/login"
+    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
+    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
+    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
+    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
+    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+
+    target_row_set = {int(r) for r in (target_rows or [])}
+    if not target_row_set:
+        return []
+
+    ws, df = load_worksheet(sheet_name)
+    required_cols = ["電話", "地址", "日期", "開始時間", "結束時間", "訂單編號"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise Exception(f"工作表缺少必要欄位: {col}")
+
+    df = df[df["__sheet_row__"].isin(target_row_set)]
+    if df.empty:
+        logger("一致性檢查：指定的列號在工作表裡查無資料，略過。")
+        return []
+
+    df = df[df.apply(lambda row: get_region_by_address(str(row["地址"]), ACCOUNTS) == region, axis=1)]
+    if df.empty:
+        logger(f"一致性檢查：指定的列號裡沒有屬於 {region} 區域的資料，略過。")
+        return []
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼（一致性檢查階段）")
+
+    all_row_results = {}
+    for _, row in df.iterrows():
+        row_num = int(row["__sheet_row__"])
+        all_row_results[row_num] = {"訂單編號": str(row.get("訂單編號", "") or "").strip()}
+
+    logger(f"開始整批一致性檢查（共 {len(all_row_results)} 列）…")
+    problems = verify_batch_order_consistency(session, df, all_row_results)
+
+    if problems:
+        logger(f"⚠️ 訂單一致性檢查發現 {len(problems)} 筆異常，請人工確認：")
+        for p in problems:
+            _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
+            logger(f"  {_row_label}（訂單 {p['order_no']}）：{p['issue']}")
+    else:
+        logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
+
+    return problems
