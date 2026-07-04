@@ -1,10 +1,18 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.18
+# 版本：v8.19
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.19
+# - 批次建單的訂單一致性檢查改成「全部列都跑完後才統一做一次」，不再是每一列
+#   各自比對一次（原本掛在 run_process_web 裡，會讓同一支電話在多列批次裡被
+#   重複查詢很多次，配合 orders.py 新增的獨立函式 run_batch_consistency_check）。
+# - 一致性檢查改成看得到的獨立勾選框「全部執行完後做一次訂單一致性檢查」，
+#   預設開啟，並在執行結果下方另外顯示獨立的「步驟5：訂單一致性檢查」區塊，
+#   不管有沒有異常都會顯示執行狀態，不會讓人以為系統根本沒做這件事。
+# - 「批次建單」的功能說明加入雙向比對的說明文字。
 # v8.18
 # - 批次建單的訂單一致性檢查結果顯示，配合 orders.py 的雙向比對更新：
 #   1. 方向一比對項目加入地址，訊息文字同步更新為「電話/地址/日期/時段」。
@@ -102,7 +110,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.18"
+__version__ = "8.19"
 
 import html
 import requests
@@ -111,7 +119,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, timedelta
 
-from orders import run_process_web, get_region_by_address
+from orders import run_process_web, get_region_by_address, run_batch_consistency_check
 from accounts import ACCOUNTS
 try:
     import quick_order as qo
@@ -493,7 +501,14 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # =========================================================
 if mode == "批次建單（Google Sheet）":
     step("3", "批次建單")
-    info_panel("功能說明", ["適合已將多筆訂單整理在 Google Sheet 的批次處理情境。", "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。"])
+    info_panel("功能說明", [
+        "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
+        "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
+        "全部列都執行完、Google Sheet 回填完成後，會再做一次「訂單一致性檢查」：",
+        "方向一從 Sheet 出發，依電話/地址/日期/時段回查系統訂單是否相符；"
+        "方向二反過來，從系統該電話的實際訂單查回 Sheet，抓出「系統其實已成單，"
+        "但 Sheet 沒記錄」的情況。這是整批列都跑完後才統一做一次，不是每一列各自比對。",
+    ])
     info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
     step("4", "執行設定")
     c1, c2, c3 = st.columns(3)
@@ -512,6 +527,12 @@ if mode == "批次建單（Google Sheet）":
     # v8.14：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟。
     # 與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致。
     batch_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="batch_allow_auto_lemon")
+    # v8.19：一致性檢查改成看得到的獨立勾選框，預設開啟；在「全部列都執行完」
+    # 之後才統一做一次整批雙向比對，而不是每一列各自比對一次。
+    batch_run_consistency_check = st.checkbox(
+        "全部執行完後做一次訂單一致性檢查（雙向比對電話/地址/日期/時段）",
+        value=True, key="batch_run_consistency_check",
+    )
     st.markdown("<hr>", unsafe_allow_html=True)
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
@@ -539,7 +560,6 @@ if mode == "批次建單（Google Sheet）":
         total_success = 0
         total_fail = 0
         total_processed = 0
-        all_consistency_problems = []
         with st.spinner("執行中，請稍候…"):
             for row_no in target_rows:
                 ui_log(f"▶ 開始執行第 {row_no} 列…")
@@ -555,11 +575,29 @@ if mode == "批次建單（Google Sheet）":
                         total_success += result.get("success_count", 0)
                         total_fail += result.get("fail_count", 0)
                         total_processed += result.get("total_processed", 0)
-                        all_consistency_problems.extend(result.get("consistency_problems", []) or [])
                 except Exception as e:
                     total_fail += 1
                     ui_log(f"❌ 第 {row_no} 列失敗：{e}")
-        ui_log("===== 執行完成 =====")
+        ui_log("===== 建單流程執行完成 =====")
+
+        # v8.19：所有列都跑完、Google Sheet 都回填之後，才統一做一次整批
+        # 一致性檢查（雙向比對），而不是每一列各自比對一次。
+        all_consistency_problems = []
+        consistency_ran = False
+        if batch_run_consistency_check and total_processed > 0:
+            ui_log("▶ 開始整批訂單一致性檢查（雙向比對）…")
+            try:
+                with st.spinner("整批比對中，請稍候…"):
+                    all_consistency_problems = run_batch_consistency_check(
+                        env_name=env, region=region,
+                        backend_email=backend_email.strip(), backend_password=backend_password.strip(),
+                        sheet_name=sheet_name.strip(), target_rows=target_rows, logger=ui_log,
+                    )
+                consistency_ran = True
+            except Exception as e:
+                ui_log(f"❌ 一致性檢查失敗：{e}")
+        ui_log("===== 全部執行完成 =====")
+
         with result_container:
             st.markdown("<hr>", unsafe_allow_html=True)
             step("4", "執行結果")
@@ -573,16 +611,21 @@ if mode == "批次建單（Google Sheet）":
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
-            # v8.18：訂單一致性檢查結果——雙向比對 Google Sheet 與後台系統訂單，
-            # 抓出訂單編號誤配對（M欄重複、或該列其實沒有真的成單）、
-            # 或系統已成單但 Sheet 沒記錄的情況。
-            if all_consistency_problems:
-                st.error(f"⚠️ 訂單一致性檢查發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("5", "訂單一致性檢查（雙向比對）")
+            if not batch_run_consistency_check:
+                st.info("本次未勾選「全部執行完後做一次訂單一致性檢查」，未執行比對。")
+            elif not consistency_ran:
+                st.warning("一致性檢查未成功執行，請查看上方執行過程的錯誤訊息。")
+            elif all_consistency_problems:
+                st.error(f"⚠️ 發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
                 for _p in all_consistency_problems:
                     _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查）"
                     st.warning(f"{_row_label}（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
-            elif total_processed > 0:
-                st.success("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
+            else:
+                st.success("✅ 檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
+
 
 
 # =========================================================
