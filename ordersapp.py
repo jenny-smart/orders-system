@@ -1,10 +1,17 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.28
+# 版本：v8.29
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-08
+# 最後更新：2026-07-09
 #
 # Change Log
+# v8.29
+# - 「雙向訂單檢查」補上服務日期區間輸入，修正方向二原本的邏輯漏洞：舊版
+#   方向二是拿工作表裡已出現的電話去查後台，如果某張後台訂單的客人電話
+#   整筆漏登記進工作表，從一開始就不會被查到。現在填了日期區間的話，會
+#   直接掃過後台在這段期間「全部」已付款訂單（處理分頁），逐筆核對訂單編號
+#   有沒有出現在工作表裡，才能真正抓到「工作表完全沒登記」的情況。
+#   配合 orders.py 新增的 _fetch_all_purchase_blocks_by_date_range。
 # v8.28
 # - 功能選單的下拉選項加上編號（1. 2. 3. ...），選項文字比較長時方便一眼
 #   對照要選第幾項，不用整段文字讀完才能定位。編號是動態產生的，之後增減
@@ -169,7 +176,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.28"
+__version__ = "8.29"
 
 import html
 import requests
@@ -736,13 +743,22 @@ elif mode == "雙向訂單檢查":
         "不用重新跑一次批次建單，直接針對一份已經有「訂單編號」欄位的成單工作表，"
         "跟後台系統做一次雙向比對。",
         "方向一：工作表寫的訂單編號，回查後台是否真的存在，電話/地址/日期/時段是否跟這一列相符。",
-        "方向二：工作表涉及的每支電話，查後台在該日期範圍內的實際訂單，抓出"
-        "「後台其實已經成單，但工作表沒有正確記錄」的情況。",
-        "會檢查整份工作表所有有填電話跟日期的列，不限定是不是最近才寫入的。",
+        "方向二（加強版，需要填服務日期區間）：不是只查工作表裡已出現的電話，"
+        "而是直接抓後台這段日期區間內的『全部』已付款訂單，逐筆核對訂單編號有沒有"
+        "出現在工作表裡——這樣才抓得到「客人電話整筆漏登記進工作表」這種情況。",
+        "沒有填日期區間的話，方向二只會用舊方式（工作表裡已出現的電話）去查，"
+        "抓不到完全沒登記進工作表的訂單，建議務必填上服務日期區間。",
     ])
 
     dc_sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604", key="dc_sheet_name")
     dc_region = st.selectbox("只檢查特定區域（不指定則檢查全部）", ["全部"] + list(ACCOUNTS.keys()), key="dc_region")
+
+    st.markdown("**方向二用：服務日期區間**（建議務必填寫，才能抓到工作表完全漏登記的訂單）")
+    dc_col1, dc_col2 = st.columns(2)
+    with dc_col1:
+        dc_date_start = st.date_input("服務日期-起", value=None, key="dc_date_start")
+    with dc_col2:
+        dc_date_end = st.date_input("服務日期-迄", value=None, key="dc_date_end")
 
     if st.button("🔍 開始雙向比對", use_container_width=True, key="dc_run_btn", type="primary"):
         if not backend_email.strip() or not backend_password.strip():
@@ -751,13 +767,15 @@ elif mode == "雙向訂單檢查":
             st.error("請輸入工作表名稱")
         else:
             try:
-                with st.spinner("讀取工作表 → 登入後台 → 雙向比對中…"):
+                with st.spinner("讀取工作表 → 登入後台 → 雙向比對中（有填日期區間的話會多花一點時間掃後台整段期間的訂單）…"):
                     dc_problems = run_standalone_consistency_check(
                         env_name=env,
                         backend_email=backend_email.strip(),
                         backend_password=backend_password.strip(),
                         sheet_name=dc_sheet_name.strip(),
                         region=None if dc_region == "全部" else dc_region,
+                        date_range_start=dc_date_start.strftime("%Y-%m-%d") if dc_date_start else None,
+                        date_range_end=dc_date_end.strftime("%Y-%m-%d") if dc_date_end else None,
                     )
                 st.session_state.dc_result = {"problems": dc_problems, "sheet_name": dc_sheet_name.strip()}
             except Exception as e:
