@@ -1,9 +1,16 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.28
+# 版本：v8.29
 # 最後更新：2026-07-07
 #
 # Change Log
+# v8.29
+# - 修正「儲值金購買」建出來的訂單完全沒有姓名/Email 的問題：後台
+#   /booking/stored_value 表單裡「會員姓名/會員帳號/市內電話」雖然是唯讀
+#   （readonly）欄位，但仍然是 name="name"/"email"/"tel" 的 input，送出
+#   表單時一樣會帶上這三個值。create_stored_value_purchase_order 雖然有
+#   呼叫查詢會員 API 拿到姓名/Email，卻忘記把這三個欄位放進最後送出的
+#   post_data，導致建出來的訂單姓名/Email 都是空的。已補上。
 # v8.28
 # - 修正查詢優先順序：改成嚴格依序查（儲值金 → 查不到才查VIP → 查不到才查
 #   專業清潔），不是把儲值金跟VIP兩類合併起來比日期取最新一筆（v8.27 誤解
@@ -181,7 +188,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.28"
+__version__ = "8.29"
 
 import time
 import re
@@ -2929,6 +2936,12 @@ def create_stored_value_purchase_order(
         "storedValue": str(stored_value_amount),
         "phone": phone_norm,
         "memberId": str(member_id),
+        # v8.29：後台表單裡「會員姓名/會員帳號/市內電話」雖然是唯讀欄位，
+        # 但仍然是 name="name"/"email"/"tel" 的 input，送出表單時一樣會帶上；
+        # 之前漏加這幾個欄位，導致建出來的儲值金購買訂單完全沒有姓名/Email。
+        "name": member.get("name", "") or "",
+        "email": member.get("email", "") or "",
+        "tel": member.get("tel", "") or "",
         "companyId": company_id,
         "frequency": str(frequency),
         "notice": notice or "",
