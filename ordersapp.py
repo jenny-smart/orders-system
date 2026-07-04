@@ -1723,14 +1723,20 @@ else:
                 f"優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。　"
                 f"👤 專員：{po.get('staff') or '（無班表資料）'}"
             )
-            if paid_stage.get("mark_paid_ok"):
-                st.caption("✅ 已標記為已付款")
+            if paid_stage.get("auto_settle_zero_amount"):
+                if paid_stage.get("mark_paid_ok"):
+                    st.caption("✅ 已標記為已付款")
+                else:
+                    st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
+                if paid_stage.get("invoice_note_ok"):
+                    st.caption("✅ 發票號碼欄位已標註「不開立發票」")
+                else:
+                    st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{paid_stage.get('invoice_note_msg', '')}")
             else:
-                st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
-            if paid_stage.get("invoice_note_ok"):
-                st.caption("✅ 發票號碼欄位已標註「不開立發票」")
-            else:
-                st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{paid_stage.get('invoice_note_msg', '')}")
+                st.warning(
+                    f"⚠️ 服務金額（總金額扣除車馬費）為 {paid_stage.get('payable_amount_after_fare', '—')} 元，"
+                    "此單需付款並開立發票，已保留待付款狀態且未標註不開立發票。"
+                )
             if po.get("order_no_duplicated"):
                 show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")

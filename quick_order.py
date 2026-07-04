@@ -3533,11 +3533,20 @@ def stored_value_makeup_create_paid_order(
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
     note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
-    # v2026.07.10：客付補價差單全額用優惠券折抵，客人沒有實際付款：
-    # 1. 標記為已付款，不能讓它卡在待付款狀態。
-    # 2. 發票號碼欄位標註「不用開發票」，避免財務誤以為漏開發票。
-    mark_paid_ok, mark_paid_msg = _mark_order_as_paid(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
-    invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不開立發票")
+    payable_amount = paid_order.get("backend_actual_amount")
+    if payable_amount in (None, ""):
+        payable_amount = paid_order.get("service_amount") or paid_order.get("price_with_tax") or paid_order.get("price") or 0
+    try:
+        payable_amount_num = int(round(float(str(payable_amount).replace(",", ""))))
+    except Exception:
+        payable_amount_num = 0
+    auto_settle_zero_amount = payable_amount_num == 0
+    if auto_settle_zero_amount:
+        mark_paid_ok, mark_paid_msg = _mark_order_as_paid(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
+        invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不開立發票")
+    else:
+        mark_paid_ok, mark_paid_msg = False, f"服務金額（總金額扣除車馬費）為 {payable_amount_num} 元，需付款，不自動標記已付款"
+        invoice_note_ok, invoice_note_msg = False, f"服務金額（總金額扣除車馬費）為 {payable_amount_num} 元，需開立發票，不自動標註不開立發票"
 
     # v2026.07.10：LINE 訊息改成「儲值金歸零訂單＋補價差訂單 合併訂單」的
     # 格式，另起一行顯示補價差訂單真正的服務時間；服務金額這行要顯示（跟
@@ -3557,6 +3566,8 @@ def stored_value_makeup_create_paid_order(
         "coupon_b": coupon_b, "paid_order": paid_order, "note": note,
         "line_message": build_line_message(paid_order), "address": ctx["address"], "region": ctx["region"],
         "stored_order_no": stored_order_no,
+        "auto_settle_zero_amount": auto_settle_zero_amount,
+        "payable_amount_after_fare": payable_amount_num,
         "mark_paid_ok": mark_paid_ok, "mark_paid_msg": mark_paid_msg,
         "invoice_note_ok": invoice_note_ok, "invoice_note_msg": invoice_note_msg,
     }
