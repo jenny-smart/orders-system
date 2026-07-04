@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.33
+# 版本：v8.34
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.34
+# - 修正訂單轉換第一段結果區塊呼叫了未載入的私有函式 _configure_
+#   environment，導致「NameError: name '_configure_environment' is not
+#   defined」。改用 convert_order_stage1_reassign_original 回傳結果裡
+#   本來就有的 base_url，不用再呼叫一次。
 # v8.33
 # - 修正 v8.32 的疏漏：訂單轉換分階段介面用到的
 #   convert_order_stage1_reassign_original / convert_order_stage2_create_
@@ -200,7 +205,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.33"
+__version__ = "8.34"
 
 import html
 import requests
@@ -1448,7 +1453,7 @@ else:
             else:
                 st.warning(f"⚠️ 第一段：原訂單配班未完全成功 — {lr_a.get('message', '未知')}，請至後台確認排班狀況。")
             with st.expander("🔗 原訂單A後台連結", expanded=False):
-                st.markdown(f"[開啟原訂單A後台]({_configure_environment(env)}/purchase?orderNo={conv_stage1['order_no_a']})")
+                st.markdown(f"[開啟原訂單A後台]({conv_stage1.get('base_url', '')}/purchase?orderNo={conv_stage1['order_no_a']})")
 
         st.markdown("<hr>", unsafe_allow_html=True)
         step("5", "第二段：建立新訂單（優惠券折抵）")
