@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.20
+# 版本：v8.21
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.21
+# - 修正 _missing_quick_order_names 檢查跳出的錯誤訊息：原本寫死「請用 v8.5
+#   覆蓋 GitHub 上的 quick_order.py」，是很久以前版本號還是 v8.5 時寫的字串，
+#   之後版本一路往上加卻沒跟著更新，導致畫面一直誤導使用者要覆蓋成「v8.5」。
+#   改成不寫死版本號的通用說明，並提醒可能是 Streamlit 快取沒重新載入，
+#   建議手動 Reboot app。
 # v8.20
 # - 新增「儲值金購買」功能選單，對應 quick_order.py 新增的
 #   create_stored_value_purchase_order：輸入手機號碼、選地區、選金額即可
@@ -115,7 +121,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.20"
+__version__ = "8.21"
 
 import html
 import requests
@@ -167,9 +173,10 @@ _REQUIRED_QUICK_ORDER_NAMES = [
 _missing_quick_order_names = [name for name in _REQUIRED_QUICK_ORDER_NAMES if not hasattr(qo, name)]
 if _missing_quick_order_names:
     st.error(
-        "quick_order.py 版本不完整，請用 v8.5 覆蓋 GitHub 上的 quick_order.py。"
-        + "\n缺少："
-        + "、".join(_missing_quick_order_names)
+        f"quick_order.py 目前版本不完整（缺少必要函式），請確認 GitHub 上的 quick_order.py 是最新版本"
+        f"（本檔 ordersapp.py 為 v{__version__}），並確認 Streamlit 有重新載入最新內容"
+        f"（若剛覆蓋過檔案，畫面右下角選單可手動 Reboot app）。"
+        + "\n缺少：" + "、".join(_missing_quick_order_names)
     )
     st.stop()
 
