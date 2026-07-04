@@ -1,9 +1,14 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.29
+# 版本：v8.30
 # 最後更新：2026-07-07
 #
 # Change Log
+# v8.30
+# - 修正 _parse_invoice_details_from_block 解析手機載具/自然人憑證時，把
+#   開頭的「/」去掉了（例如「/HWHMPF6」解析成「HWHMPF6」）。台灣手機條碼
+#   載具本來就是「/」開頭的格式，送出去的 carrier_info 要保留這個「/」，
+#   不然送到後台的載具號碼會是錯的。已修正為保留開頭的「/」。
 # v8.29
 # - 修正「儲值金購買」建出來的訂單完全沒有姓名/Email 的問題：後台
 #   /booking/stored_value 表單裡「會員姓名/會員帳號/市內電話」雖然是唯讀
@@ -188,7 +193,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.29"
+__version__ = "8.30"
 
 import time
 import re
@@ -2717,12 +2722,14 @@ def _parse_invoice_details_from_block(lines):
                 info["carrier_type_id"] = "1"
             elif "手機載具" in rest:
                 info["carrier_type_id"] = "2"
-                m = re.search(r"/\s*([A-Za-z0-9+\-]+)", rest)
-                info["carrier_info"] = m.group(1).strip() if m else ""
+                # v8.30：手機條碼載具本來就是「/」開頭的格式（例如 /HWHMPF6），
+                # 送出去的 carrier_info 要保留這個「/」，不能只取後面的字元。
+                m = re.search(r"(/\s*[A-Za-z0-9+\-]+)", rest)
+                info["carrier_info"] = re.sub(r"\s+", "", m.group(1)) if m else ""
             elif "自然人憑證" in rest:
                 info["carrier_type_id"] = "3"
-                m = re.search(r"/\s*([A-Za-z0-9]+)", rest)
-                info["carrier_info"] = m.group(1).strip() if m else ""
+                m = re.search(r"(/\s*[A-Za-z0-9]+)", rest)
+                info["carrier_info"] = re.sub(r"\s+", "", m.group(1)) if m else ""
             elif "紙本" in rest:
                 info["carrier_type_id"] = "4"
             return info
