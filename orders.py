@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.05
+# 版本：v2026.07.06
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-05
+# 最後更新：2026-07-06
 #
 # Change Log
+# v2026.07.06
+# - 新增 PURCHASE_FILTER_PARAMS_TEMPLATE，並修正 verify_batch_order_consistency
+#   查詢 /purchase 時原本只送 {"orderNo": ...} 或 {"phone": ...} 單一參數，
+#   跟後台搜尋表單瀏覽器實際送出的參數（所有欄位都會帶上，只是空字串）不同，
+#   可能觸發後台不同的預設篩選邏輯，導致查到的結果比預期少。現在統一以完整
+#   樣板為底，只覆蓋真正要篩選的欄位（配合 quick_order.py v8.23 同步修正）。
 # v2026.07.05
 # - 新增 run_batch_consistency_check：把一致性檢查從 run_process_web 內部抽出來，
 #   改成獨立函式，只在「整批列都執行完」之後由 ordersapp.py 呼叫一次，而不是
@@ -101,6 +107,21 @@ GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
 MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# v2026.07.05：後台 /purchase 訂單列表頁的搜尋表單，瀏覽器送出時會帶上全部
+# 欄位（沒填的欄位是空字串，不是完全不送）。如果我們用 requests 查詢時只帶
+# 想篩選的那一兩個參數（例如只送 phone），後台某些邏輯是用「這個參數有沒有
+# 出現在請求裡」而不是「值是不是空字串」來判斷，可能會觸發跟瀏覽器不一樣的
+# 預設篩選（例如自動加上當月日期區間），導致查到的結果變少甚至查無資料。
+# 所以查詢時一律以這份樣板為底，只覆蓋真正要篩選的欄位，其餘保持空字串。
+PURCHASE_FILTER_PARAMS_TEMPLATE = {
+    "keyword": "", "name": "", "phone": "", "orderNo": "",
+    "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
+    "paid_at_s": "", "paid_at_e": "", "refundDateS": "", "refundDateE": "",
+    "buy": "", "area_id": "", "isCharge": "", "isRefund": "",
+    "payway": "", "purchase_status": "", "progress_status": "",
+    "invoiceStatus": "", "otherFee": "", "orderBy": "",
+}
 MAIL_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "Mozilla/5.0",
@@ -1634,7 +1655,9 @@ def verify_batch_order_consistency(session, df, all_row_results):
             continue
 
         try:
-            resp = session.get(PURCHASE_URL, params={"orderNo": order_no}, headers=HEADERS, allow_redirects=True)
+            _params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+            _params["orderNo"] = order_no
+            resp = session.get(PURCHASE_URL, params=_params, headers=HEADERS, allow_redirects=True)
         except Exception:
             continue
         if resp.status_code != 200:
@@ -1690,7 +1713,9 @@ def verify_batch_order_consistency(session, df, all_row_results):
         if not relevant_dates:
             continue
         try:
-            resp = session.get(PURCHASE_URL, params={"phone": phone}, headers=HEADERS, allow_redirects=True)
+            _params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+            _params["phone"] = phone
+            resp = session.get(PURCHASE_URL, params=_params, headers=HEADERS, allow_redirects=True)
         except Exception:
             continue
         if resp.status_code != 200:
