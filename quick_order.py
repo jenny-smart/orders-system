@@ -1,9 +1,15 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.21
+# 版本：v8.22
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.22
+# - 修正 create_stored_value_purchase_order 執行時報錯
+#   「name 'BeautifulSoup' is not defined」：quick_order.py 過去都是透過
+#   orders 模組的函式間接處理 HTML，從沒有直接用過 BeautifulSoup，這次新增的
+#   儲值金購買建單功能是第一個直接呼叫 BeautifulSoup 解析 /booking/stored_value
+#   頁面 token 的地方，但漏加 import。已補上 `from bs4 import BeautifulSoup`。
 # v8.21
 # - 新增「儲值金購買」自動建單功能（create_stored_value_purchase_order），
 #   對應後台 /booking/stored_value（代客預訂-VIP儲值金）頁面，客人自己買/
@@ -119,13 +125,14 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.21"
+__version__ = "8.22"
 
 import time
 import re
 from datetime import date, datetime, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
 import orders
 from orders import (
