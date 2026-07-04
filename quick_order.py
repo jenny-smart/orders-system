@@ -1,9 +1,19 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.34
+# 版本：v8.35
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.35
+# - 找到「儲值金訂單付款方式空白、卡在待付款」的真正根因：實際查看
+#   /booking/stored_value_routine 頁面原始 HTML 後發現，這個頁面本身「有」
+#   payway 欄位，只是選項只有一個「儲值金」（<option value="4">儲值金
+#   </option>），而且是 required 必填 select。_build_booking_submit_data
+#   之前誤以為這個頁面完全不需要 payway 而把它整個拿掉，導致送給後台的
+#   表單缺少必填欄位——這才是真正原因，不是 v8.35 之前懷疑的 token 來源
+#   問題（token 那個修正本身沒有錯，只是不是這次的根因，予以保留）。
+#   修法：儲值金訂單改成固定送 payway=4，其餘發票相關欄位（這個頁面本來
+#   就沒有）維持移除。已用單元測試確認送出的資料正確包含 payway=4。
 # v8.34
 # - 依客服重新確認的儲值金補價差完整流程，補齊三個缺漏：
 #   1. 第一段（儲值金清零單）換人為檸檬人時，原本沒開 allow_auto_lemon_shift，
@@ -230,7 +240,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.34"
+__version__ = "8.35"
 
 import time
 import re
@@ -424,9 +434,17 @@ def _build_booking_submit_data(base_data, token, payway, slot):
         data["date_s"] = ""
         data["datePeriod"] = slot
     else:
-        # 儲值金訂單：不需要付款方式/發票相關欄位
+        # 儲值金訂單：v2026.07.10 修正——實際查看 /booking/stored_value_routine
+        # 頁面原始 HTML 後發現，這個頁面本身「有」payway 欄位，只是選項只有
+        # 一個「儲值金」（<option value="4">儲值金</option>），而且是 required
+        # 的必填 select。之前誤以為這個頁面不需要 payway 而整個拿掉，導致
+        # 後台收到的表單缺少必填欄位，這才是付款方式空白、訂單卡在待付款、
+        # 儲值金沒有真的被扣除的真正原因（不是先前懷疑的 token 來源問題）。
+        # 這個頁面也沒有發票相關欄位（invoice_type/carrier_type_id 等），
+        # 那幾個繼續拿掉是對的。
         data["date_list[]"] = [slot]
-        for _k in ("payway", "invoice_type", "carrier_type_id", "carrier_info",
+        data["payway"] = "4"
+        for _k in ("invoice_type", "carrier_type_id", "carrier_info",
                    "company_title", "company_no", "donate_code"):
             data.pop(_k, None)
     return data
