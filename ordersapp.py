@@ -1,10 +1,23 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.25
+# 版本：v8.26
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-07
+# 最後更新：2026-07-08
 #
 # Change Log
+# v8.26
+# - 把 memo-system（備忘系統：排班管理/客服作業/財務對帳/服務異動/評估文字
+#   工具）整併進 orders-system，新增 memo_system/ 套件（memo.py/atm.py/
+#   shift.py/change_order.py/ui.py，import 改成套件內相對匯入）。
+# - 功能選單從橫向 radio 改成下拉選單（跟 memo-system 原本風格一致），並把
+#   訂單系統原本 7 個功能跟備忘系統 5 個功能合併成同一份下拉清單共 12 項，
+#   選項文字直接帶簡短說明（不用另外看功能說明面板）：
+#   批次建單／舊客建單／新客建單／儲值金建單／訂單轉換／儲值金補價差／
+#   排班管理／LINE通知訊息／訂單備註／對帳管理／異動管理／評估工具。
+# - 後台帳號/密碼/環境維持只有一組（Step 1 登入），備忘系統的功能呼叫
+#   render_memo_system(shared_backend_email=..., ...) 沿用同一組登入資訊，
+#   不會再顯示備忘系統自己原本的登入欄位。
+# - 已用全部 12 個選項逐一實際執行測試過，皆無例外。
 # v8.25
 # - 配合 quick_order.py v8.28（嚴格依序查儲值金→VIP→專業清潔，並跳過付款
 #   方式是儲值金的訂單），「查詢明細」展開區塊補上「被跳過的儲值金折抵訂單」
@@ -140,7 +153,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.25"
+__version__ = "8.26"
 
 import html
 import requests
@@ -151,6 +164,7 @@ from datetime import date, timedelta
 
 from orders import run_process_web, get_region_by_address, run_batch_consistency_check
 from accounts import ACCOUNTS
+from memo_system.ui import render_memo_system
 try:
     import quick_order as qo
 except Exception as e:
@@ -509,26 +523,58 @@ with col_env:
 st.markdown("<hr>", unsafe_allow_html=True)
 
 step("2", "功能選單")
-info_panel(
-    "功能說明",
-    [
-        "批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步 Google 日曆。",
-        "舊客快速建單：用電話查會員，帶入歷史已付款服務資料後建單；需求搜尋整合在此流程內。",
-        "新客資料拆解：貼上客人提供的制式文字，系統拆成欄位供客服修改與複製，不直接送單。",
-        "LINE 通知產生器：用已成立訂單編號補產生通知訊息，支援多筆同時產生。",
-        "訂單轉換：原單A → 多筆新單B1/B2/B3，每筆各建折價券，混合配班（一般專員優先）。",
-        "儲值金補價差：兩段式流程，先建儲值金清零單，再建客付補差價單。",
-        "儲值金購買：客人自己買/儲值一筆金額，付款方式/發票自動沿用會員最近一次 VIP 或"
-        "儲值金購買訂單的設定，都找不到才用最近一次一般服務訂單的設定。",
-    ],
-)
-mode = st.radio(
+
+# v8.26：功能選單改成下拉形式（跟 memo-system 一致），並把備忘系統
+# （排班管理/訂單備註/對帳管理/異動管理/評估工具）合併進同一個選單，
+# 選項文字直接帶簡短說明，不用另外看上面的功能說明面板。
+FUNCTION_OPTIONS = [
+    ("批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步 Google 日曆。",
+     "orders", "批次建單（Google Sheet）"),
+    ("舊客建單：用電話查會員，帶入歷史已付款服務資料後建單；需求搜尋整合在此流程內。",
+     "orders", "舊客快速建單"),
+    ("新客建單：貼上客人提供的制式文字，系統拆成欄位供客服修改與複製，不直接送單。",
+     "orders", "新客資料拆解"),
+    ("儲值金建單：客人自己買/儲值一筆金額，付款方式/發票自動沿用會員最近一次 VIP 或"
+     "儲值金購買訂單的設定，都找不到才用最近一次一般服務訂單的設定。",
+     "orders", "儲值金購買"),
+    ("訂單轉換：原單A → 多筆新單B1/B2/B3，每筆各建折價券，混合配班（一般專員優先）。",
+     "orders", "訂單轉換"),
+    ("儲值金補價差：兩段式流程，先建儲值金清零單，再建客付補差價單。",
+     "orders", "儲值金補價差"),
+    ("排班管理：排班匯入、檸檬人空檔查詢、清空排班。",
+     "memo", "📅 排班管理"),
+    ("LINE通知訊息：用已成立訂單編號補產生通知訊息，支援多筆同時產生。",
+     "orders", "LINE 通知產生器"),
+    ("訂單備註：舊客回購備註回填、新成單提醒建立、客服備忘錄整理。",
+     "memo", "📋 客服作業"),
+    ("對帳管理：ATM 待付款清單查詢、配對銀行明細、更新系統對帳。",
+     "memo", "💰 財務對帳"),
+    ("異動管理：車馬費/異動費、服務前後加減時、退款/客訴退款/物損退款，"
+     "分階段查詢試算後回填後台。",
+     "memo", "🔄 服務異動"),
+    ("評估工具：貼入評估內容，自動產生含時數／移除時數兩種版本文字，金額自動計算。",
+     "memo", "📐 評估文字工具"),
+]
+
+selected_label = st.selectbox(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "訂單轉換", "儲值金補價差", "儲值金購買"],
-    horizontal=True,
+    [label for label, _, _ in FUNCTION_OPTIONS],
+    key="unified_function_select",
 )
+_selected_option = next(item for item in FUNCTION_OPTIONS if item[0] == selected_label)
+_system_key, mode = _selected_option[1], _selected_option[2]
 
 st.markdown("<hr>", unsafe_allow_html=True)
+
+if _system_key == "memo":
+    # 備忘系統的功能：直接沿用同一組後台帳號/密碼/環境，不再重複顯示登入欄位。
+    render_memo_system(
+        forced_main_section=mode,
+        shared_backend_email=backend_email,
+        shared_backend_password=backend_password,
+        shared_env=env,
+    )
+    st.stop()
 
 # =========================================================
 # 模式一：批次建單
