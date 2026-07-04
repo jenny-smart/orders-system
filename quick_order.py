@@ -1,9 +1,16 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.13
-# 最後更新：2026-07-03
+# 版本：v8.14
+# 最後更新：2026-07-04
 #
 # Change Log
+# v8.14
+# - 拿掉 _lookup_district_via_geocode 裡的 Nominatim（OpenStreetMap）免費備援：
+#   實測發現它在台灣的行政區判斷常常不準（例如把「羅斯福路二段」誤判成大安區，
+#   實際上是中正區）。猜錯比不猜更糟——猜錯的區域會被我們送出去，之後後台存的
+#   地址剛好跟猜的一樣，address_mismatch_warning 反而抓不到這個錯誤。現在只用
+#   準確度高很多的 Google 地理編碼 API；沒有金鑰或查詢失敗就不猜，維持原地址，
+#   交由既有的地址比對警示去抓後續落差。
 # v8.13
 # - 新增訂單編號重複偵測（_check_order_no_duplicate）：quick_create_order 與
 #   quick_create_new_customer_order 建單成功後，會用「訂單編號」篩選查詢後台
@@ -81,7 +88,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.13"
+__version__ = "8.14"
 
 import time
 import re
@@ -500,9 +507,13 @@ def _fix_address_district_order(address, fallback_district=""):
 def _lookup_district_via_geocode(address):
     """
     v8.6：查詢地址對應的行政區（區/鄉/鎮），用於補齊新客地址缺少區域的情況。
-    優先嘗試沿用 orders 模組既有的 Google 地圖 API 金鑰（若可取得），
-    查無金鑰則退回 Nominatim（OpenStreetMap）reverse geocode 作為備援。
-    查詢失敗一律回傳空字串，不會擋住建單流程。
+    v8.18：拿掉原本的 Nominatim（OpenStreetMap）免費備援——實測發現它在台灣的
+    行政區判斷常常不準（例如把「羅斯福路二段」誤判成大安區，實際上是中正區），
+    猜錯比不猜更糟：猜錯的區域會被我們自己送出去，之後後台存的地址剛好跟我們
+    猜的一樣，address_mismatch_warning 反而抓不到這個錯誤。
+    現在只用準確度高很多的 Google 地理編碼 API；沒有設定金鑰或查詢失敗時，
+    一律回傳空字串、不猜測，讓地址維持原樣，交給建單後的地址比對警示
+    （address_mismatch_warning）去抓後續後台端可能出現的落差。
     """
     address = str(address or "").strip()
     if not address:
@@ -512,39 +523,23 @@ def _lookup_district_via_geocode(address):
         _google_key = getattr(orders, _attr, None)
         if _google_key:
             break
+    if not _google_key:
+        return ""
     try:
-        if _google_key:
-            resp = requests.get(
-                "https://maps.googleapis.com/maps/api/geocode/json",
-                params={"address": address, "key": _google_key, "region": "tw", "language": "zh-TW"},
-                timeout=5,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for result in data.get("results", []):
-                    for comp in result.get("address_components", []):
-                        types = comp.get("types", [])
-                        if "administrative_area_level_3" in types or "administrative_area_level_2" in types:
-                            name = comp.get("long_name", "")
-                            if re.search(r"(區|鄉|鎮)$", name):
-                                return name
-    except Exception:
-        pass
-    try:
-        resp2 = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": address, "format": "json", "countrycodes": "tw", "addressdetails": 1, "limit": 1},
-            headers={"User-Agent": "LemonCleanOrderSystem/1.0"},
+        resp = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": address, "key": _google_key, "region": "tw", "language": "zh-TW"},
             timeout=5,
         )
-        if resp2.status_code == 200:
-            results2 = resp2.json()
-            if results2:
-                addr_detail = results2[0].get("address", {}) or {}
-                for key in ("city_district", "suburb", "town", "county"):
-                    name = addr_detail.get(key, "")
-                    if name and re.search(r"(區|鄉|鎮)$", name):
-                        return name
+        if resp.status_code == 200:
+            data = resp.json()
+            for result in data.get("results", []):
+                for comp in result.get("address_components", []):
+                    types = comp.get("types", [])
+                    if "administrative_area_level_3" in types or "administrative_area_level_2" in types:
+                        name = comp.get("long_name", "")
+                        if re.search(r"(區|鄉|鎮)$", name):
+                            return name
     except Exception:
         pass
     return ""
