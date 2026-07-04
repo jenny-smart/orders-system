@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.23
+# 版本：v8.24
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-07
 #
 # Change Log
+# v8.24
+# - 配合 quick_order.py v8.26 改用伺服器端「購買項目/付款狀態」篩選查詢，
+#   同步更新「查詢明細」展開區塊的表格欄位（改成顯示依序查了哪些類別、
+#   各查到幾筆已付款訂單、有哪些訂單編號），取代舊版「自己分類全部訂單」
+#   的顯示格式。
 # v8.23
 # - 「儲值金購買」查無可用付款方式/發票設定時，新增「查詢明細」展開區塊，
 #   用表格顯示這支電話實際查到的每一張訂單卡片（訂單編號/分類結果/是否
@@ -131,7 +136,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.23"
+__version__ = "8.24"
 
 import html
 import requests
@@ -1607,29 +1612,25 @@ else:
                 with st.expander("🔍 查詢明細（點開看實際查到什麼，不用再用猜的）", expanded=True):
                     if _dbg.get("error"):
                         st.error(f"查詢時發生例外：{_dbg['error']}")
+                    _queries_dbg = _dbg.get("queries") or []
+                    if _queries_dbg:
+                        st.table([
+                            {
+                                "查詢類別": q.get("label", ""),
+                                "HTTP狀態碼": q.get("http_status", q.get("error", "")),
+                                "查到筆數（已付款）": q.get("count", 0),
+                                "訂單編號": "、".join(q.get("order_nos", [])) or "（無）",
+                            }
+                            for q in _queries_dbg
+                        ])
+                        st.caption(
+                            "依序查詢「VIP券」「儲值金」「專業清潔」三個類別（都只查已付款的訂單）。"
+                            "只要 VIP券／儲值金任一類查得到已付款訂單，就會直接採用其中最新一筆，"
+                            "不會再往下查專業清潔。如果上表看起來明明有查到訂單、卻還是被判定查無資料，"
+                            "麻煩把這個表格截圖給開發人員確認。"
+                        )
                     else:
-                        st.write(f"HTTP 狀態碼：{_dbg.get('http_status')}")
-                        st.write(f"這支電話總共查到 {_dbg.get('block_count', 0)} 張訂單卡片")
-                        _blocks_dbg = _dbg.get("blocks") or []
-                        if _blocks_dbg:
-                            st.table([
-                                {
-                                    "訂單編號": b.get("order_no", ""),
-                                    "分類結果": {
-                                        "vip_purchase": "VIP購買", "stored_value_purchase": "儲值金購買",
-                                        "professional_cleaning": "專業清潔", "other": "其他（不採用）",
-                                    }.get(b.get("type", ""), b.get("type", "")),
-                                    "已付款": "是" if b.get("paid") else "否",
-                                }
-                                for b in _blocks_dbg
-                            ])
-                            st.caption(
-                                "只有「分類結果」是 VIP購買/儲值金購買/專業清潔，且「已付款」是「是」的訂單，"
-                                "才會被拿來當付款方式/發票的範本。如果上表看起來明明有符合的訂單卻還是被判定"
-                                "查無資料，可能是分類或已付款判斷有誤判，麻煩把這個表格截圖給開發人員確認。"
-                            )
-                        else:
-                            st.info("這支電話在後台查不到任何訂單卡片，請確認手機號碼是否正確、或該會員是否真的有訂單紀錄。")
+                        st.info("查詢過程沒有回傳任何結果，請檢查上方是否有例外訊息。")
             elif sv2_result.get("success"):
                 st.success(
                     f"✅ 訂單：{sv2_result.get('order_no') or '（已送出，但查不到訂單編號，請至後台確認）'}　"
