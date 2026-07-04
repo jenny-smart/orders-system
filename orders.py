@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.07
+# 版本：v2026.07.08
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-07
+# 最後更新：2026-07-08
 #
 # Change Log
+# v2026.07.08
+# - 新增 run_standalone_consistency_check：獨立版的雙向訂單一致性檢查，
+#   不用依附在批次建單流程裡，可以直接針對任一份已經有「訂單編號」欄位的
+#   工作表重新跑一次雙向比對（不限定是不是這次批次剛跑過的列）。內部沿用
+#   既有的 verify_batch_order_consistency 核心比對邏輯，只是改成讀取整份
+#   工作表目前的狀態，而不是只看某次批次執行過的 target_rows。
 # v2026.07.07
 # - 修正 ORDER_NO_REGEX 只認得 LC/TT 開頭的訂單編號，導致這次發現的「儲值金
 #   購買」訂單（KK 開頭，例如 KK00212122）完全沒被辨識成一張訂單卡片的起點，
@@ -2959,6 +2965,73 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         "total_processed": len(all_row_results),
         "failed_records": failed_records,
     }
+
+
+def run_standalone_consistency_check(env_name, backend_email, backend_password, sheet_name, region=None):
+    """
+    v2026.07.08：獨立的「雙向訂單一致性檢查」工具，不依附在批次建單流程裡
+    （批次建單裡的一致性檢查只能核對「這次批次剛執行過的列」，沒辦法單獨
+    針對一個既有的成單工作表重新查一次）。
+
+    這裡直接讀取指定工作表目前的全部內容（不限定是不是這次批次跑過的列），
+    只要工作表裡已經有「訂單編號」欄位（不管是這次還是很久以前寫入的），
+    就能重新對這整份工作表跑一次雙向比對：
+    方向一：工作表寫的訂單編號，回查後台是否真的存在，電話/地址/日期/時段
+            是否跟這一列相符。
+    方向二：工作表涉及的每支電話，查後台在該日期範圍內的實際訂單，抓出
+            「後台其實已經成單，但工作表沒有正確記錄」的情況。
+
+    region：可選，若有指定則只檢查該區域的列（用地址判斷區域）；不指定則
+    檢查整份工作表所有列。
+
+    回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
+    """
+    global BASE_URL, ORDER_PREFIX
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+
+    global LOGIN_URL, BOOKING_URL, PURCHASE_URL, GET_MEMBER_URL
+    global CHECK_CONTAIN_URL, CALCULATE_HOUR_URL, GET_SECTION_URL, MAIL_SUCCESS_URL
+
+    LOGIN_URL = f"{BASE_URL}/login"
+    BOOKING_URL = f"{BASE_URL}/booking/stored_value_routine"
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+    GET_MEMBER_URL = f"{BASE_URL}/ajax/get_member"
+    CHECK_CONTAIN_URL = f"{BASE_URL}/ajax/check_contain"
+    CALCULATE_HOUR_URL = f"{BASE_URL}/ajax/calculate_hour"
+    GET_SECTION_URL = f"{BASE_URL}/ajax/get_section"
+    MAIL_SUCCESS_URL = f"{BASE_URL}/purchase/mail_success/{{order_no}}"
+
+    ws, df = load_worksheet(sheet_name)
+    required_cols = ["電話", "地址", "日期", "開始時間", "結束時間", "訂單編號"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise Exception(f"工作表缺少必要欄位: {col}")
+
+    # 只檢查有填日期/電話的列，避免整份工作表裡的空白列造成一堆無意義的解析錯誤
+    df = df[(df["電話"].astype(str).str.strip() != "") & (df["日期"].astype(str).str.strip() != "")]
+    if df.empty:
+        return []
+
+    if region:
+        df = df[df.apply(lambda row: get_region_by_address(str(row["地址"]), ACCOUNTS) == region, axis=1)]
+        if df.empty:
+            return []
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    all_row_results = {}
+    for _, row in df.iterrows():
+        row_num = int(row["__sheet_row__"])
+        all_row_results[row_num] = {"訂單編號": str(row.get("訂單編號", "") or "").strip()}
+
+    return verify_batch_order_consistency(session, df, all_row_results)
 
 
 def run_batch_consistency_check(env_name, region, backend_email, backend_password, sheet_name, target_rows, logger=print):

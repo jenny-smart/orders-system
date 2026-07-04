@@ -1,10 +1,22 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.26
+# 版本：v8.27
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-08
 #
 # Change Log
+# v8.27
+# - 新增獨立的「雙向訂單檢查」功能（選單第13項），不再只能依附在批次建單
+#   的「全部執行完後做一次訂單一致性檢查」勾選框裡。這個功能可以直接針對
+#   一份已經有「訂單編號」欄位的成單工作表（不限定是不是這次批次剛跑過的
+#   列），單獨跟後台系統重新做一次雙向比對：
+#   方向一：工作表寫的訂單編號，回查後台是否真的存在、電話/地址/日期/時段
+#           是否相符。
+#   方向二：工作表涉及的每支電話，查後台在該日期範圍內的實際訂單，抓出
+#           「後台其實已經成單，但工作表沒有正確記錄」的情況。
+#   對應 orders.py 新增的 run_standalone_consistency_check，共用既有的
+#   verify_batch_order_consistency 核心比對邏輯，只是不用先跑一次批次建單。
+#   可選擇只檢查特定區域，或檢查整份工作表。
 # v8.26
 # - 把 memo-system（備忘系統：排班管理/客服作業/財務對帳/服務異動/評估文字
 #   工具）整併進 orders-system，新增 memo_system/ 套件（memo.py/atm.py/
@@ -153,7 +165,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.26"
+__version__ = "8.27"
 
 import html
 import requests
@@ -162,7 +174,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, timedelta
 
-from orders import run_process_web, get_region_by_address, run_batch_consistency_check
+from orders import run_process_web, get_region_by_address, run_batch_consistency_check, run_standalone_consistency_check
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 try:
@@ -554,6 +566,9 @@ FUNCTION_OPTIONS = [
      "memo", "🔄 服務異動"),
     ("評估工具：貼入評估內容，自動產生含時數／移除時數兩種版本文字，金額自動計算。",
      "memo", "📐 評估文字工具"),
+    ("雙向訂單檢查：不用重新跑批次建單，直接針對一份已經有訂單編號的成單工作表，"
+     "跟後台系統做一次雙向比對，找出「工作表有、後台沒有」或「後台有、工作表沒填」的訂單。",
+     "orders", "雙向訂單檢查"),
 ]
 
 selected_label = st.selectbox(
@@ -707,6 +722,51 @@ if mode == "批次建單（Google Sheet）":
                 st.success("✅ 檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
 
 
+
+elif mode == "雙向訂單檢查":
+    step("3", "雙向訂單檢查")
+    info_panel("功能說明", [
+        "不用重新跑一次批次建單，直接針對一份已經有「訂單編號」欄位的成單工作表，"
+        "跟後台系統做一次雙向比對。",
+        "方向一：工作表寫的訂單編號，回查後台是否真的存在，電話/地址/日期/時段是否跟這一列相符。",
+        "方向二：工作表涉及的每支電話，查後台在該日期範圍內的實際訂單，抓出"
+        "「後台其實已經成單，但工作表沒有正確記錄」的情況。",
+        "會檢查整份工作表所有有填電話跟日期的列，不限定是不是最近才寫入的。",
+    ])
+
+    dc_sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604", key="dc_sheet_name")
+    dc_region = st.selectbox("只檢查特定區域（不指定則檢查全部）", ["全部"] + list(ACCOUNTS.keys()), key="dc_region")
+
+    if st.button("🔍 開始雙向比對", use_container_width=True, key="dc_run_btn", type="primary"):
+        if not backend_email.strip() or not backend_password.strip():
+            st.error("請先在上方輸入後台帳號密碼")
+        elif not dc_sheet_name.strip():
+            st.error("請輸入工作表名稱")
+        else:
+            try:
+                with st.spinner("讀取工作表 → 登入後台 → 雙向比對中…"):
+                    dc_problems = run_standalone_consistency_check(
+                        env_name=env,
+                        backend_email=backend_email.strip(),
+                        backend_password=backend_password.strip(),
+                        sheet_name=dc_sheet_name.strip(),
+                        region=None if dc_region == "全部" else dc_region,
+                    )
+                st.session_state.dc_result = {"problems": dc_problems, "sheet_name": dc_sheet_name.strip()}
+            except Exception as e:
+                st.error(f"檢查失敗：{e}")
+
+    dc_result = st.session_state.get("dc_result")
+    if dc_result:
+        st.markdown("#### 檢查結果")
+        _problems = dc_result.get("problems") or []
+        if _problems:
+            st.error(f"⚠️ 工作表「{dc_result.get('sheet_name')}」發現 {len(_problems)} 筆異常，請人工確認：")
+            for _p in _problems:
+                _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查，不是特定一列）"
+                st.warning(f"{_row_label}（訂單 {_p.get('order_no', '') or '（無）'}）：{_p.get('issue')}")
+        else:
+            st.success(f"✅ 工作表「{dc_result.get('sheet_name')}」檢查通過，訂單編號皆與電話/地址/日期/時段相符，後台也沒有查到工作表未記錄的訂單。")
 
 # =========================================================
 # 其他功能
