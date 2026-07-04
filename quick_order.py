@@ -1,9 +1,17 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.22
+# 版本：v8.23
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.23
+# - 修正「儲值金購買」查不到會員過去 VIP/儲值金/一般服務訂單設定的問題：
+#   _find_payway_invoice_source_for_stored_value 跟 _fetch_latest_stored_
+#   value_order_no 查詢 /purchase 時，原本只送 {"phone": ...} 單一參數，
+#   跟後台搜尋表單瀏覽器實際送出的參數（所有欄位都會帶上，只是空字串）不同，
+#   可能觸發後台不同的預設篩選邏輯（例如自動套用當月日期區間），導致查到的
+#   結果比預期少甚至查無資料。現在統一改用既有的
+#   PURCHASE_FILTER_PARAMS_TEMPLATE 當底，只覆蓋真正要篩選的欄位。
 # v8.22
 # - 修正 create_stored_value_purchase_order 執行時報錯
 #   「name 'BeautifulSoup' is not defined」：quick_order.py 過去都是透過
@@ -125,7 +133,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.22"
+__version__ = "8.23"
 
 import time
 import re
@@ -2670,7 +2678,9 @@ def _find_payway_invoice_source_for_stored_value(session, phone_norm):
     3. 都找不到則回傳空白，交由客服手動確認，不會默默送出錯誤的付款/發票設定。
     """
     try:
-        resp = session.get(PURCHASE_URL, params={"phone": phone_norm}, headers=HEADERS, allow_redirects=True)
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params["phone"] = phone_norm
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     except Exception:
         return {"payway": ""}, _empty_invoice_info()
     if resp.status_code != 200:
@@ -2704,7 +2714,9 @@ def _fetch_latest_stored_value_order_no(session, phone_norm, amount):
     v8.21：建立儲值金購買訂單後，回查這支電話最新一筆對應金額的訂單編號。
     """
     try:
-        resp = session.get(PURCHASE_URL, params={"phone": phone_norm}, headers=HEADERS, allow_redirects=True)
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params["phone"] = phone_norm
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     except Exception:
         return None
     if resp.status_code != 200:
