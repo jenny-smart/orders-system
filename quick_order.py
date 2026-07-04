@@ -775,7 +775,7 @@ def _service_amount_from_block(joined_text, fare):
     try:
         total_num = int(round(float(str(total).replace(",", ""))))
         fare_num = int(round(float(str(fare or "0").replace(",", ""))))
-        amount = total_num - fare_num if fare_num and total_num > fare_num else total_num
+        amount = max(total_num - fare_num, 0)
         return str(amount)
     except Exception:
         return total
@@ -1393,6 +1393,17 @@ def quick_create_order(
         price_with_tax = int(round(float(price_no_tax) * TAX_RATE))
     except Exception:
         price_with_tax = price_no_tax
+    backend_actual_amount = None
+    backend_actual_fare = base_data["fare"]
+    try:
+        _verify_block = _fetch_purchase_block_for_order_no(session, order_no)
+        _verify_joined = "\n".join(_verify_block.get("lines", []))
+        backend_actual_fare = _extract_fare_line(_verify_joined) or backend_actual_fare or "0"
+        _verify_amount = _service_amount_from_block(_verify_joined, backend_actual_fare)
+        if _verify_amount:
+            backend_actual_amount = int(round(float(str(_verify_amount).replace(",", ""))))
+    except Exception:
+        pass
     # v8.13：建單成功後檢查此訂單編號是否重複對應到多張訂單卡片
     _is_dup, _dup_count = _check_order_no_duplicate(session, order_no)
     _dup_warning = (
@@ -1403,8 +1414,12 @@ def quick_create_order(
     return {
         "order_no": order_no, "address": selected_address, "date": date_s,
         "period": display_period, "period_s": period_s, "person": str(person),
-        "price": price_no_tax, "price_with_tax": price_with_tax, "service_amount": price_with_tax,
-        "fare": base_data["fare"], "payway": payway, "region": region,
+        "price": price_no_tax,
+        "price_with_tax": backend_actual_amount if backend_actual_amount is not None else price_with_tax,
+        "service_amount": backend_actual_amount if backend_actual_amount is not None else price_with_tax,
+        "formula_price_with_tax": price_with_tax,
+        "backend_actual_amount": backend_actual_amount,
+        "fare": backend_actual_fare, "payway": payway, "region": region,
         "staff": meta.get("服務人員") or staff_display, "service_status": meta.get("服務狀態", "未處理"),
         "order_no_duplicated": _is_dup, "order_no_duplicate_count": _dup_count,
         "duplicate_order_warning": _dup_warning,
@@ -2551,7 +2566,14 @@ def build_line_message(order_result):
         actual_period = str(order_result.get("actual_period", "") or "")
         person_cnt = str(order_result.get("person", "") or "")
         period = _format_period_display(period_raw, person_cnt, display_override=actual_period)
-    price = order_result.get("service_amount") or order_result.get("price_with_tax", order_result.get("price"))
+    price = (
+        order_result.get("line_amount")
+        or order_result.get("payment_amount")
+        or order_result.get("backend_actual_amount")
+        or order_result.get("price_with_tax")
+        or order_result.get("service_amount")
+        or order_result.get("price")
+    )
     fare = order_result["fare"]
     address = order_result["address"]
     order_no = order_result["order_no"]
@@ -3547,6 +3569,8 @@ def stored_value_makeup_create_paid_order(
     else:
         mark_paid_ok, mark_paid_msg = False, f"服務金額（總金額扣除車馬費）為 {payable_amount_num} 元，需付款，不自動標記已付款"
         invoice_note_ok, invoice_note_msg = False, f"服務金額（總金額扣除車馬費）為 {payable_amount_num} 元，需開立發票，不自動標註不開立發票"
+    paid_order["service_amount"] = str(payable_amount_num)
+    paid_order["price_with_tax"] = str(payable_amount_num)
 
     # v2026.07.10：LINE 訊息改成「儲值金歸零訂單＋補價差訂單 合併訂單」的
     # 格式，另起一行顯示補價差訂單真正的服務時間；服務金額這行要顯示（跟
@@ -3557,8 +3581,10 @@ def stored_value_makeup_create_paid_order(
             f"服務時間 : {stored_order_no}＋{paid_order['order_no']}  合併訂單\n"
             f"                      實際服務時間：{str(service_date).replace('-', '/')} {_new_period_disp}"
         )
-    _paid_amount = paid_order.get("service_amount") or paid_order.get("price_with_tax") or paid_order.get("price")
-    paid_order["custom_amount_line"] = f"服務金額：{_paid_amount}（含稅，已扣除儲值金餘額${ctx['balance']}）"
+    if auto_settle_zero_amount:
+        paid_order["custom_amount_line"] = f"服務金額：{payable_amount_num}（含稅，已扣除儲值金餘額${ctx['balance']}）"
+    else:
+        paid_order["custom_amount_line"] = f"服務金額：{payable_amount_num}（含稅）"
     paid_order["hide_amount_line"] = False
 
     return {
@@ -4212,12 +4238,14 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     # 查詢失敗不影響建單結果，只是無法附上警示。
     price_mismatch_warning = ""
     backend_actual_amount = None
+    backend_actual_fare = "0"
     address_mismatch_warning = ""
     backend_actual_address = ""
     try:
         _verify_block = _fetch_purchase_block_for_order_no(session, order_no)
         _verify_joined = "\n".join(_verify_block.get("lines", []))
         _verify_fare = _extract_fare_line(_verify_joined) or "0"
+        backend_actual_fare = _verify_fare
         _verify_amount = _service_amount_from_block(_verify_joined, _verify_fare)
         if _verify_amount:
             backend_actual_amount = int(round(float(str(_verify_amount).replace(",", ""))))
@@ -4272,15 +4300,16 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "hour": hour,
         "person": person,
         "staff": staff_display,
-        "price_with_tax": price_with_tax,
-        "service_amount": price_with_tax,
+        "price_with_tax": backend_actual_amount if backend_actual_amount is not None else price_with_tax,
+        "service_amount": backend_actual_amount if backend_actual_amount is not None else price_with_tax,
+        "formula_price_with_tax": price_with_tax,
         "backend_actual_amount": backend_actual_amount,
         "price_mismatch_warning": price_mismatch_warning,
         "backend_actual_address": backend_actual_address,
         "address_mismatch_warning": address_mismatch_warning,
         "order_no_duplicated": _is_dup, "order_no_duplicate_count": _dup_count,
         "duplicate_order_warning": _dup_warning,
-        "fare": "0",
+        "fare": backend_actual_fare,
         "payway": payway,
         "region": _region_computed,
         "day_type": day_type,

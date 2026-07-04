@@ -410,6 +410,29 @@ def h(value, default="未知"):
     return html.escape(text if text else default)
 
 
+def show_order_info_cards(order, extra_cards=None):
+    if not order:
+        return
+    amount = (
+        order.get("service_amount")
+        or order.get("price_with_tax")
+        or order.get("stored_value_amount")
+        or order.get("price")
+        or "—"
+    )
+    cards = [
+        ("訂單編號", order.get("order_no") or "—"),
+        ("金額", f"{amount} 元" if str(amount) != "—" else "—"),
+        ("車馬費", f"{order.get('fare') or '0'} 元"),
+        ("專員", order.get("staff") or "（無班表資料）"),
+    ]
+    if extra_cards:
+        cards = extra_cards
+    cols = st.columns(len(cards))
+    for col, (label, value) in zip(cols, cards):
+        col.metric(label, value)
+
+
 def person_hour_display(person, hour):
     return f"{person}人{hour}小時" if (person or hour) else "未知"
 
@@ -1019,6 +1042,7 @@ else:
                                 nc_result["mail_sent"] = False
                                 nc_result["mail_msg"] = "尚未發送"
                             st.session_state.q_order_result = nc_result
+                            show_order_info_cards(nc_result)
                             st.success(f"✅ 訂單建立成功：{nc_result['order_no']}")
                         except Exception as e:
                             st.error(f"建單失敗：{e}")
@@ -1366,6 +1390,7 @@ else:
         # 顯示建單結果
         _r = st.session_state.get("nc_result", {})
         if _r.get("order_no"):
+            show_order_info_cards(_r)
             st.success(
                 f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　"
                 f"{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元　"
@@ -1524,6 +1549,12 @@ else:
             for r in new_orders_ok:
                 ph_str = f"{r['person']}人{r['hour']}小時"
                 _r_order_result = r.get("order_result") or {}
+                show_order_info_cards({
+                    "order_no": r.get("order_no"),
+                    "service_amount": r.get("price_with_tax"),
+                    "fare": _r_order_result.get("fare", "0"),
+                    "staff": _r_order_result.get("staff"),
+                })
                 st.success(
                     f"✅ 第二段：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，"
                     f"折價券 {r['coupon_code']}（{r['price_with_tax']}元）　"
@@ -1718,6 +1749,7 @@ else:
         if paid_stage:
             po = paid_stage["paid_order"]
             cb = paid_stage.get("coupon_b", {})
+            show_order_info_cards(po)
             st.success(
                 f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；"
                 f"優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。　"
@@ -1837,6 +1869,15 @@ else:
                     else:
                         st.info("查詢過程沒有回傳任何結果，請檢查上方是否有例外訊息。")
             elif sv2_result.get("success"):
+                show_order_info_cards(
+                    sv2_result,
+                    extra_cards=[
+                        ("訂單編號", sv2_result.get("order_no") or "—"),
+                        ("儲值金額", f"{sv2_result.get('stored_value_amount')} 元"),
+                        ("贈購物金", f"{sv2_result.get('bonus')} 元"),
+                        ("付款方式", sv2_result.get("payway") or "—"),
+                    ],
+                )
                 st.success(
                     f"✅ 訂單：{sv2_result.get('order_no') or '（已送出，但查不到訂單編號，請至後台確認）'}　"
                     f"儲值金額：{sv2_result.get('stored_value_amount')}元　"
@@ -1889,11 +1930,15 @@ else:
     if order_result:
         st.markdown("<hr>", unsafe_allow_html=True)
         step("5", "執行結果")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("訂單編號", order_result["order_no"])
-        c2.metric("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
-        c3.metric("車馬費", order_result.get("fare") or "0")
-        c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "未發送")
+        show_order_info_cards(
+            order_result,
+            extra_cards=[
+                ("訂單編號", order_result["order_no"]),
+                ("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—"),
+                ("車馬費", order_result.get("fare") or "0"),
+                ("確認信", "已發送" if order_result.get("mail_sent") else "未發送"),
+            ],
+        )
         st.success(f"✅ 訂單建立成功：{order_result['order_no']}　👤 專員：{order_result.get('staff') or '（無班表資料）'}")
         if order_result.get("price_mismatch_warning"):
             st.warning(order_result["price_mismatch_warning"])
