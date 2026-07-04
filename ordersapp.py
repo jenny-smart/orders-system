@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.32
+# 版本：v8.33
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.33
+# - 修正 v8.32 的疏漏：訂單轉換分階段介面用到的
+#   convert_order_stage1_reassign_original / convert_order_stage2_create_
+#   new_orders 忘記加進 _REQUIRED_QUICK_ORDER_NAMES 清單，導致這兩個函式
+#   沒被自動載入進來，畫面按下①按鈕會報「name 'convert_order_stage1_
+#   reassign_original' is not defined」。已補上。
 # v8.32
 # - 訂單轉換畫面改成跟儲值金補價差一致的分階段介面：
 #   ① 修改原訂單日期並換成檸檬人排班（呼叫 convert_order_stage1_
@@ -194,7 +200,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.32"
+__version__ = "8.33"
 
 import html
 import requests
@@ -233,6 +239,8 @@ _REQUIRED_QUICK_ORDER_NAMES = [
     "create_coupon",
     "convert_order",
     "convert_order_multi",
+    "convert_order_stage1_reassign_original",
+    "convert_order_stage2_create_new_orders",
     "get_stored_value",
     "calc_stored_value_plan",
     "stored_value_makeup_convert",
