@@ -1,10 +1,18 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.34
+# 版本：v8.36
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.36
+# - 訂單轉換的第三階段（比對金額差額）改回第二段完成後直接自動顯示，
+#   不用再另外按按鈕（配合 quick_order.py v8.38 的 LINE 訊息格式調整）。
+# v8.35
+# - 訂單轉換第二段結果補上顯示每筆新訂單「已標記為已付款」「發票號碼已
+#   標註不開立發票」的狀態（跟儲值金補價差一致）。
+# - 金額比對獨立成第三階段按鈕「③ 比對金額差額」，不再是第二段完成後自動
+#   顯示，讓三個階段的操作跟畫面呈現更清楚對應。
 # v8.34
 # - 修正訂單轉換第一段結果區塊呼叫了未載入的私有函式 _configure_
 #   environment，導致「NameError: name '_configure_environment' is not
@@ -205,7 +213,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.34"
+__version__ = "8.36"
 
 import html
 import requests
@@ -1403,7 +1411,7 @@ else:
             conv_target_date = st.date_input("原訂單A要改到的新日期", value=date.today() + timedelta(days=1), key="conv_target_date")
 
         if st.button("① 修改原訂單日期並換成檸檬人排班", use_container_width=True, key="conv_stage1_btn"):
-            # 開始新的一次轉換前，先清空上一次殘留的舊結果（含第二段）。
+            # 開始新的一次轉換前，先清空上一次殘留的舊結果（含第二、三段）。
             st.session_state.conv_stage1 = {}
             st.session_state.conv_stage2 = {}
             if not backend_email.strip() or not backend_password.strip():
@@ -1487,7 +1495,7 @@ else:
             if st.button("② 建立新訂單（優惠券折抵）", use_container_width=True, key="conv_stage2_btn"):
                 st.session_state.conv_stage2 = {}
                 try:
-                    with st.spinner("第二段執行中：建折價券 → 建新訂單 → 比對金額…"):
+                    with st.spinner("第二段執行中：建折價券 → 建新訂單 → 標記已付款 → 標註發票…"):
                         stage2 = convert_order_stage2_create_new_orders(conv_stage1, new_orders_input)
                     st.session_state.conv_stage2 = stage2
                 except Exception as e:
@@ -1506,6 +1514,14 @@ else:
                     f"折價券 {r['coupon_code']}（{r['price_with_tax']}元）　"
                     f"👤 專員：{_r_order_result.get('staff') or '（無班表資料）'}"
                 )
+                if r.get("mark_paid_ok"):
+                    st.caption(f"✅ {r['order_no']} 已標記為已付款")
+                else:
+                    st.warning(f"⚠️ {r['order_no']} 標記已付款失敗，請至後台手動改成已付款：{r.get('mark_paid_msg', '')}")
+                if r.get("invoice_note_ok"):
+                    st.caption(f"✅ {r['order_no']} 發票號碼欄位已標註「不開立發票」")
+                else:
+                    st.warning(f"⚠️ {r['order_no']} 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{r.get('invoice_note_msg', '')}")
                 if _r_order_result.get("order_no_duplicated"):
                     show_duplicate_order_warning(
                         r.get("order_no"), _r_order_result.get("order_no_duplicate_count", 2),
@@ -1513,17 +1529,6 @@ else:
                     )
             for r in [r for r in conv_stage2.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 第二段 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
-
-            # 金額比對（客服要求的驗證步驟）
-            orig_amount = conv_stage2.get("service_amount_a_display", 0)
-            new_amount = conv_stage2.get("new_amount_total", 0)
-            new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
-            if conv_stage2.get("ph_warning"):
-                st.warning(conv_stage2["ph_warning"])
-            elif orig_amount:
-                st.success(f"金額比對：原訂單A {orig_amount}元 ＝ 新訂單合計 {new_amt_detail} = {new_amount}元")
-            else:
-                st.warning(f"金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {new_amt_detail} = {new_amount}元，請手動核對。")
 
             with st.expander("🔍 細項", expanded=False):
                 st.markdown(f"[🔗 開啟原訂單A後台]({conv_stage2['purchase_url_a']})")
@@ -1546,6 +1551,18 @@ else:
                 st.text_area("原訂單A備註", conv_stage2.get("note_a", ""), height=70, label_visibility="collapsed", key="conv_note_a_out")
                 copy_button("複製原訂單A備註", conv_stage2.get("note_a", ""), "copy_note_a")
                 st.caption(f"全單備註：{conv_stage2.get('note', '')}")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("6", "第三階段：比對原訂單與新訂單金額差額")
+            _orig_amount = conv_stage2.get("service_amount_a_display", 0)
+            _new_amount = conv_stage2.get("new_amount_total", 0)
+            _new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
+            if conv_stage2.get("ph_warning"):
+                st.warning(conv_stage2["ph_warning"])
+            elif _orig_amount:
+                st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
+            else:
+                st.warning(f"⚠️ 金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {_new_amt_detail} = {_new_amount}元，請手動核對。")
     # --------------------------------------------------
     # 儲值金補價差
     # --------------------------------------------------
