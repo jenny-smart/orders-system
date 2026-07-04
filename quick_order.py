@@ -1,9 +1,20 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.35
+# 版本：v8.36
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.36
+# - 發票欄位標註文字改成「不開立發票」（原本寫「不用開發票」），跟後台實際
+#   顯示格式一致，已用真實訂單驗證過（訂單列表會直接顯示「發票：不開立
+#   發票」）。
+# - 訂單轉換改成跟儲值金補價差一樣的分階段介面，新增
+#   convert_order_stage1_reassign_original（第一段：把原訂單A的服務日期
+#   改到指定新日期，並一律自動補檸檬人排班，不用客服勾選，此單必須全是
+#   檸檬人）跟 convert_order_stage2_create_new_orders（第二段：用第一段
+#   結果建折價券＋建新訂單，並比對原訂單A金額跟新訂單合計是否一致，有差額
+#   會在 ph_warning 明確標示）。原本一次到位的 convert_order_multi 保留
+#   （內部改成呼叫 stage1+stage2），維持向下相容。
 # v8.35
 # - 找到「儲值金訂單付款方式空白、卡在待付款」的真正根因：實際查看
 #   /booking/stored_value_routine 頁面原始 HTML 後發現，這個頁面本身「有」
@@ -240,7 +251,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.35"
+__version__ = "8.36"
 
 import time
 import re
@@ -2125,27 +2136,20 @@ def convert_order(
     }
 
 
-def convert_order_multi(
-    env_name, backend_email, backend_password, order_no_a, new_orders, clean_type_id="1",
-    allow_auto_lemon_shift=False,
+def convert_order_stage1_reassign_original(
+    env_name, backend_email, backend_password, order_no_a, target_date_s=None, clean_type_id="1",
 ):
     """
-    v8.4 一對多訂單轉換：原單A → 多筆新單B1/B2/B3...
+    v2026.07.10：訂單轉換第一階段（跟儲值金補價差的分階段介面一致）——只處理
+    原訂單A：把服務日期改到指定的新日期，並把配班全部換成檸檬人（一律自動
+    補檸檬人排班，不用客服另外勾選，跟儲值金補價差第一段「此單必須全是
+    檸檬人」的規則一致）。
 
-    new_orders: list of dict，每筆包含：
-        date_s   : 服務日期（YYYY-MM-DD）
-        period_s : 服務時段
-        hour     : 時數（整數）
-        person   : 人數（整數）
+    target_date_s 沒給的話就不改日期，只做換人為檸檬人。
 
-    allow_auto_lemon_shift: v8.13 新增。查無班表/查無可換班檸檬人時，
-        是否自動去勾檸檬人班表。預設 False（不自動勾），必須客服明確
-        勾選才會執行，避免查不到班表就自動幫忙勾人。
-
-    流程：
-    1. 查原訂單A，混合配班（一般專員優先，不足補檸檬人）
-    2. 逐筆新訂單：calculate_hour → 建折價券 → 建單 → 混合配班
-    3. 備註自動寫入：A+B1+B2+B3 合併服務
+    回傳的 dict 帶著第二階段（建新訂單）需要的所有資訊，第二階段直接把這個
+    dict 傳進 convert_order_stage2_create_new_orders 即可，不用再重新查一次
+    原訂單A。
     """
     base_url = _configure_environment(env_name)
     session = requests.Session()
@@ -2167,20 +2171,18 @@ def convert_order_multi(
         service_amount_a_int = int(float(str(service_amount_a or "0").replace(",", "")))
     except Exception:
         service_amount_a_int = 0
-    # 優先從後台 /purchase/edit 頁面取原始人數（最準確）
+
     person_a = 0
     try:
         _edit_id_a = _fetch_order_edit_id(session, order_no_a)
         if _edit_id_a:
             _edit_resp_a = session.get(f"{base_url}/purchase/edit/{_edit_id_a}", headers=HEADERS, allow_redirects=True)
             if _edit_resp_a.status_code == 200:
-                # 取人數
                 _pm = re.search(r'name=["\'"]person["\'"][^>]*value=["\'"]?(\d+)["\'"]?', _edit_resp_a.text, re.I)
                 if not _pm:
                     _pm = re.search(r'value=["\'"]?(\d+)["\'"]?[^>]*name=["\'"]person["\'"]?', _edit_resp_a.text, re.I)
                 if _pm:
                     person_a = int(_pm.group(1))
-                # 取原始服務金額（price 欄位，未稅）
                 _price_m = re.search(r'name=["\'"]price["\'"][^>]*value=["\'"]?([\d.]+)["\'"]?', _edit_resp_a.text, re.I)
                 if _price_m and not service_amount_a_int:
                     try:
@@ -2192,13 +2194,11 @@ def convert_order_multi(
         pass
 
     if not person_a:
-        # 備援：從訂單文字解析
         _person_str, _ = _extract_person_hour_line(joined_a)
         if _person_str and _person_str.isdigit():
             person_a = int(_person_str)
-
     if not person_a:
-        person_a = len(new_orders)  # 最後 fallback
+        person_a = 2  # 最後 fallback
 
     if not phone_a:
         raise Exception(f"無法從訂單 {order_no_a} 取得客人電話")
@@ -2217,26 +2217,16 @@ def convert_order_multi(
         "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
     }
 
-    # ── Step 3: 原訂單A 先勾班 → 改日期 → 換人 ──────────────────
-    # 目標日期：取所有新訂單中最早的日期
-    new_dates = sorted([o.get("date_s", "") for o in new_orders if o.get("date_s")])
-    target_date_a = new_dates[0] if new_dates else service_date_a
-    # 原訂單A的時段用自己原本的時段（09:00-16:00 = 全6）
+    # ── Step 3: 原訂單A 先勾班 → 改日期 → 換人（一律全部檸檬人）───
+    target_date_a = target_date_s or service_date_a
     period_a_for_assign = period_a_raw.replace(" ", "") if period_a_raw else ""
 
-    # Step 3a: 先勾檸檬人班表（用新日期 + 原訂單A原本時段）
-    # v8.13：只有客服明確勾選「查無班表時自動補檸檬人」才會執行，預設跳過。
-    if allow_auto_lemon_shift:
-        pre_shift_a = ensure_lemon_cleaner_shifts(
-            session=session, base_url=base_url,
-            service_date=target_date_a,
-            period_s=period_a_for_assign,
-            person_count=str(person_a),
-        )
-    else:
-        pre_shift_a = {"success": True, "assigned": [], "message": "未勾選自動補檸檬人，跳過預先勾班"}
+    # v2026.07.10：跟儲值金補價差一致，一律自動補檸檬人排班，不用客服勾選。
+    pre_shift_a = ensure_lemon_cleaner_shifts(
+        session=session, base_url=base_url,
+        service_date=target_date_a, period_s=period_a_for_assign, person_count=str(person_a),
+    )
 
-    # Step 3b: 改原訂單A的服務日期（勾完班後才改，避免後台卡關）
     date_change_ok = False
     date_change_msg = ""
     if target_date_a and target_date_a != service_date_a:
@@ -2248,21 +2238,51 @@ def convert_order_multi(
         date_change_msg = "日期相同，無須修改"
         target_date_a = service_date_a
 
-    # Step 3c: 排班修改頁換人（用新日期，應已有剛勾的檸檬人）
     lemon_result_a = assign_lemon_cleaners_to_order(
         session=session, base_url=base_url, order_no_a=order_no_a,
         service_date=target_date_a, period_s=period_a_for_assign, person_count=str(person_a),
-        allow_auto_lemon_shift=allow_auto_lemon_shift,
+        allow_auto_lemon_shift=True,
     )
     lemon_result_a["date_change_ok"] = date_change_ok
     lemon_result_a["date_change_msg"] = date_change_msg
     lemon_result_a["new_service_date"] = target_date_a
     lemon_result_a["pre_shift_a"] = pre_shift_a
-    # 用排班頁 originShiftId 數量更新 person_a（最準確的原訂單人數）
     if lemon_result_a.get("actual_person_count"):
         person_a = lemon_result_a["actual_person_count"]
 
-    # ── Step 4: 預先做一次 check_contain 取 area_id/company_id ───
+    return {
+        "order_no_a": order_no_a, "session": session, "base_url": base_url, "env_name": env_name,
+        "phone_a": phone_a, "address_a": address_a, "payway_a": payway_a, "region_a": region_a,
+        "person_a": person_a, "service_amount_a_int": service_amount_a_int,
+        "period_a_raw": period_a_raw, "service_date_a": service_date_a,
+        "target_date_a": target_date_a, "clean_type_id": clean_type_id,
+        "lookup_result": lookup_result, "member_payload": member_payload,
+        "lemon_result_a": lemon_result_a,
+    }
+
+
+def convert_order_stage2_create_new_orders(stage1_result, new_orders):
+    """
+    v2026.07.10：訂單轉換第二階段（跟儲值金補價差的分階段介面一致）——用
+    第一階段的結果，建折價券（面額=新訂單含稅金額，讓新訂單被折抵成 0，
+    實際上是把原訂單A的錢轉過來）並建立新訂單B1/B2/B3...，最後比對「原訂單A
+    的服務金額」跟「新訂單合計金額」是否有差額，有差額會在結果的 ph_warning
+    裡明確標示出來，不會默默忽略。
+    """
+    session = stage1_result["session"]
+    base_url = stage1_result["base_url"]
+    env_name = stage1_result["env_name"]
+    order_no_a = stage1_result["order_no_a"]
+    address_a = stage1_result["address_a"]
+    payway_a = stage1_result["payway_a"]
+    region_a = stage1_result["region_a"]
+    clean_type_id = stage1_result["clean_type_id"]
+    lookup_result = stage1_result["lookup_result"]
+    member_payload = stage1_result["member_payload"]
+    lemon_result_a = stage1_result["lemon_result_a"]
+    service_amount_a_int = stage1_result["service_amount_a_int"]
+    person_a = stage1_result["person_a"]
+
     member = member_payload.get("member", {})
     best_addr = pick_best_address_info(member_payload, address_a)
     if not best_addr:
@@ -2282,40 +2302,6 @@ def convert_order_multi(
         if area_info:
             best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
             best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
-    old_purchase = best_addr.get("purchase", {}) if isinstance(best_addr.get("purchase"), dict) else {}
-
-    def pick(key, default=""):
-        v = old_purchase.get(key)
-        return v if v not in (None, "") else default
-
-    base_calc_data = {
-        "clean_type_id": clean_type_id, "phone": phone_a,
-        "name": str(member.get("name") or "").strip(),
-        "email": str(member.get("email") or "").strip(),
-        "tel": str(member.get("tel") or phone_a),
-        "addressId": str(best_addr.get("addressId") or ""),
-        "country_id": str(best_addr.get("country_id") or pick("country_id", "12")),
-        "address": selected_address, "ping": str(pick("ping", "4")),
-        "room": str(pick("room", "0")), "bathroom": str(pick("bathroom", "0")),
-        "balcony": str(pick("balcony", "0")), "livingroom": str(pick("livingroom", "0")),
-        "kitchen": str(pick("kitchen", "0")), "window": str(pick("window", "")),
-        "shutter": str(pick("shutter", "")), "clothes": str(pick("clothes", "0")),
-        "dyson": str(pick("dyson", "0")), "refrigerator": str(pick("refrigerator", "0")),
-        "disinfection": str(pick("disinfection", "0")), "go_abord": str(pick("go_abord", "0")),
-        "home_move": str(pick("home_move", "0")), "storage": str(pick("storage", "0")),
-        "cabinet": str(pick("cabinet", "0")), "quintuple": str(pick("quintuple", "0")),
-        "price": "", "price_vvip": "", "period": "", "cycle": "1",
-        "fare": "", "memo": "", "notice": "",
-        "payway": PAYWAY_MAP.get(payway_a, "2"),
-        "invoice_type": "2", "carrier_type_id": "1",
-        "carrier_info": str(member.get("email") or ""),
-        "company_title": "", "company_no": "", "donate_code": "8585", "is_backend": "477",
-        "member_id": str(member.get("member_id") or ""),
-        "company_id": str(best_addr.get("company_id") or pick("company_id", "1")),
-        "area_id": str(best_addr.get("area_id") or pick("area_id", "25")),
-        "lat": str(best_addr.get("lat") or pick("lat", "")),
-        "lng": str(best_addr.get("lng") or pick("lng", "")),
-    }
 
     today_str = date.today().strftime("%Y-%m-%d")
     new_order_results = []
@@ -2328,7 +2314,6 @@ def convert_order_multi(
         new_person = str(new_order["person"])
 
         try:
-            # 4a. 用固定公式算含稅金額：人時 × 600(平日)/700(週末)（單價已含稅，不再乘1.05）
             _day_type_new = _day_type_from_date(new_date_s)
             _unit_price_new = 700 if _day_type_new == "週末" else 600
             _person_hours_new = int(new_person) * int(float(new_hour))
@@ -2336,8 +2321,6 @@ def convert_order_multi(
             if price_with_tax <= 0 and payway_a != "儲值金":
                 raise Exception(f"金額計算為 0（{new_person}人{new_hour}小時），請確認設定")
 
-            # 4b. 建折價券
-            # （班表若無人，quick_create_order 內部會自動勾檸檬人班再重查）（面額=含稅金額，prefix=c{A後3碼}{序號}）
             coupon_prefix = f"c{order_no_a[-3:]}{idx+1}"
             coupon_code = _build_coupon_via_session(
                 session, base_url,
@@ -2347,20 +2330,14 @@ def convert_order_multi(
                 prefix=coupon_prefix, piece=2,
                 regions=["台北", "台中"], service_items=["居家清潔", "裝修細清"],
             )
-
-            # 4c. 建新訂單
             order_result = quick_create_order(
                 env_name=env_name, payway=payway_a, region=region_a,
                 lookup_result=lookup_result, address=address_a,
                 clean_type_id=clean_type_id, date_s=new_date_s, period_s=new_period_s,
                 hour=new_hour, person=new_person, discount_code=coupon_code,
-                allow_auto_lemon_shift=allow_auto_lemon_shift,
+                allow_auto_lemon_shift=True,
             )
             new_order_nos.append(order_result["order_no"])
-
-            # 新訂單建單後不另外換人
-            # quick_create_order 建單時後台已依班表自動配班
-            # 若班表無人，quick_create_order 內部已先勾檸檬人班再建單
             new_order_results.append({
                 "index": idx + 1, "order_no": order_result["order_no"],
                 "date_s": new_date_s, "period_s": new_period_s,
@@ -2371,20 +2348,17 @@ def convert_order_multi(
                 "line_message": build_line_message(order_result),
                 "error": None,
             })
-
         except Exception as e:
             new_order_results.append({
                 "index": idx + 1, "date_s": new_date_s, "period_s": new_period_s,
                 "hour": new_hour, "person": new_person, "order_no": None, "error": str(e),
             })
 
-    # ── Step 4e: 建立合併 LINE 訊息（所有新訂單 B1+B2...）────────
-    # 用現有 session，不重新登入
+    # 合併 LINE 訊息（所有新訂單 B1+B2...）
     combined_line_message = ""
     try:
         b_nos_for_line = [r["order_no"] for r in new_order_results if r.get("order_no")]
         if len(b_nos_for_line) > 1:
-            # 直接用內部函式，傳入現有 session
             orders_info = []
             for ono in b_nos_for_line:
                 block = _fetch_purchase_block_for_order_no(session, ono)
@@ -2395,17 +2369,14 @@ def convert_order_multi(
                 p_str, _ = _extract_person_hour_line(joined_b)
                 addr_b = _extract_address_line(lines_b)
                 fare_b = _extract_fare_line(joined_b) or "0"
-                pw_b = payway_a
                 svc_amt = _service_amount_from_block(joined_b, fare_b)
                 orders_info.append({
                     "order_no": ono, "service_date": sdate, "period_s": stime,
                     "actual_period": actual_t, "person": p_str,
                     "address": addr_b or address_a,
-                    "fare": fare_b, "payway": pw_b,
+                    "fare": fare_b, "payway": payway_a,
                     "service_amount": svc_amt, "region": region_a,
                 })
-            # 合併時段顯示
-            from orders import display_period_text
             unique_dates = sorted({o["service_date"] for o in orders_info})
             all_same_date = len(unique_dates) == 1
             if all_same_date:
@@ -2424,7 +2395,6 @@ def convert_order_multi(
                         except Exception:
                             pass
                 combined_period = "＋".join(period_parts)
-                # v8.6：此區塊固定合併多筆訂單（b_nos_for_line > 1），不會有單筆重複問題
                 if _total_ph_same_date and len(period_parts) > 1:
                     combined_period += f"，共{_total_ph_same_date}人時"
                 multi_date = False
@@ -2443,17 +2413,12 @@ def convert_order_multi(
             amount_display = "＋".join(amt_parts) + "＝" + str(total_amt) if len(amt_parts) > 1 else str(total_amt)
             first = orders_info[0]
             line_result = {
-                "order_no": first["order_no"],
-                "all_order_nos": b_nos_for_line,
-                "address": address_a,
-                "date": first["service_date"],
+                "order_no": first["order_no"], "all_order_nos": b_nos_for_line,
+                "address": address_a, "date": first["service_date"],
                 "period": first["period_s"], "period_s": first["period_s"],
-                "actual_period": first["actual_period"],
-                "combined_period": combined_period,
-                "multi_date": multi_date,
-                "person": first["person"],
-                "service_amount": amount_display,
-                "price_with_tax": str(total_amt),
+                "actual_period": first["actual_period"], "combined_period": combined_period,
+                "multi_date": multi_date, "person": first["person"],
+                "service_amount": amount_display, "price_with_tax": str(total_amt),
                 "fare": str(total_fare) if total_fare else "0",
                 "payway": payway_a, "region": region_a,
                 "env_name": env_name, "session": session,
@@ -2464,7 +2429,7 @@ def convert_order_multi(
     except Exception as _e_line:
         combined_line_message = f"（合併 LINE 訊息產生失敗：{_e_line}）"
 
-    # ── Step 5: 備註文字並自動寫入 ──────────────────────────────
+    # 備註文字並自動寫入
     b_nos = [r["order_no"] for r in new_order_results if r.get("order_no")]
     all_nos_str = "+".join([order_no_a] + b_nos)
     combo_desc = "、".join([f"{r['person']}人{r['hour']}小時" for r in new_order_results if r.get("order_no")])
@@ -2475,38 +2440,18 @@ def convert_order_multi(
         if r.get("order_no"):
             _update_order_note(session, base_url, r["order_no"], note_text)
 
-    # ── Step 6: 人時與金額驗證 ──────────────────────────────────
-    _service_amount_a = service_amount_a_int  # 已在 Step 1 解析
-
-    # 原訂單人時：person_a × 時段小時數
-    _PERIOD_HOURS_CALC = {
-        "09:00-16:00": 6, "09:00-18:00": 8,
-        "08:30-12:30": 4, "09:00-12:00": 3, "09:00-11:00": 2,
-        "14:00-18:00": 4, "14:00-17:00": 3, "14:00-16:00": 2,
-    }
-    _period_compact = (period_a_raw or "").replace(" ", "")
-    _hour_per_person = _PERIOD_HOURS_CALC.get(_period_compact, 0)
-    original_ph = person_a * _hour_per_person
-
-    new_amount_total = sum(
-        int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no")
-    )
-    new_ph = sum(
-        int(r.get("person", 0)) * int(r.get("hour", 0))
-        for r in new_order_results if r.get("order_no")
-    )
-
+    # v2026.07.10：比對原訂單A跟新訂單合計是否有差額（客服要求的驗證步驟）
+    new_amount_total = sum(int(r.get("price_with_tax", 0)) for r in new_order_results if r.get("order_no"))
+    new_ph = sum(int(r.get("person", 0)) * int(r.get("hour", 0)) for r in new_order_results if r.get("order_no"))
     ph_warning = None
-    if _service_amount_a > 0 and new_amount_total != _service_amount_a:
-        diff_amount = _service_amount_a - new_amount_total
+    if service_amount_a_int > 0 and new_amount_total != service_amount_a_int:
+        diff_amount = service_amount_a_int - new_amount_total
         ph_warning = (
-            f"⚠️ 金額不符：原訂單服務金額 {_service_amount_a} 元，"
+            f"⚠️ 金額不符：原訂單服務金額 {service_amount_a_int} 元，"
             f"新訂單合計 {new_amount_total} 元（{' + '.join(str(r.get('price_with_tax', 0)) for r in new_order_results if r.get('order_no'))}），"
             f"差額 {abs(diff_amount)} 元（{'缺少' if diff_amount > 0 else '超出'}）。"
             f"請確認是否需要補建新訂單。"
         )
-    # original_ph 僅供 UI 顯示，從新訂單人時反推（不用 person_a）
-    original_ph = _service_amount_a  # 這裡傳金額供 UI 判斷用
 
     return {
         "order_no_a": order_no_a,
@@ -2516,23 +2461,32 @@ def convert_order_multi(
         "note_a_ok": note_a_ok, "note_a_msg": note_a_msg,
         "purchase_url_a": f"{base_url}/purchase?orderNo={order_no_a}",
         "all_nos_str": all_nos_str,
-        "service_date_a": service_date_a,
         "success_count": len([r for r in new_order_results if r.get("order_no")]),
         "fail_count": len([r for r in new_order_results if not r.get("order_no")]),
         "ph_warning": ph_warning,
-        "original_ph": _service_amount_a,
+        "service_amount_a_display": service_amount_a_int,
+        "new_amount_total": new_amount_total,
         "new_ph": new_ph,
-        # UI 步驟3 需要的欄位
-        "period_a_raw": (period_a_raw or "").strip(),
-        "_debug_period_compact": (period_a_raw or "").replace(" ", ""),
-        "_debug_hour": _hour_per_person,
         "person_a_count": person_a,
-        "hour_per_person_a": _hour_per_person,
-        "original_ph_calc": original_ph,
-        "service_amount_a_display": _service_amount_a,
-        # 合併 LINE 訊息
         "combined_line_message": combined_line_message,
     }
+
+
+def convert_order_multi(
+    env_name, backend_email, backend_password, order_no_a, new_orders, clean_type_id="1",
+    allow_auto_lemon_shift=True,
+):
+    """
+    v2026.07.10：保留原本「一次到位」的介面給舊呼叫端相容用，內部直接組合
+    stage1 + stage2（畫面已改用分階段版本，見 convert_order_stage1_
+    reassign_original / convert_order_stage2_create_new_orders）。
+    """
+    new_dates = sorted([o.get("date_s", "") for o in new_orders if o.get("date_s")])
+    target_date_a = new_dates[0] if new_dates else None
+    stage1 = convert_order_stage1_reassign_original(
+        env_name, backend_email, backend_password, order_no_a, target_date_a, clean_type_id,
+    )
+    return convert_order_stage2_create_new_orders(stage1, new_orders)
 
 
 # =========================================================
@@ -3530,7 +3484,7 @@ def stored_value_makeup_create_paid_order(
     # 1. 標記為已付款，不能讓它卡在待付款狀態。
     # 2. 發票號碼欄位標註「不用開發票」，避免財務誤以為漏開發票。
     mark_paid_ok, mark_paid_msg = _mark_order_as_paid(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
-    invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不用開發票")
+    invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不開立發票")
     return {
         "stage": "paid_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"],
         "coupon_b": coupon_b, "paid_order": paid_order, "note": note,

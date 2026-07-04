@@ -1,10 +1,18 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.31
+# 版本：v8.32
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.32
+# - 訂單轉換畫面改成跟儲值金補價差一致的分階段介面：
+#   ① 修改原訂單日期並換成檸檬人排班（呼叫 convert_order_stage1_
+#   reassign_original，一律自動補檸檬人，此單必須全是檸檬人）
+#   ② 建立新訂單（優惠券折抵）（呼叫 convert_order_stage2_create_new_
+#   orders，用第一段的結果建折價券＋建新訂單，並比對金額差額）。
+#   兩段分開儲存在 session_state（conv_stage1／conv_stage2），跟儲值金
+#   補價差的 sv_stored_stage／sv_paid_stage 模式一致。
 # v8.31
 # - 訂單轉換移除「查無班表時自動補檸檬人排班」勾選框，改成一律自動開啟
 #   （跟儲值金補價差一致），人數不夠時不用客服另外勾選就會先嘗試補檸檬人，
@@ -186,7 +194,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.31"
+__version__ = "8.32"
 
 import html
 import requests
@@ -1363,118 +1371,58 @@ else:
 
     elif single_feature == "訂單轉換":
         info_panel(
-            "功能說明",
+            "流程說明",
             [
-                "將原訂單A拆成多筆新訂單（B1/B2/B3...），每筆各建一張折價券（面額＝該筆含稅金額）。",
-                "原訂單A配班：一般專員優先，不足補檸檬人（混合邏輯）。",
-                "新訂單配班：同上。",
+                "此功能拆成兩段：先修改原訂單A的日期並全部換成檸檬人，再建立新訂單（優惠券折抵原訂單金額）。",
+                "第一段：把原訂單A的服務日期改到新日期，配班一律自動補檸檬人排班（不用勾選，此單必須全是檸檬人）。",
+                "第二段：逐筆新訂單各建一張折價券（面額＝該筆含稅金額，讓新訂單被折抵成0），並比對原訂單A金額跟新訂單合計是否一致。",
                 "備註自動寫入：A+B1+B2+B3 合併服務。",
             ],
         )
 
-        step("4", "原訂單A")
-        col_a1, col_a2 = st.columns(2)
+        step("4", "第一段：原訂單A 改日期＋全部換檸檬人")
+        col_a1, col_a2, col_a3 = st.columns(3)
         with col_a1:
             conv_order_no_a = st.text_input("原訂單A編號", placeholder="LC002115551", key="conv_order_no_a")
         with col_a2:
             conv_clean_type = st.selectbox("服務類別", list(CLEAN_TYPE_ID_MAP.keys()), key="conv_clean_type")
+        with col_a3:
+            conv_target_date = st.date_input("原訂單A要改到的新日期", value=date.today() + timedelta(days=1), key="conv_target_date")
 
-        st.markdown("<hr>", unsafe_allow_html=True)
-        step("4", "新訂單筆數與規格")
-
-        conv_order_count = st.number_input("新訂單筆數", min_value=1, max_value=6, value=2, step=1, key="conv_order_count")
-        st.markdown('<div class="hint-box">💡 每筆新訂單各自選日期、時段、人數。時數由時段自動帶出。</div>', unsafe_allow_html=True)
-
-        new_orders_input = []
-        for i in range(int(conv_order_count)):
-            st.markdown(f"**新訂單 B{i+1}**")
-            b1, b2, b3, b4 = st.columns(4)
-            with b1:
-                b_date = st.date_input(f"B{i+1} 日期", value=date.today() + timedelta(days=1), key=f"conv_date_{i}")
-            with b2:
-                b_period = st.selectbox(f"B{i+1} 時段", PERIOD_OPTIONS, key=f"conv_period_{i}")
-            with b3:
-                b_person = st.number_input(f"B{i+1} 人數", min_value=1, max_value=8, value=2, key=f"conv_person_{i}")
-            with b4:
-                b_hour = PERIOD_HOUR_MAP.get(b_period, 4)
-                st.markdown(f"<br><b>{b_hour} 小時</b>（依時段帶出）", unsafe_allow_html=True)
-            new_orders_input.append({
-                "date_s": b_date.strftime("%Y-%m-%d"),
-                "period_s": b_period,
-                "hour": b_hour,
-                "person": int(b_person),
-            })
-
-        st.markdown("<hr>", unsafe_allow_html=True)
-
-        # v2026.07.10：訂單轉換人數不夠時，直接自動補檸檬人排班，不用客服
-        # 另外勾選（跟儲值金補價差一致）；補不到才會由 quick_create_order 擋單。
-        conv_allow_auto_lemon = True
-
-        if st.button("🔄 執行訂單轉換", use_container_width=True, key="run_convert_btn"):
-            # v8.15：開始新的一次轉換前，先清空上一次殘留的舊結果。
-            st.session_state.conv_result = {}
+        if st.button("① 修改原訂單日期並換成檸檬人排班", use_container_width=True, key="conv_stage1_btn"):
+            # 開始新的一次轉換前，先清空上一次殘留的舊結果（含第二段）。
+            st.session_state.conv_stage1 = {}
+            st.session_state.conv_stage2 = {}
             if not backend_email.strip() or not backend_password.strip():
                 st.error("請先輸入後台帳號密碼")
             elif not conv_order_no_a.strip():
                 st.error("請輸入原訂單A編號")
             else:
                 try:
-                    with st.spinner("執行中：查訂單 → 原單配班 → 建折價券 → 建新訂單 → 新單配班…"):
-                        conv_result = convert_order_multi(
+                    with st.spinner("第一段執行中：查原訂單A → 改日期 → 換成檸檬人排班…"):
+                        stage1 = convert_order_stage1_reassign_original(
                             env_name=env,
                             backend_email=backend_email.strip(),
                             backend_password=backend_password.strip(),
                             order_no_a=conv_order_no_a.strip(),
-                            new_orders=new_orders_input,
+                            target_date_s=conv_target_date.strftime("%Y-%m-%d"),
                             clean_type_id=CLEAN_TYPE_ID_MAP[conv_clean_type],
-                            allow_auto_lemon_shift=conv_allow_auto_lemon,
                         )
-                    st.session_state.conv_result = conv_result
+                    st.session_state.conv_stage1 = stage1
+                    st.session_state.conv_stage2 = {}
                 except Exception as e:
-                    st.session_state.conv_result = {}
-                    st.error(f"轉換失敗：{e}")
+                    st.session_state.conv_stage1 = {}
+                    st.error(f"第一段執行失敗：{e}")
 
-        conv_result = st.session_state.get("conv_result")
-        if conv_result:
-            lr_a = conv_result.get("lemon_result_a", {}) or {}
-            new_orders_ok = [r for r in conv_result.get("new_order_results", []) if r.get("order_no")]
-
-            # 人時金額計算
-            _PERIOD_HOURS_UI = {
-                "09:00-16:00": 6, "09:00-18:00": 8,
-                "08:30-12:30": 4, "09:00-12:00": 3, "09:00-11:00": 2,
-                "14:00-18:00": 4, "14:00-17:00": 3, "14:00-16:00": 2,
-            }
-            # 人數：優先用 actual_person_count（originShiftId 數量）
-            orig_person = int(lr_a.get("actual_person_count", 0) or conv_result.get("person_a_count", 0) or 0)
-            # 時數：從 period_a_raw 直接查表
-            _period_raw_ui = str(conv_result.get("period_a_raw", "")).strip().replace(" ", "")
-            orig_hour = _PERIOD_HOURS_UI.get(_period_raw_ui, 0)
-            if not orig_hour:
-                orig_hour = int(conv_result.get("hour_per_person_a", 0) or 0)
-            orig_ph = orig_person * orig_hour if orig_person and orig_hour else 0
-            try:
-                orig_amount = int(float(str(conv_result.get("service_amount_a_display", 0) or 0)))
-            except Exception:
-                orig_amount = 0
-            new_ph = sum(int(r.get("person", 0)) * int(r.get("hour", 0)) for r in new_orders_ok)
-            new_amount = sum(int(r.get("price_with_tax", 0)) for r in new_orders_ok)
-            diff_ph = orig_ph - new_ph if orig_ph else 0
-            diff_amt = orig_amount - new_amount if orig_amount else 0
-            st.caption(f"debug: orig_person={orig_person} orig_hour={orig_hour} orig_ph={orig_ph} orig_amount={orig_amount} period_a_raw={repr(conv_result.get('period_a_raw'))}")
-
-            # ── 摘要區塊 ─────────────────────────────────────────
-            st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("### 執行結果")
-
-            # 步驟1摘要
+        conv_stage1 = st.session_state.get("conv_stage1")
+        if conv_stage1:
+            lr_a = conv_stage1.get("lemon_result_a", {}) or {}
             lemon_names = lr_a.get("assigned", [])
-            actual_count = int(lr_a.get("actual_person_count", 0) or len(lemon_names) or 0)
+            actual_count = int(lr_a.get("actual_person_count", 0) or len(lemon_names) or conv_stage1.get("person_a", 0) or 0)
             new_svc_date = lr_a.get("new_service_date", "")
-            period_a = str(conv_result.get("period_a_raw", "")).replace(" ", "")
             date_ok = lr_a.get("date_change_ok", True)
-            orig_date = conv_result.get("service_date_a", "")
+            orig_date = conv_stage1.get("service_date_a", "")
+            period_a = str(conv_stage1.get("period_a_raw", "")).replace(" ", "")
 
             if date_ok and new_svc_date:
                 date_str = f"{orig_date} → {new_svc_date}"
@@ -1485,17 +1433,63 @@ else:
 
             if lr_a.get("success") and lemon_names:
                 lemon_str = "X".join(lemon_names)
-                step1_line = f"✅ 步驟1：原訂單 {conv_result['order_no_a']} 服務日期 {date_str} {period_a}，{lemon_str}，{actual_count}人×{orig_hour}小時"
-                st.success(step1_line)
+                st.success(
+                    f"✅ 第一段完成：原訂單 {conv_stage1['order_no_a']} 服務日期 {date_str} {period_a}，"
+                    f"{lemon_str}，{actual_count}人，全部為檸檬人"
+                )
             else:
-                st.warning(f"⚠️ 步驟1：原訂單配班未完成 — {lr_a.get('message', '未知')}")
+                st.warning(f"⚠️ 第一段：原訂單配班未完全成功 — {lr_a.get('message', '未知')}，請至後台確認排班狀況。")
+            with st.expander("🔗 原訂單A後台連結", expanded=False):
+                st.markdown(f"[開啟原訂單A後台]({_configure_environment(env)}/purchase?orderNo={conv_stage1['order_no_a']})")
 
-            # 步驟2摘要
+        st.markdown("<hr>", unsafe_allow_html=True)
+        step("5", "第二段：建立新訂單（優惠券折抵）")
+
+        if not conv_stage1:
+            st.info("請先完成第一段，才能建立新訂單。")
+        else:
+            conv_order_count = st.number_input("新訂單筆數", min_value=1, max_value=6, value=2, step=1, key="conv_order_count")
+            st.markdown('<div class="hint-box">💡 每筆新訂單各自選日期、時段、人數。時數由時段自動帶出。每筆會各建一張折價券，面額＝該筆含稅金額，讓客人這筆新訂單被折抵成 0。</div>', unsafe_allow_html=True)
+
+            new_orders_input = []
+            for i in range(int(conv_order_count)):
+                st.markdown(f"**新訂單 B{i+1}**")
+                b1, b2, b3, b4 = st.columns(4)
+                with b1:
+                    b_date = st.date_input(f"B{i+1} 日期", value=date.today() + timedelta(days=1), key=f"conv_date_{i}")
+                with b2:
+                    b_period = st.selectbox(f"B{i+1} 時段", PERIOD_OPTIONS, key=f"conv_period_{i}")
+                with b3:
+                    b_person = st.number_input(f"B{i+1} 人數", min_value=1, max_value=8, value=2, key=f"conv_person_{i}")
+                with b4:
+                    b_hour = PERIOD_HOUR_MAP.get(b_period, 4)
+                    st.markdown(f"<br><b>{b_hour} 小時</b>（依時段帶出）", unsafe_allow_html=True)
+                new_orders_input.append({
+                    "date_s": b_date.strftime("%Y-%m-%d"),
+                    "period_s": b_period,
+                    "hour": b_hour,
+                    "person": int(b_person),
+                })
+
+            if st.button("② 建立新訂單（優惠券折抵）", use_container_width=True, key="conv_stage2_btn"):
+                st.session_state.conv_stage2 = {}
+                try:
+                    with st.spinner("第二段執行中：建折價券 → 建新訂單 → 比對金額…"):
+                        stage2 = convert_order_stage2_create_new_orders(conv_stage1, new_orders_input)
+                    st.session_state.conv_stage2 = stage2
+                except Exception as e:
+                    st.session_state.conv_stage2 = {}
+                    st.error(f"第二段執行失敗：{e}")
+
+        conv_stage2 = st.session_state.get("conv_stage2")
+        if conv_stage2:
+            new_orders_ok = [r for r in conv_stage2.get("new_order_results", []) if r.get("order_no")]
+
             for r in new_orders_ok:
                 ph_str = f"{r['person']}人{r['hour']}小時"
                 _r_order_result = r.get("order_result") or {}
                 st.success(
-                    f"✅ 步驟2：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，"
+                    f"✅ 第二段：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，"
                     f"折價券 {r['coupon_code']}（{r['price_with_tax']}元）　"
                     f"👤 專員：{_r_order_result.get('staff') or '（無班表資料）'}"
                 )
@@ -1504,57 +1498,41 @@ else:
                         r.get("order_no"), _r_order_result.get("order_no_duplicate_count", 2),
                         dedup_key=f"conv_{r.get('order_no')}",
                     )
-            for r in [r for r in conv_result.get("new_order_results", []) if r.get("error")]:
-                st.error(f"❌ 步驟2 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
+            for r in [r for r in conv_stage2.get("new_order_results", []) if r.get("error")]:
+                st.error(f"❌ 第二段 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
 
-            # 步驟3摘要（只要原訂單人時或金額任一有值就顯示）
-            new_ph_detail = "＋".join(f"{r['person']}人{r['hour']}小時" for r in new_orders_ok) if new_orders_ok else "（無）"
+            # 金額比對（客服要求的驗證步驟）
+            orig_amount = conv_stage2.get("service_amount_a_display", 0)
+            new_amount = conv_stage2.get("new_amount_total", 0)
             new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
-
-            if orig_ph or orig_amount:
-                orig_ph_str = f"{orig_person}人x{orig_hour}小時共{orig_ph}人時" if orig_ph else f"{orig_person}人x未知小時（無法計算人時）"
-                orig_amt_str = f"{orig_amount}元" if orig_amount else "金額未知"
-                step3_orig = f"原訂單：{orig_ph_str}，{orig_amt_str}"
-                step3_new = f"新訂單：{new_ph_detail} 共{new_ph}人時，{new_amt_detail} = {new_amount}元"
-
-                if orig_ph and orig_amount and diff_ph == 0 and diff_amt == 0:
-                    st.success(f"步驟3：{step3_orig} ＝ {step3_new}")
-                else:
-                    diff_parts = []
-                    if orig_ph and diff_ph != 0:
-                        diff_parts.append(f"{abs(diff_ph)}人時")
-                    if orig_amount and diff_amt != 0:
-                        diff_parts.append(f"{abs(diff_amt)}元")
-                    diff_str = f"共差 {'、'.join(diff_parts)}" if diff_parts else ""
-                    full_msg = "步驟3：\n\n" + step3_orig + "\n\n" + step3_new + "\n\n" + diff_str + "，請確認是否需要補建新訂單。"
-                    st.warning(full_msg)
+            if conv_stage2.get("ph_warning"):
+                st.warning(conv_stage2["ph_warning"])
+            elif orig_amount:
+                st.success(f"金額比對：原訂單A {orig_amount}元 ＝ 新訂單合計 {new_amt_detail} = {new_amount}元")
             else:
-                full_msg = "步驟3：原訂單人數/時段/金額解析失敗，無法比較。\n\n新訂單：" + new_ph_detail + f" 共{new_ph}人時，" + new_amt_detail + f" = {new_amount}元\n\n請手動核對原訂單金額是否與新訂單合計相符。"
-                st.warning(full_msg)
+                st.warning(f"金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {new_amt_detail} = {new_amount}元，請手動核對。")
 
-            # ── 細項 ────────────────────────────────────────────
             with st.expander("🔍 細項", expanded=False):
-                st.markdown(f"[🔗 開啟原訂單A後台]({conv_result['purchase_url_a']})")
+                st.markdown(f"[🔗 開啟原訂單A後台]({conv_stage2['purchase_url_a']})")
 
-                st.markdown("**步驟2 新訂單 LINE 訊息**")
+                st.markdown("**第二段 新訂單 LINE 訊息**")
                 for r in new_orders_ok:
                     if r.get("line_message"):
-                        # v8.17：拿掉固定 key，避免新一輪轉換的 LINE 訊息被舊內容卡住不更新。
                         st.text_area(f"B{r['index']} LINE（{r['order_no']}）", r["line_message"], height=300, label_visibility="collapsed")
                         copy_button(f"複製 B{r['index']} LINE 訊息", r["line_message"], f"copy_conv_line_{r['index']}")
 
-                combined_msg = conv_result.get("combined_line_message", "")
+                combined_msg = conv_stage2.get("combined_line_message", "")
                 if combined_msg:
                     st.markdown("**💬 合併 LINE 訊息（全部新訂單）**")
                     st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed")
                     copy_button("複製合併 LINE 訊息", combined_msg, "copy_conv_combined_line")
 
                 st.markdown("**備註文字**")
-                note_a_status = "✅ 已自動寫入" if conv_result.get("note_a_ok") else f"⚠️ 需手動貼上（{conv_result.get('note_a_msg', '')}）"
+                note_a_status = "✅ 已自動寫入" if conv_stage2.get("note_a_ok") else f"⚠️ 需手動貼上（{conv_stage2.get('note_a_msg', '')}）"
                 st.markdown(f"原訂單A備註 {note_a_status}")
-                st.text_area("原訂單A備註", conv_result.get("note_a", ""), height=70, label_visibility="collapsed", key="conv_note_a_out")
-                copy_button("複製原訂單A備註", conv_result.get("note_a", ""), "copy_note_a")
-                st.caption(f"全單備註：{conv_result.get('note', '')}")
+                st.text_area("原訂單A備註", conv_stage2.get("note_a", ""), height=70, label_visibility="collapsed", key="conv_note_a_out")
+                copy_button("複製原訂單A備註", conv_stage2.get("note_a", ""), "copy_note_a")
+                st.caption(f"全單備註：{conv_stage2.get('note', '')}")
     # --------------------------------------------------
     # 儲值金補價差
     # --------------------------------------------------
