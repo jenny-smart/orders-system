@@ -1,9 +1,20 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.30
-# 最後更新：2026-07-07
+# 版本：v8.31
+# 最後更新：2026-07-09
 #
 # Change Log
+# v8.31
+# - 修正重大規則漏洞：查無班表或人數不足時，quick_create_order（舊客快速
+#   建單）跟 quick_create_new_customer_order（新客資料拆解）之前都會「仍
+#   嘗試建單」，只在畫面標記「（待配班）」或直接靜默略過（except: pass），
+#   等於人力不足的訂單照樣成單，不符合「不論服務日期遠近，人數不夠一律
+#   不能成單」的業務規則。現在改成：查完班表（含允許時的自動補檸檬人重查）
+#   後，只要人數還是不夠，直接 raise Exception 擋單，不會送出訂單。
+#   訂單轉換（convert_order/convert_order_multi）跟儲值金補價差都是呼叫
+#   quick_create_order 建單，自動一併套用這個修正，不用另外改。
+# - quick_create_new_customer_order 補上建單成功後的實際專員名字（"staff"
+#   欄位），原本完全沒有回傳這個資訊。
 # v8.30
 # - 修正 _parse_invoice_details_from_block 解析手機載具/自然人憑證時，把
 #   開頭的「/」去掉了（例如「/HWHMPF6」解析成「HWHMPF6」）。台灣手機條碼
@@ -193,7 +204,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.30"
+__version__ = "8.31"
 
 import time
 import re
@@ -1185,9 +1196,9 @@ def quick_create_order(
         time.sleep(2)
         raw_section = get_section_raw(session, base_data, token, slot)
         _slot_found = slot_exists_in_section_response(raw_section, slot)
-    # 若仍找不到班表，仍嘗試建單（後台允許無預配班人員的訂單）
+    # v8.30：依規定，查無班表或人數不足時一律擋單，不能成單（不論服務日期
+    # 遠近，不再是「查無班表就標記待配班、照樣送出訂單」）。
     cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
-    # 若可用人員數量不足 person，且客服有勾選自動補檸檬人，補勾檸檬人班表再重查
     _need = int(person) if str(person).isdigit() else 2
     if _slot_found and len(cleaners) < _need and allow_auto_lemon_shift:
         _pre2 = ensure_lemon_cleaner_shifts(
@@ -1199,7 +1210,12 @@ def quick_create_order(
         raw_section = get_section_raw(session, base_data, token, slot)
         _slot_found = slot_exists_in_section_response(raw_section, slot)
         cleaners = extract_cleaners_from_section_response(raw_section, slot) if _slot_found else []
-    staff_display = format_staff_from_cleaners(cleaners, people=person) if _slot_found else "（待配班）" 
+    if not _slot_found or len(cleaners) < _need:
+        raise Exception(
+            f"查無班表或人數不足（需要 {_need} 人，目前排班頁只有 {len(cleaners)} 人可指派），"
+            f"依規定人數不足不能成單，請先確認/補足班表後再建單。"
+        )
+    staff_display = format_staff_from_cleaners(cleaners, people=person)
     booking_url = _booking_url_for_payway(base_url, payway)
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
     booking_resp = session.post(booking_url, data=_build_booking_submit_data(base_data, token, payway, slot), headers=HEADERS, allow_redirects=True)
@@ -3863,35 +3879,43 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     ph = int(person) * int(float(hour))
     price_with_tax = unit_price * ph
 
-    # Step 4b: 查班表，若無人或人數不足，且客服有明確勾選「自動補檸檬人」才勾檸檬人班表
-    try:
-        token_for_section = get_csrf_token(session)
-        _base_data_check = {
-            "clean_type_id": clean_type_id,
-            "area_id": area_id,
-            "company_id": company_id,
-            "country_id": country_id,
-            "lat": lat, "lng": lng,
-            "address": address,
-            "person": person, "hour": hour,
-            "date_s": date_s, "period_s": period_s,
-        }
-        _slot = f"{date_s}_{period_s}"
+    # Step 4b: 查班表，若無人或人數不足，且客服有明確勾選「自動補檸檬人」才勾檸檬人班表；
+    # v2026.07.09：查完（含補勾檸檬人重查）後，人數還是不夠就直接擋單，不再靜默放行
+    # （之前 except 整段吞掉，就算查無班表/人數不足也照樣建單）。
+    token_for_section = get_csrf_token(session)
+    _base_data_check = {
+        "clean_type_id": clean_type_id,
+        "area_id": area_id,
+        "company_id": company_id,
+        "country_id": country_id,
+        "lat": lat, "lng": lng,
+        "address": address,
+        "person": person, "hour": hour,
+        "date_s": date_s, "period_s": period_s,
+    }
+    _slot = f"{date_s}_{period_s}"
+    _raw_section = get_section_raw(session, _base_data_check, token_for_section, _slot)
+    _slot_found = slot_exists_in_section_response(_raw_section, _slot)
+    _cleaners = extract_cleaners_from_section_response(_raw_section, _slot) if _slot_found else []
+    _need = int(person)
+    # v8.13：查無班表/人數不足時，預設不自動勾檸檬人，必須客服明確勾選才會執行。
+    if (not _slot_found or len(_cleaners) < _need) and allow_auto_lemon_shift:
+        _short = _need - len(_cleaners) if _slot_found else _need
+        ensure_lemon_cleaner_shifts(
+            session=session, base_url=base_url,
+            service_date=date_s, period_s=period_s,
+            person_count=str(_short),
+        )
+        time.sleep(2)
         _raw_section = get_section_raw(session, _base_data_check, token_for_section, _slot)
         _slot_found = slot_exists_in_section_response(_raw_section, _slot)
         _cleaners = extract_cleaners_from_section_response(_raw_section, _slot) if _slot_found else []
-        _need = int(person)
-        # v8.13：查無班表/人數不足時，預設不自動勾檸檬人，必須客服明確勾選才會執行。
-        if (not _slot_found or len(_cleaners) < _need) and allow_auto_lemon_shift:
-            _short = _need - len(_cleaners) if _slot_found else _need
-            ensure_lemon_cleaner_shifts(
-                session=session, base_url=base_url,
-                service_date=date_s, period_s=period_s,
-                person_count=str(_short),
-            )
-            time.sleep(2)
-    except Exception:
-        pass  # 查班表失敗不擋建單
+
+    if not _slot_found or len(_cleaners) < _need:
+        raise Exception(
+            f"查無班表或人數不足（需要 {_need} 人，目前排班頁只有 {len(_cleaners)} 人可指派），"
+            f"依規定人數不足不能成單，請先確認/補足班表後再建單。"
+        )
 
     # Step 5: POST /booking/single
     post_data = {
@@ -4057,6 +4081,17 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
     except Exception:
         pass
 
+    # v2026.07.09：補上成單後的實際專員名字，跟舊客快速建單一致。
+    # 優先用 fetch_order_meta_by_order_no 撈後台實際配班結果（後台可能依
+    # 班表自動配到跟建單前查詢當下不同的人），查不到才退回用建單前查到的
+    # 排班候選人（_cleaners）當備援顯示。
+    try:
+        _meta = fetch_order_meta_by_order_no(session, order_no)
+    except Exception:
+        _meta = {}
+    _staff_fallback = format_staff_from_cleaners(_cleaners, people=person) if _cleaners else "（無班表資料）"
+    staff_display = _meta.get("服務人員") or _staff_fallback
+
     # v8.13：建單成功後檢查此訂單編號是否重複對應到多張訂單卡片
     _is_dup, _dup_count = _check_order_no_duplicate(session, order_no)
     _dup_warning = (
@@ -4076,6 +4111,7 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         "actual_period": actual_time,
         "hour": hour,
         "person": person,
+        "staff": staff_display,
         "price_with_tax": price_with_tax,
         "service_amount": price_with_tax,
         "backend_actual_amount": backend_actual_amount,

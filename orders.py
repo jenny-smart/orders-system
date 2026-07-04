@@ -1,10 +1,19 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.09
+# 版本：v2026.07.10
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-09
+# 最後更新：2026-07-10
 #
 # Change Log
+# v2026.07.10
+# - 修正批次建單同樣的規則漏洞：run_process_web 之前只檢查「時段存不存在」
+#   （slot_ok），沒有檢查「人數夠不夠」，導致時段有排班、但排的人數不夠這張
+#   單需要的人數時，還是照樣送出建單。現在時段存在但人數不足時，一併視同
+#   「無班表」處理（併入 no_slot_dates，reason 顯示「無班表」/staff 顯示
+#   「無人力」），不會再送出人力不足的訂單。跟 quick_order.py v8.31 的
+#   舊客/新客建單修正保持一致的規則：不論服務日期遠近，人數不夠一律不能
+#   成單，若客服有勾選「查無班表時自動補檸檬人」，會先嘗試補到足夠人數，
+#   補不到才擋單。
 # v2026.07.09
 # - 修正 run_standalone_consistency_check 方向二的邏輯漏洞：舊版是拿工作表
 #   裡已出現的電話去查後台，如果某張後台訂單的客人電話整筆漏登記進工作表，
@@ -2474,6 +2483,17 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
         detail["section_cleaners"] = cleaners
         detail["section_staff"] = format_staff_from_cleaners(cleaners, people=people)
+
+        # v2026.07.09：光是「時段存在」還不夠，人數要真的足夠才能送出建單。
+        # 之前只檢查 slot_ok（時段存不存在），沒檢查人數，導致時段有排班、
+        # 但排的人數不夠這張單需要的人數時，還是照樣送出建單，等於人力不足
+        # 的訂單也會成單，不符合「人數不夠一律不能成單」的規則。
+        try:
+            _people_needed = int(people)
+        except Exception:
+            _people_needed = 0
+        if slot_ok and _people_needed and len(cleaners) < _people_needed:
+            slot_ok = False
 
         print("[DEBUG] section match =", {
             "slot": detail["slot"],

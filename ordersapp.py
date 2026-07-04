@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.29
+# 版本：v8.30
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-09
+# 最後更新：2026-07-10
 #
 # Change Log
+# v8.30
+# - 舊客建單/新客建單/訂單轉換/儲值金補價差（含兩段）這 4 個成單流程，
+#   結果訊息都補上「👤 專員：xxx」，成單後可以直接看到實際配班的專員名字，
+#   不用另外點開後台訂單才看得到。資料本來就有（quick_create_order 早就有
+#   回傳 staff 欄位），這次是補上畫面顯示；新客建單原本完全沒有回傳這個
+#   資訊，配合 quick_order.py v8.31 一併補上。
 # v8.29
 # - 「雙向訂單檢查」補上服務日期區間輸入，修正方向二原本的邏輯漏洞：舊版
 #   方向二是拿工作表裡已出現的電話去查後台，如果某張後台訂單的客人電話
@@ -176,7 +182,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.29"
+__version__ = "8.30"
 
 import html
 import requests
@@ -1312,7 +1318,11 @@ else:
         # 顯示建單結果
         _r = st.session_state.get("nc_result", {})
         if _r.get("order_no"):
-            st.success(f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元")
+            st.success(
+                f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　"
+                f"{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元　"
+                f"👤 專員：{_r.get('staff') or '（無班表資料）'}"
+            )
             if _r.get("price_mismatch_warning"):
                 st.warning(_r["price_mismatch_warning"])
             if _r.get("address_mismatch_warning"):
@@ -1478,8 +1488,12 @@ else:
             # 步驟2摘要
             for r in new_orders_ok:
                 ph_str = f"{r['person']}人{r['hour']}小時"
-                st.success(f"✅ 步驟2：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，折價券 {r['coupon_code']}（{r['price_with_tax']}元）")
                 _r_order_result = r.get("order_result") or {}
+                st.success(
+                    f"✅ 步驟2：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，"
+                    f"折價券 {r['coupon_code']}（{r['price_with_tax']}元）　"
+                    f"👤 專員：{_r_order_result.get('staff') or '（無班表資料）'}"
+                )
                 if _r_order_result.get("order_no_duplicated"):
                     show_duplicate_order_warning(
                         r.get("order_no"), _r_order_result.get("order_no_duplicate_count", 2),
@@ -1632,7 +1646,11 @@ else:
             st.caption(f"計算式：{plan['dummy_price']} - {stored_stage['balance']} = {plan['coupon_a']}；剩餘 {plan.get('stored_value_applied', stored_stage['balance'])} 扣儲值金。")
             c4.metric("儲值金單", so.get("order_no", "—"))
             ca = stored_stage.get("coupon_a", {})
-            st.success(f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。")
+            st.success(
+                f"✅ 第一段完成：儲值金清零訂單 {so.get('order_no', '—')}；"
+                f"優惠券A {ca.get('coupon_code') or ca.get('coupon_prefix')}，面額 {plan['coupon_a']} 元。　"
+                f"👤 專員：{so.get('staff') or '（無班表資料）'}"
+            )
             if so.get("order_no_duplicated"):
                 show_duplicate_order_warning(so.get("order_no"), so.get("order_no_duplicate_count", 2), dedup_key=f"sv_stored_{so.get('order_no')}")
             lemon_r = stored_stage.get("lemon_result", {})
@@ -1670,7 +1688,11 @@ else:
         if paid_stage:
             po = paid_stage["paid_order"]
             cb = paid_stage.get("coupon_b", {})
-            st.success(f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。")
+            st.success(
+                f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；"
+                f"優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。　"
+                f"👤 專員：{po.get('staff') or '（無班表資料）'}"
+            )
             if po.get("order_no_duplicated"):
                 show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")
@@ -1828,7 +1850,7 @@ else:
         c2.metric("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
         c3.metric("車馬費", order_result.get("fare") or "0")
         c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "未發送")
-        st.success(f"✅ 訂單建立成功：{order_result['order_no']}")
+        st.success(f"✅ 訂單建立成功：{order_result['order_no']}　👤 專員：{order_result.get('staff') or '（無班表資料）'}")
         if order_result.get("price_mismatch_warning"):
             st.warning(order_result["price_mismatch_warning"])
         if order_result.get("address_mismatch_warning"):
