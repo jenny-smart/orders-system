@@ -1,10 +1,18 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.04
+# 版本：v2026.07.05
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-04
+# 最後更新：2026-07-05
 #
 # Change Log
+# v2026.07.05
+# - verify_batch_order_consistency 擴充為雙向比對：
+#   方向一（從 Google Sheet 比對系統）：原本只比對電話/日期/時段，這次加入
+#   地址比對（依電話/地址/日期/時間四項），更嚴謹地確認訂單編號沒有誤配對。
+#   方向二（新增，從系統的日期區間比對 Google Sheet）：以這批次涉及的每支
+#   電話，查詢系統該電話底下落在這批次日期範圍內的實際訂單，確認每一筆都能
+#   對應回 Google Sheet 某一列寫下的訂單編號，抓出「系統其實已經成單，但
+#   Google Sheet 沒有正確記錄（M欄空白或寫錯）」這種方向一照不到的死角。
 # v2026.07.04
 # - 新增檸檬人排班工具函式（VALUE_TO_SHIFT_CODE / ensure_lemon_cleaner_shifts 等，
 #   邏輯與 quick_order.py 一致），process_one_group 新增 allow_auto_lemon_shift
@@ -1543,13 +1551,25 @@ def fetch_order_meta_by_order_no(session, order_no):
 
 def verify_batch_order_consistency(session, df, all_row_results):
     """
-    v2026-07：批次執行完後，逐列比對 Google Sheet 上「電話、日期、時段」是否跟
-    寫回的訂單編號實際對應的後台訂單一致，抓出：
-    1. 同一個訂單編號被寫進超過一列（M欄重複）。
-    2. 訂單編號在後台查無資料。
-    3. 訂單編號查得到，但電話/日期/時段跟這一列 Google Sheet 的資料對不上
-       （代表訂單編號很可能誤配對到別人的訂單，這一列實際上沒有真的成單）。
-    回傳 list of dict：[{row_num, order_no, issue}, ...]，沒有問題則回傳空 list。
+    v2026.07.04：雙向比對 Google Sheet 與後台系統訂單是否一致。
+
+    方向一（從 Google Sheet 比對系統）：
+        逐列拿寫回的訂單編號回查系統，比對「電話、地址、日期、時段」是否跟
+        Google Sheet 這一列的資料相符，抓出：
+        1. 同一個訂單編號被寫進超過一列（M欄重複）。
+        2. 訂單編號在後台查無資料。
+        3. 訂單編號查得到，但電話/地址/日期/時段跟這一列對不上（代表訂單編號
+           很可能誤配對到別人的訂單，這一列實際上沒有真的成單）。
+
+    方向二（從系統的日期區間比對 Google Sheet）：
+        以這批次涉及的每支電話，查詢系統該電話底下的實際訂單，只看落在這批次
+        涉及日期範圍內的訂單，確認每一筆系統訂單都能對應回 Google Sheet 某一列
+        寫下的訂單編號，抓出「系統其實已經成單，但 Google Sheet 沒有正確記錄
+        （M欄空白、或寫的是別的訂單編號）」的情況——這是方向一（只看 Sheet 已
+        填寫的編號）照不到的死角。
+
+    回傳 list of dict：[{row_num, order_no, issue}, ...]（方向二查到的問題
+    row_num 為 None，因為它不是從特定一列出發）。沒有問題則回傳空 list。
     查詢過程中任何單筆錯誤都不中斷整體檢查，只會跳過該筆。
     """
     problems = []
@@ -1561,14 +1581,30 @@ def verify_batch_order_consistency(session, df, all_row_results):
             continue
 
     seen_order_nos = {}
+    # 方向二用：記錄每支電話在 Google Sheet 上「認定」的 (日期, 訂單編號) 組合，
+    # 以及這批次涉及的日期範圍，供之後反查系統訂單時比對。
+    phone_sheet_records = defaultdict(list)
 
+    # ---------- 方向一：從 Google Sheet 出發，回查系統 ----------
     for row_num, result in all_row_results.items():
-        order_no = str(result.get("訂單編號", "") or "").strip()
-        if not order_no:
-            continue
-
         row_num_int = int(row_num)
         row = row_lookup.get(row_num_int)
+        order_no = str(result.get("訂單編號", "") or "").strip()
+
+        # 不管這一列有沒有訂單編號，只要抓得到電話/日期，都先記錄下來供方向二比對
+        if row is not None:
+            try:
+                _phone_for_dir2 = normalize_phone(row.get("電話", ""))
+                _date_for_dir2 = get_date_str(row["日期"])
+                if _phone_for_dir2:
+                    phone_sheet_records[_phone_for_dir2].append({
+                        "row_num": row_num_int, "date": _date_for_dir2, "order_no": order_no,
+                    })
+            except Exception:
+                pass
+
+        if not order_no:
+            continue
 
         # 同一個訂單編號被寫進超過一列 → 直接標記重複（這是「M欄重複」最直接的證據）
         if order_no in seen_order_nos:
@@ -1588,6 +1624,7 @@ def verify_batch_order_consistency(session, df, all_row_results):
             date_s = get_date_str(row["日期"])
             period_s = normalize_sheet_period(row["開始時間"], row["結束時間"])
             display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
+            address = str(row.get("地址", "")).strip()
         except Exception:
             continue
 
@@ -1620,17 +1657,63 @@ def verify_batch_order_consistency(session, df, all_row_results):
             display_period.replace(" ", "") in joined.replace(" ", "")
             or period_s.replace(" ", "") in joined.replace(" ", "")
         )
+        address_match = True
+        if address:
+            addr_norm = normalize_addr_for_match(address)
+            joined_addr_norm = normalize_addr_for_match(joined)
+            # 地址核心片段（去掉樓層等細節差異的風險）只要有出現在訂單內容即可算相符，
+            # 避免因為門牌格式些微差異（例如全形/半形號樓字）誤判成不相符。
+            core = addr_norm[:10] if len(addr_norm) >= 10 else addr_norm
+            address_match = bool(core) and core in joined_addr_norm
 
-        if not (phone_match and date_match and period_match):
+        if not (phone_match and date_match and period_match and address_match):
             problems.append({
                 "row_num": row_num_int,
                 "order_no": order_no,
                 "issue": (
                     f"訂單 {order_no} 實際內容跟 Google Sheet 第 {row_num_int} 列不符"
-                    f"（電話符合：{phone_match}，日期符合：{date_match}，時段符合：{period_match}），"
+                    f"（電話符合：{phone_match}，地址符合：{address_match}，"
+                    f"日期符合：{date_match}，時段符合：{period_match}），"
                     f"很可能是訂單編號誤配對到別人的訂單，此列可能其實沒有真的成單，請人工確認。"
                 ),
             })
+
+    # ---------- 方向二：從系統的日期區間出發，反查 Google Sheet ----------
+    for phone, sheet_records in phone_sheet_records.items():
+        relevant_dates = {r["date"] for r in sheet_records if r.get("date")}
+        sheet_order_nos_for_phone = {r["order_no"] for r in sheet_records if r.get("order_no")}
+        if not relevant_dates:
+            continue
+        try:
+            resp = session.get(PURCHASE_URL, params={"phone": phone}, headers=HEADERS, allow_redirects=True)
+        except Exception:
+            continue
+        if resp.status_code != 200:
+            continue
+
+        for block in extract_order_cards_from_purchase_html(resp.text):
+            sys_order_no = block.get("order_no")
+            if not sys_order_no:
+                continue
+            joined = "\n".join(block.get("lines", []))
+            matched_date = ""
+            for _d in relevant_dates:
+                if _d in joined:
+                    matched_date = _d
+                    break
+            if not matched_date:
+                continue  # 這筆系統訂單不在這批次涉及的日期範圍內，略過
+
+            if sys_order_no not in sheet_order_nos_for_phone:
+                problems.append({
+                    "row_num": None,
+                    "order_no": sys_order_no,
+                    "issue": (
+                        f"系統查到電話 {phone} 在 {matched_date} 有一筆訂單 {sys_order_no}，"
+                        f"但 Google Sheet 這批次處理的列裡找不到寫著這個訂單編號的紀錄"
+                        f"（可能是某一列的訂單編號欄位空白或寫錯），請確認是否有列遺漏記錄。"
+                    ),
+                })
 
     return problems
 
@@ -2622,7 +2705,8 @@ def run_process(sheet_name, start_row, end_row, env_name_from_ui=None, allow_aut
         if consistency_problems:
             print(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常")
             for p in consistency_problems:
-                print(f"  第 {p['row_num']} 列：{p['issue']}")
+                _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
+                print(f"  {_row_label}：{p['issue']}")
     except Exception as e:
         print(f"訂單一致性檢查失敗：{e}")
 
@@ -2813,18 +2897,19 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
     update_sheet_rows(ws, all_row_results)
     logger("已回填 Google Sheet。")
 
-    # v2026-07：批次全部執行完後，比對 Google Sheet 該列的電話/日期/時段
-    # 是否跟寫回的訂單編號實際對應的後台訂單一致，抓出訂單編號誤配對
-    # （M欄重複、或該列其實沒有真的成單）的情況。
+    # v2026.07.04：批次全部執行完後，雙向比對 Google Sheet 與後台系統訂單——
+    # 方向一從 Sheet 出發比對電話/地址/日期/時段，方向二從系統該電話的實際訂單
+    # 反查 Sheet，抓出訂單編號誤配對（M欄重複）或系統已成單但 Sheet 沒記錄的情況。
     consistency_problems = []
     try:
         consistency_problems = verify_batch_order_consistency(session, df, all_row_results)
         if consistency_problems:
             logger(f"⚠️ 訂單一致性檢查發現 {len(consistency_problems)} 筆異常，請人工確認：")
             for p in consistency_problems:
-                logger(f"  第 {p['row_num']} 列（訂單 {p['order_no']}）：{p['issue']}")
+                _row_label = f"第 {p['row_num']} 列" if p.get("row_num") is not None else "（系統反查）"
+                logger(f"  {_row_label}（訂單 {p['order_no']}）：{p['issue']}")
         else:
-            logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/日期/時段相符。")
+            logger("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
     except Exception as e:
         logger(f"訂單一致性檢查失敗：{e}")
 
