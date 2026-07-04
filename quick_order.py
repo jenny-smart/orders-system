@@ -1,9 +1,25 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.14
-# 最後更新：2026-07-04
+# 版本：v8.20
+# 最後更新：2026-07-05
 #
 # Change Log
+# v8.20
+# - 修正台中 ATM 儲值金購買範本：v8.19 我誤植成一份自己猜測的「方案說明」條列
+#   式文案，跟客服提供的正確版本完全不同。現在改成台北／台中共用同一個骨架
+#   （跟一般 ATM 訂單一樣，先講儲值金額/贈購物金，再附匯款帳戶資訊），只換
+#   銀行戶名/代碼/帳號（台中為：泳檬有限公司／台北富邦銀行(012)-營業部／
+#   00200102520512），轉帳金額一律依訂單實際金額帶入，不寫死。
+# v8.19
+# - 新增「儲值金購買」訂單的 LINE 通知專用範本（信用卡／ATM-台北／ATM-台中
+#   三種），跟一般清潔服務訂單完全分開處理：客人買/儲值金額本身用信用卡或
+#   ATM 付款，訂單沒有服務日期/地址，原本套用一般範本會出錯或格式不對。
+#   新增 _extract_stored_value_purchase_info 直接從訂單內容裡「儲值金-台北
+#   (儲值金50,000贈購物金2,500)」這段文字解析出區域/金額/贈購物金，不使用
+#   寫死的金額對照表，任何金額組合都能正確解析、不用之後再改 code。
+#   build_line_message_from_order_no 會優先判斷是否為儲值金購買訂單，是的話
+#   直接用專用範本；build_combined_line_message_from_order_nos 若合併清單中
+#   出現儲值金購買訂單則直接擋下，提示改用單筆查詢（合併多筆沒有意義）。
 # v8.14
 # - 拿掉 _lookup_district_via_geocode 裡的 Nominatim（OpenStreetMap）免費備援：
 #   實測發現它在台灣的行政區判斷常常不準（例如把「羅斯福路二段」誤判成大安區，
@@ -88,7 +104,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.14"
+__version__ = "8.20"
 
 import time
 import re
@@ -2441,6 +2457,108 @@ https://www.lemonclean.com.tw/login
     raise Exception(f"未知付款方式: {payway}")
 
 
+def _extract_stored_value_purchase_info(joined_text):
+    """
+    v8.19：偵測這張訂單是不是「儲值金購買/儲值」訂單——客人自己買/儲值一筆
+    金額本身（用信用卡或ATM付款），跟「使用既有儲值金折抵一般清潔服務」是
+    完全不同的兩件事，後者才是 payway == "儲值金" 的情況。
+    直接從訂單內容裡「儲值金-台北(儲值金50,000贈購物金2,500)」這段文字解析出
+    區域、金額、贈送購物金，不使用寫死的金額對照表，任何金額組合都能正確解析。
+    不是儲值金購買訂單時回傳 (None, None, None)。
+    """
+    m = re.search(r"儲值金[-－]?\s*([\u4e00-\u9fff]+)\s*[（(]\s*儲值金\s*([\d,]+)\s*贈購物金\s*([\d,]+)", joined_text)
+    if not m:
+        return None, None, None
+    region_raw = m.group(1).strip()
+    try:
+        amount = int(m.group(2).replace(",", ""))
+        bonus = int(m.group(3).replace(",", ""))
+    except Exception:
+        return None, None, None
+    return region_raw, amount, bonus
+
+
+def build_stored_value_purchase_message(order_no, payway, region, amount, bonus):
+    """
+    v8.19：儲值金「購買/儲值」訂單專用 LINE 訊息範本（信用卡／ATM-台北／
+    ATM-台中三種），跟一般清潔服務訂單的 build_line_message 是分開的，因為
+    這種訂單沒有服務日期/地址，內容也完全不同。
+    amount / bonus 直接來自訂單本身解析出的實際金額，非寫死對照表。
+    """
+    order_last6 = order_no[-6:] if len(order_no) >= 6 else order_no
+    order_link = f"https://www.lemonclean.com.tw/order/{order_last6}"
+
+    if payway == "信用卡":
+        return f"""已為您成立儲值金訂單
+儲值金額：{amount}元
+贈購物金：{bonus}元(自付款日起2年內有效，逾期失效)
+＊即日起本站暫停做防疫調查，為保障客戶及專員安全，若確診請於服務前日主動告知，否則需付異動費喔
+若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。
+線上刷卡流程:
+{order_link}
+登入會員
+帳號：email；密碼：手機號碼
+在訂單點選付款狀態點選『重新付款』即可
+付款完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策 及 VIP政策。
+請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+檸檬家事專員會於現場再溝通服務需求，
+以於系統估算時間內可以完的服務項目為主。
+VIP客戶
+◎異動費
+VIP若取消/異動服務日期，需於服務日前4個工作日(不含例假日，17:30算下個工作日)告知。
+若於服務前2-3個工作日告知，則收取每2人1小時異動費200元；
+若於服務前1個工作日(含服務當天)告知，則收取每2人1小時異動費300元。"""
+
+    if payway == "ATM":
+        # v8.20：台北／台中的儲值金購買 ATM 範本結構完全一樣，只有匯款帳戶
+        # 資訊不同，改成共用同一個骨架、只換銀行區塊，避免兩份文案各自維護
+        # 容易漏改或打錯字。轉帳金額那行的空格數量依各區客服提供的原文保留，
+        # 不強制統一。
+        if region == "台北":
+            bank_block = (
+                "銀行戶名：檸檬專業清潔有限公司\n"
+                "銀行代碼 台北富邦銀行(012)-松高分行\n"
+                "銀行帳號 7091-2000-3320"
+            )
+            amount_line = f"轉帳金額  {amount}元（含營業稅）"
+        elif region == "台中":
+            bank_block = (
+                "銀行戶名：泳檬有限公司\n"
+                "銀行代碼 台北富邦銀行(012)-營業部\n"
+                "銀行帳號 00200102520512"
+            )
+            amount_line = f"轉帳金額  {amount} 元（含營業稅）"
+        else:
+            bank_block = None
+            amount_line = None
+
+        if bank_block:
+            return f"""已為您成立儲值金訂單
+儲值金額：{amount}元
+贈購物金：{bonus}元(自付款日起2年內有效，逾期失效)
+＊即日起本站暫停做防疫調查，為保障客戶及專員安全，若確診請於服務前日主動告知，否則需付異動費喔
+若訂購後有上述情事請主動連繫檸檬家事官方LINE@，謝謝。
+請您依下列匯款帳戶資訊繳費，謝謝！
+{bank_block}
+{amount_line}
+付款完成後，即代表您同意接受檸檬專業清潔公司 服務條款 及 隱私權政策 及 VIP政策。
+請詳閱服務條款及隱私權相關說明 https://www.lemonclean.com.tw/terms
+檸檬家事專員會於現場再溝通服務需求，
+以於系統估算時間內可以完的服務項目為主。
+VIP客戶
+◎異動費
+VIP若取消/異動服務日期，需於服務日前4個工作天上班時間(不含例假日)告知。
+若於服務前2-3個工作天告知，則收取每2人1小時異動費200元；
+若於服務前1個工作天內(含服務當天)告知，則收取每2人1小時異動費300元。"""
+
+    # 其他區域或付款方式組合，目前沒有現成文案，回傳提示字串並附上解析到的金額，
+    # 提醒客服人工確認/補上正確文案，而不是送出格式錯誤的訊息。
+    return (
+        f"⚠️ 尚未提供「{payway}／{region}」的儲值金訂單專用文案，請人工確認/補上正確文案。\n\n"
+        f"訂單編號：{order_no}\n儲值金額：{amount}元\n贈購物金：{bonus}元"
+    )
+
+
 def build_line_message_from_order_no(env_name, backend_email, backend_password, order_no, fallback_region="台北"):
     base_url = _configure_environment(env_name)
     session = requests.Session()
@@ -2449,6 +2567,25 @@ def build_line_message_from_order_no(env_name, backend_email, backend_password, 
     block = _fetch_purchase_block_for_order_no(session, order_no)
     lines = block.get("lines", [])
     joined = "\n".join(lines)
+
+    # v8.19：先判斷是不是「儲值金購買」訂單——這種訂單沒有服務日期/地址，
+    # 走專用範本，不套用一般清潔服務訂單需要服務日期/地址/金額的檢查。
+    _sv_region, _sv_amount, _sv_bonus = _extract_stored_value_purchase_info(joined)
+    if _sv_amount is not None:
+        sv_payway = _extract_payway_line(joined)
+        if not sv_payway:
+            raise Exception(f"訂單 {order_no} 無法判斷付款方式（信用卡/ATM），請至後台確認。")
+        sv_message = build_stored_value_purchase_message(order_no, sv_payway, _sv_region, _sv_amount, _sv_bonus)
+        sv_result = {
+            "order_no": block["order_no"], "all_order_nos": [block["order_no"]],
+            "payway": sv_payway, "region": _sv_region or fallback_region,
+            "is_stored_value_purchase": True,
+            "stored_value_amount": _sv_amount, "stored_value_bonus": _sv_bonus,
+            "env_name": env_name, "session": session,
+            "source_url": f"{base_url}/purchase?orderNo={block['order_no']}",
+        }
+        return sv_result, sv_message
+
     service_date, service_time = _parse_service_date_time_loose(joined)
     actual_time = _extract_actual_service_time(joined)
     person_extracted, _ = _extract_person_hour_line(joined)
@@ -2489,6 +2626,11 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         block = _fetch_purchase_block_for_order_no(session, ono)
         lines = block.get("lines", [])
         joined = "\n".join(lines)
+        # v8.19：儲值金購買訂單沒有服務日期/地址，性質跟一般清潔服務訂單完全
+        # 不同，不適合合併在一起產生訊息，直接擋下並提示改用單筆查詢。
+        _sv_region_chk, _sv_amount_chk, _sv_bonus_chk = _extract_stored_value_purchase_info(joined)
+        if _sv_amount_chk is not None:
+            raise Exception(f"訂單 {ono} 是儲值金購買訂單，沒有服務日期/地址，不適合合併，請改用單筆訂單編號查詢。")
         service_date, service_time = _parse_service_date_time_loose(joined)
         actual_time = _extract_actual_service_time(joined)
         person_extracted, _ = _extract_person_hour_line(joined)
