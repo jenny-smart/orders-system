@@ -1698,6 +1698,14 @@ else:
                 f"優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。　"
                 f"👤 專員：{po.get('staff') or '（無班表資料）'}"
             )
+            if paid_stage.get("mark_paid_ok"):
+                st.caption("✅ 已標記為已付款")
+            else:
+                st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
+            if paid_stage.get("invoice_note_ok"):
+                st.caption("✅ 發票號碼欄位已標註「不用開發票」")
+            else:
+                st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不用開發票」：{paid_stage.get('invoice_note_msg', '')}")
             if po.get("order_no_duplicated"):
                 show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")

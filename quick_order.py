@@ -1,9 +1,19 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.33
+# 版本：v8.34
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.34
+# - 依客服重新確認的儲值金補價差完整流程，補齊三個缺漏：
+#   1. 第一段（儲值金清零單）換人為檸檬人時，原本沒開 allow_auto_lemon_shift，
+#      排班頁若當下沒有現成檸檬人可換就會直接失敗，不符合「此單必須全是
+#      檸檬人」的規定。改成強制開啟，補不到才會顯示失敗訊息。
+#   2. 新增 _mark_order_as_paid：第二段（客付補價差單）建立後呼叫後台
+#      /purchase/set_success/{id} 標記為已付款，不能讓它卡在待付款狀態
+#      （這張單全額用優惠券折抵，客人本來就不需要再實際付款）。
+#   3. 新增 _update_order_invoice_no_text：第二段建立後把訂單編輯頁的
+#      「發票號碼」欄位標註成「不用開發票」，避免財務誤以為漏開發票。
 # v8.33
 # - 修正重大 bug：儲值金訂單（payway=儲值金）建單時，如果地址檢查
 #   （check_contain）用 stored_value_routine 頁面的 token 失敗，v8.5 加的
@@ -220,7 +230,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.33"
+__version__ = "8.34"
 
 import time
 import re
@@ -1450,6 +1460,25 @@ def create_coupon(
     return {"success": True, "coupon_prefix": prefix, "coupon_code": coupon_code, "discount": int(float(discount)), "piece": int(piece), "message": f"優惠券建立成功，優惠碼：{coupon_code}"}
 
 
+def _mark_order_as_paid(session, base_url, order_no):
+    """
+    v2026.07.10：呼叫後台 /purchase/set_success/{purchase_id}，把訂單標記為
+    已付款。用於儲值金補價差第二段（客付補價差單）：這張單本質上是用優惠券
+    折抵掉原儲值金餘額金額，客人不需要再實際刷卡/匯款，所以要主動標記為
+    已付款，不能讓它卡在待付款狀態。
+    """
+    edit_id = _fetch_order_edit_id(session, order_no)
+    if not edit_id:
+        return False, f"無法取得訂單 {order_no} 的後台 ID，無法標記已付款"
+    try:
+        resp = session.get(f"{base_url}/purchase/set_success/{edit_id}", headers=HEADERS, allow_redirects=True)
+        if resp.status_code == 200:
+            return True, "已標記為已付款"
+        return False, f"標記已付款失敗，HTTP {resp.status_code}"
+    except Exception as e:
+        return False, f"標記已付款失敗：{e}"
+
+
 def _fetch_order_edit_id(session, order_no):
     params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
     params["orderNo"] = str(order_no).strip()
@@ -1458,6 +1487,42 @@ def _fetch_order_edit_id(session, order_no):
         return None
     m = re.search(r"/purchase/edit/(\d+)", resp.text)
     return m.group(1) if m else None
+
+
+def _update_order_invoice_no_text(session, base_url, order_no, invoice_no_text):
+    """
+    v2026.07.10：把訂單編輯頁（/purchase/edit/{id}）的「發票號碼」欄位改成
+    指定文字（例如「不用開發票」）。用於儲值金補價差第二段：這張客付補價差
+    單全額用優惠券折抵，客人沒有實際付款，不需要真的開立發票，用這個欄位
+    標註清楚，避免財務誤以為漏開發票。
+    寫法沿用既有的 _update_order_note：先 GET 編輯頁抓出目前所有欄位值，
+    只覆蓋 invoice_no 這一個欄位，其餘欄位原封不動 PUT 回去。
+    """
+    try:
+        edit_id = _fetch_order_edit_id(session, order_no)
+        if not edit_id:
+            return False, f"找不到訂單 {order_no} 的編輯 ID"
+        edit_url = f"{base_url}/purchase/edit/{edit_id}"
+        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        if get_resp.status_code != 200:
+            return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+        token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+        csrf = token_m.group(1) if token_m else ""
+        if not csrf:
+            return False, "無法取得 CSRF token"
+        existing = {}
+        for m2 in re.finditer(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2)
+        for m2 in re.finditer(r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2).strip()
+        existing["_token"] = csrf
+        existing["_method"] = "PUT"
+        existing["invoice_no"] = invoice_no_text
+        post_resp = session.post(edit_url, data=existing, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, allow_redirects=True)
+        success = post_resp.status_code in (200, 302)
+        return success, f"HTTP {post_resp.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 
 def _update_order_note(session, base_url, order_no, note):
@@ -3414,7 +3479,10 @@ def stored_value_makeup_create_stored_order(
     # v2026.07.10：儲值金補價差人數不夠時，直接自動補檸檬人排班，不用客服
     # 另外勾選（跟訂單轉換一致），補不到才會由 quick_create_order 擋單。
     stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a, allow_auto_lemon_shift=True)
-    lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person))
+    # v2026.07.10：儲值金清零單依規定必須「全部」是檸檬人，如果排班頁當下
+    # 沒有現成的檸檬人可換，也要自動補班湊到需要的人數，不能因為排班頁剛好
+    # 沒有現成候選人就放棄，導致這張單留著一般專員沒真的換成檸檬人。
+    lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person), allow_auto_lemon_shift=True)
     note = (f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。")
     _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
     return {"stage": "stored_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"], "coupon_a": coupon_a, "stored_order": stored_order, "lemon_result": lemon_result, "note": note, "address": ctx["address"], "region": ctx["region"], "phone": phone, "clean_type_id": clean_type_id, "service_date": service_date, "period_s": period_s, "hour": str(hour), "person": str(person), "coupon_prefix_base": coupon_prefix_base or phone, "coupon_valid_days": coupon_valid_days}
@@ -3440,7 +3508,19 @@ def stored_value_makeup_create_paid_order(
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
     note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
-    return {"stage": "paid_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"], "coupon_b": coupon_b, "paid_order": paid_order, "note": note, "line_message": build_line_message(paid_order), "address": ctx["address"], "region": ctx["region"], "stored_order_no": stored_order_no}
+    # v2026.07.10：客付補價差單全額用優惠券折抵，客人沒有實際付款：
+    # 1. 標記為已付款，不能讓它卡在待付款狀態。
+    # 2. 發票號碼欄位標註「不用開發票」，避免財務誤以為漏開發票。
+    mark_paid_ok, mark_paid_msg = _mark_order_as_paid(paid_order["session"], _configure_environment(env_name), paid_order["order_no"])
+    invoice_note_ok, invoice_note_msg = _update_order_invoice_no_text(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], "不用開發票")
+    return {
+        "stage": "paid_order", "balance": ctx["balance"], "plan": ctx["plan"], "day_type": ctx["day_type"],
+        "coupon_b": coupon_b, "paid_order": paid_order, "note": note,
+        "line_message": build_line_message(paid_order), "address": ctx["address"], "region": ctx["region"],
+        "stored_order_no": stored_order_no,
+        "mark_paid_ok": mark_paid_ok, "mark_paid_msg": mark_paid_msg,
+        "invoice_note_ok": invoice_note_ok, "invoice_note_msg": invoice_note_msg,
+    }
 
 
 def stored_value_makeup_convert(
