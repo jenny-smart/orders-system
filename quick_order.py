@@ -1,9 +1,25 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.31
-# 最後更新：2026-07-09
+# 版本：v8.33
+# 最後更新：2026-07-10
 #
 # Change Log
+# v8.33
+# - 修正重大 bug：儲值金訂單（payway=儲值金）建單時，如果地址檢查
+#   （check_contain）用 stored_value_routine 頁面的 token 失敗，v8.5 加的
+#   備援邏輯會向 /booking/single 借一個 token 重試，成功後把 token 變數
+#   永久換成借來的那個——但後面正式送出建單時也繼續沿用這個借來的 token，
+#   導致送到 /booking/stored_value_routine 的請求帶著 /booking/single 頁面
+#   發出的 token，後台可能因此誤判、出現付款方式空白、訂單卡在待付款、
+#   儲值金沒有真的被扣除的情況（實際案例：TT00212129）。
+#   修法：不管前面 check_contain 階段借用過哪個網址的 token，正式送出建單
+#   前一律重新跟「這筆訂單實際要用的建單網址」（依 payway 對應，儲值金訂單
+#   就是 /booking/stored_value_routine）要一個乾淨的 token。
+# v8.32
+# - 儲值金補價差（stored_value_makeup_create_stored_order/create_paid_order）
+#   人數不夠時，改成自動補檸檬人排班（allow_auto_lemon_shift=True 寫死），
+#   不用客服另外勾選，補不到才會被 quick_create_order 擋單。之前這兩個函式
+#   完全沒有自動補檸檬人的參數，人數不夠一定會直接被 v8.31 的擋單邏輯擋下。
 # v8.31
 # - 修正重大規則漏洞：查無班表或人數不足時，quick_create_order（舊客快速
 #   建單）跟 quick_create_new_customer_order（新客資料拆解）之前都會「仍
@@ -204,7 +220,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.31"
+__version__ = "8.33"
 
 import time
 import re
@@ -1215,8 +1231,19 @@ def quick_create_order(
             f"查無班表或人數不足（需要 {_need} 人，目前排班頁只有 {len(cleaners)} 人可指派），"
             f"依規定人數不足不能成單，請先確認/補足班表後再建單。"
         )
-    staff_display = format_staff_from_cleaners(cleaners, people=person)
+    # v2026.07.10：修正重大 bug——前面 check_contain 若失敗，可能借用過
+    # /booking/single 頁面的 token（見上面 v8.5 的備援邏輯），並把 token
+    # 變數永久換成借來的那個。如果送出建單時仍沿用這個借來的 token，會導致
+    # 送到 /booking/stored_value_routine 的請求帶著 /booking/single 頁面
+    # 發出的 token，後台可能因此誤判成一般訂單處理，出現付款方式空白、
+    # 訂單卡在待付款、儲值金沒有真的被扣除的情況。這裡在正式送出建單前，
+    # 一律重新跟「這筆訂單實際要用的建單網址」要一個乾淨的 token，不管前面
+    # check_contain 階段借用過哪個網址的 token。
     booking_url = _booking_url_for_payway(base_url, payway)
+    _fresh_token = _fetch_csrf_from_url(session, booking_url)
+    if _fresh_token:
+        token = _fresh_token
+    staff_display = format_staff_from_cleaners(cleaners, people=person)
     before_order_nos = list_order_numbers_for_phone(session, phone, name=member_name)
     booking_resp = session.post(booking_url, data=_build_booking_submit_data(base_data, token, payway, slot), headers=HEADERS, allow_redirects=True)
     display_period = display_period_text(period_s.split("-")[0], period_s.split("-")[1])
@@ -3384,7 +3411,9 @@ def stored_value_makeup_create_stored_order(
     services = ["居家清潔", "裝修細清"]
     coupon_a = create_coupon(env_name, backend_email, backend_password, title=f"儲值金清零-{phone}", discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services)
     code_a = coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
-    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a)
+    # v2026.07.10：儲值金補價差人數不夠時，直接自動補檸檬人排班，不用客服
+    # 另外勾選（跟訂單轉換一致），補不到才會由 quick_create_order 擋單。
+    stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_a, allow_auto_lemon_shift=True)
     lemon_result = assign_lemon_cleaners_to_order(session=stored_order["session"], base_url=_configure_environment(env_name), order_no_a=stored_order["order_no"], service_date=service_date, period_s=period_s, person_count=str(person))
     note = (f"儲值金補價差第一段：儲值金折抵單 {stored_order['order_no']}，{ctx['day_type']}單價 {ctx['plan']['unit_price']} × {ctx['plan']['total_person_hours']}人時 = {ctx['plan']['dummy_price']}，優惠券A折抵 {ctx['plan']['coupon_a']} 元，剩餘 {ctx['plan']['stored_value_applied']} 元扣儲值金後總額應為 0，檸檬人勿動。")
     _update_order_note(stored_order["session"], _configure_environment(env_name), stored_order["order_no"], note)
@@ -3406,7 +3435,8 @@ def stored_value_makeup_create_paid_order(
     coupon_b = create_coupon(env_name, backend_email, backend_password, title=f"儲值金補價差客付-{phone}", discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services)
     code_b = coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
-    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_b, **invoice)
+    # v2026.07.10：同上，第二段客付補價差單也直接自動補檸檬人排班。
+    paid_order = quick_create_order(env_name=env_name, payway=customer_payway, region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=code_b, allow_auto_lemon_shift=True, **invoice)
     pair = f"儲值折抵單 {stored_order_no} + 客付補價差單 {paid_order['order_no']}" if stored_order_no else f"客付補價差單 {paid_order['order_no']}"
     note = f"儲值金補價差第二段：{pair}，客付單使用優惠券B折抵原儲值金餘額 {ctx['balance']} 元。"
     _update_order_note(paid_order["session"], _configure_environment(env_name), paid_order["order_no"], note)
