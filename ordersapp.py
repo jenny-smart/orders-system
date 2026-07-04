@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.21
+# 版本：v8.22
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.22
+# - 「儲值金購買」結果區塊補上「發送確認信」按鈕，跟其他成單流程一致：
+#   建單成功後不自動發信，由客服確認資料無誤後手動按下再發送
+#   （沿用既有 send_confirmation，成功後畫面切換為「已發送」狀態）。
+#   LINE 通知訊息這部分從 v8.21 起本來就會自動產生並顯示，本次沒有改動。
 # v8.21
 # - 修正 _missing_quick_order_names 檢查跳出的錯誤訊息：原本寫死「請用 v8.5
 #   覆蓋 GitHub 上的 quick_order.py」，是很久以前版本號還是 v8.5 時寫的字串，
@@ -121,7 +126,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.21"
+__version__ = "8.22"
 
 import html
 import requests
@@ -1607,6 +1612,26 @@ else:
                         + (f"（{sv2_result.get('company_title')} / {sv2_result.get('company_no')}）" if sv2_result.get("invoice_type") == "3" else "")
                         + (f"（{sv2_result.get('carrier_info')}）" if sv2_result.get("invoice_type") == "2" and sv2_result.get("carrier_info") else "")
                     )
+                # v8.23：跟其他成單流程一致，訂單建立後不自動發確認信，
+                # 由客服確認資料無誤後手動按下「發送確認信」再送出。
+                if sv2_result.get("order_no"):
+                    if not sv2_result.get("mail_sent"):
+                        if st.button("📧 發送確認信", key="sv2_send_mail_btn", type="primary"):
+                            try:
+                                ok_m, msg_m = send_confirmation(sv2_result)
+                                if ok_m:
+                                    sv2_result["mail_sent"] = True
+                                    st.session_state.sv2_result = sv2_result
+                                    st.success("✅ 確認信已發送")
+                                    st.rerun()
+                                else:
+                                    st.error(f"確認信發送失敗：{msg_m}")
+                            except Exception as e:
+                                st.error(f"確認信發送失敗：{e}")
+                    else:
+                        st.success("✅ 確認信已發送")
+                else:
+                    st.info("查不到訂單編號，無法自動發送確認信，請至後台確認訂單後手動發送。")
                 if sv2_result.get("line_message"):
                     st.markdown("#### 💬 LINE 訊息")
                     st.text_area("LINE 訊息", sv2_result["line_message"], height=380, label_visibility="collapsed")
