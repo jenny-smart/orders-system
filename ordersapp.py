@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.19
+# 版本：v8.20
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.20
+# - 新增「儲值金購買」功能選單，對應 quick_order.py 新增的
+#   create_stored_value_purchase_order：輸入手機號碼、選地區、選金額即可
+#   建單，付款方式/發票自動沿用會員歷史訂單設定，不用手動選；查無可用設定
+#   時會明確提示需人工確認，不會默默送出錯誤的付款/發票組合。
 # v8.19
 # - 批次建單的訂單一致性檢查改成「全部列都跑完後才統一做一次」，不再是每一列
 #   各自比對一次（原本掛在 run_process_web 裡，會讓同一支電話在多列批次裡被
@@ -110,7 +115,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.19"
+__version__ = "8.20"
 
 import html
 import requests
@@ -153,6 +158,7 @@ _REQUIRED_QUICK_ORDER_NAMES = [
     "stored_value_makeup_convert",
     "stored_value_makeup_create_stored_order",
     "stored_value_makeup_create_paid_order",
+    "create_stored_value_purchase_order",
     "COUPON_COMPANY_ID_MAP",
     "COUPON_SERVICE_ITEM_MAP",
     "COUPON_TYPE_MAP",
@@ -486,11 +492,13 @@ info_panel(
         "LINE 通知產生器：用已成立訂單編號補產生通知訊息，支援多筆同時產生。",
         "訂單轉換：原單A → 多筆新單B1/B2/B3，每筆各建折價券，混合配班（一般專員優先）。",
         "儲值金補價差：兩段式流程，先建儲值金清零單，再建客付補差價單。",
+        "儲值金購買：客人自己買/儲值一筆金額，付款方式/發票自動沿用會員最近一次 VIP 或"
+        "儲值金購買訂單的設定，都找不到才用最近一次一般服務訂單的設定。",
     ],
 )
 mode = st.radio(
     "功能選單",
-    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "訂單轉換", "儲值金補價差"],
+    ["批次建單（Google Sheet）", "舊客快速建單", "新客資料拆解", "LINE 通知產生器", "訂單轉換", "儲值金補價差", "儲值金購買"],
     horizontal=True,
 )
 
@@ -1519,6 +1527,87 @@ else:
                 st.markdown("#### 💬 客付訂單 LINE 訊息")
                 st.text_area("LINE 訊息", paid_stage["line_message"], height=320, label_visibility="collapsed")
                 copy_button("複製 LINE 訊息", paid_stage["line_message"], "copy_sv_paid_line")
+
+    # --------------------------------------------------
+    # 儲值金購買（v8.21 新增）
+    # 客人自己買/儲值一筆金額，付款方式/發票不用手動選，自動沿用會員最近一次
+    # VIP 或儲值金購買訂單的設定；都找不到才退回最近一次一般服務訂單。
+    # --------------------------------------------------
+    elif single_feature == "儲值金購買":
+        info_panel("流程說明", [
+            "地區＝登入帳號本身所屬地區（例如用台北帳號登入，就會建在台北）。",
+            "付款方式與發票不用手動選：自動抓這支電話最近一次 VIP 或儲值金購買訂單的設定，"
+            "都找不到才退回抓最近一次一般服務訂單的設定，兩者都沒有則不會自動送出，"
+            "改請你人工確認後至後台手動建立。",
+        ])
+        sv2_col1, sv2_col2 = st.columns(2)
+        with sv2_col1:
+            sv2_phone = st.text_input("客人手機號碼", key="sv2_phone")
+        with sv2_col2:
+            sv2_region = st.selectbox("地區（登入帳號所屬地區）", ["台北", "桃園", "新竹", "台中"], key="sv2_region")
+
+        sv2_amount_labels = {
+            "儲值金20,000（贈購物金800）": 20000,
+            "儲值金50,000（贈購物金2,500）": 50000,
+            "儲值金9,900（無贈送）": 9900,
+            "儲值金17,000（無贈送）": 17000,
+            "儲值金18,900（無贈送）": 18900,
+            "儲值金19,400（無贈送）": 19400,
+            "儲值金36,000（無贈送）": 36000,
+        }
+        sv2_amount_label = st.selectbox("儲值金金額", list(sv2_amount_labels.keys()), key="sv2_amount_label")
+        sv2_amount = sv2_amount_labels[sv2_amount_label]
+        sv2_notice = st.text_area("備註（選填）", height=80, key="sv2_notice")
+
+        if st.button("🚀 建立儲值金購買訂單", use_container_width=True, key="sv2_create_btn", type="primary"):
+            # v8.21：開始新的一次嘗試前，先清空上一次殘留的舊結果。
+            st.session_state.sv2_result = {}
+            if not backend_email.strip() or not backend_password.strip():
+                st.error("請先輸入後台帳號密碼")
+            elif not sv2_phone.strip():
+                st.error("請輸入客人手機號碼")
+            else:
+                try:
+                    with st.spinner("查詢會員 → 判斷付款方式/發票 → 建立儲值金訂單…"):
+                        sv2_result = qo.create_stored_value_purchase_order(
+                            env_name=env,
+                            backend_email=backend_email.strip(),
+                            backend_password=backend_password.strip(),
+                            phone=sv2_phone.strip(),
+                            stored_value_amount=sv2_amount,
+                            region=sv2_region,
+                            notice=sv2_notice.strip(),
+                        )
+                    st.session_state.sv2_result = sv2_result
+                except Exception as e:
+                    st.error(f"建立失敗：{e}")
+
+        sv2_result = st.session_state.get("sv2_result") or {}
+        if sv2_result:
+            if sv2_result.get("need_manual_confirm"):
+                st.warning(f"⚠️ {sv2_result.get('message', '')}")
+            elif sv2_result.get("success"):
+                st.success(
+                    f"✅ 訂單：{sv2_result.get('order_no') or '（已送出，但查不到訂單編號，請至後台確認）'}　"
+                    f"儲值金額：{sv2_result.get('stored_value_amount')}元　"
+                    f"贈購物金：{sv2_result.get('bonus')}元　"
+                    f"付款方式：{sv2_result.get('payway')}"
+                )
+                _invoice_type_label = {"1": "捐贈發票", "2": "二聯式", "3": "三聯式"}.get(sv2_result.get("invoice_type", ""), "")
+                if _invoice_type_label:
+                    st.caption(
+                        f"發票設定沿用自會員歷史訂單：{_invoice_type_label}"
+                        + (f"（{sv2_result.get('company_title')} / {sv2_result.get('company_no')}）" if sv2_result.get("invoice_type") == "3" else "")
+                        + (f"（{sv2_result.get('carrier_info')}）" if sv2_result.get("invoice_type") == "2" and sv2_result.get("carrier_info") else "")
+                    )
+                if sv2_result.get("line_message"):
+                    st.markdown("#### 💬 LINE 訊息")
+                    st.text_area("LINE 訊息", sv2_result["line_message"], height=380, label_visibility="collapsed")
+                    copy_button("複製 LINE 訊息", sv2_result["line_message"], "copy_sv2_line")
+                else:
+                    st.info("此地區/付款方式組合目前沒有現成 LINE 通知文案，請至「LINE 通知產生器」用訂單編號查詢並人工確認內容。")
+            else:
+                st.error(f"❌ 建立失敗：{sv2_result.get('message', '未知錯誤')}")
 
     # --------------------------------------------------
     # 舊客快速建單：建單後結果顯示
