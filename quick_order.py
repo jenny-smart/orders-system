@@ -1,9 +1,16 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.24
-# 最後更新：2026-07-05
+# 版本：v8.25
+# 最後更新：2026-07-07
 #
 # Change Log
+# v8.25
+# - 「儲值金購買」查不到會員過去訂單設定時，不再只顯示一句「查無資料」，
+#   改成把實際查詢過程回傳出來（HTTP 狀態碼、這支電話查到幾張訂單卡片、
+#   每張卡片的訂單編號/分類結果/是否算已付款），交由畫面用表格顯示。
+#   這樣往後如果又查不到，可以直接從畫面上的表格判斷是「後台真的查不到
+#   任何訂單」還是「查得到訂單但分類/已付款判斷有誤判」，不用再靠反覆
+#   猜測跟來回截圖排查。
 # v8.24
 # - 修正「儲值金購買」一直查不到會員過去訂單設定的真正根因：
 #   _find_payway_invoice_source_for_stored_value 跟 _fetch_latest_stored_
@@ -148,7 +155,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.24"
+__version__ = "8.25"
 
 import time
 import re
@@ -2696,7 +2703,7 @@ def _parse_invoice_details_from_block(lines):
 
 def _find_payway_invoice_source_for_stored_value(session, phone_norm):
     """
-    v8.23：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
+    v8.25：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
     應該沿用的付款方式與發票設定：
     1. 購買項目是「儲值金」或「VIP」、且付款狀態是「已付款」的訂單（依後台
        列表順序，取排序在前、也就是較新的那一筆——不特別區分 VIP 跟儲值金
@@ -2705,25 +2712,39 @@ def _find_payway_invoice_source_for_stored_value(session, phone_norm):
        大掃除/搬出清潔/搬入清潔）、且付款狀態是「已付款」的訂單。
     3. 都找不到則回傳空白，交由客服手動確認，不會默默送出錯誤的付款/發票設定。
     未付款的訂單一律不採用，避免拿還沒真的成交的訂單當範本。
+
+    v8.25 新增：同時回傳 debug 資訊（這支電話查到幾張訂單卡片、每張卡片的
+    訂單編號/分類結果/是否算已付款），查無資料時可以直接顯示給客服看，
+    不用每次都用猜的來回排查。
     """
+    debug = {"http_status": None, "block_count": 0, "blocks": [], "error": ""}
     try:
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params["phone"] = phone_norm
         resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-    except Exception:
-        return {"payway": ""}, _empty_invoice_info()
+    except Exception as e:
+        debug["error"] = f"查詢例外：{e}"
+        return {"payway": ""}, _empty_invoice_info(), debug
+    debug["http_status"] = resp.status_code
     if resp.status_code != 200:
-        return {"payway": ""}, _empty_invoice_info()
+        return {"payway": ""}, _empty_invoice_info(), debug
 
     blocks = extract_order_cards_from_purchase_html(resp.text)
+    debug["block_count"] = len(blocks)
     vip_or_stored_block = None
     professional_block = None
     for block in blocks:
         lines = block.get("lines", [])
         joined = "\n".join(lines)
-        if not _is_paid_block(joined):
-            continue
+        is_paid = _is_paid_block(joined)
         block_type = _classify_order_block_type(lines)
+        debug["blocks"].append({
+            "order_no": block.get("order_no", ""),
+            "type": block_type,
+            "paid": is_paid,
+        })
+        if not is_paid:
+            continue
         if block_type in ("vip_purchase", "stored_value_purchase") and vip_or_stored_block is None:
             vip_or_stored_block = block
         elif block_type == "professional_cleaning" and professional_block is None:
@@ -2733,12 +2754,13 @@ def _find_payway_invoice_source_for_stored_value(session, phone_norm):
 
     chosen_block = vip_or_stored_block or professional_block
     if not chosen_block:
-        return {"payway": ""}, _empty_invoice_info()
+        return {"payway": ""}, _empty_invoice_info(), debug
 
     joined = "\n".join(chosen_block.get("lines", []))
     payway = _extract_payway_line(joined)
     invoice_info = _parse_invoice_details_from_block(chosen_block.get("lines", []))
-    return {"payway": payway}, invoice_info
+    debug["chosen_order_no"] = chosen_block.get("order_no", "")
+    return {"payway": payway}, invoice_info, debug
 
 
 def _fetch_latest_stored_value_order_no(session, phone_norm, amount):
@@ -2808,7 +2830,7 @@ def create_stored_value_purchase_order(
     if not member_id:
         raise Exception("查詢會員成功但缺少 member_id")
 
-    payway_source, invoice_source = _find_payway_invoice_source_for_stored_value(session, phone_norm)
+    payway_source, invoice_source, search_debug = _find_payway_invoice_source_for_stored_value(session, phone_norm)
     payway_map = {"信用卡": "1", "ATM": "2"}
     payway_code = payway_map.get(payway_source.get("payway", ""), "")
 
@@ -2823,6 +2845,7 @@ def create_stored_value_purchase_order(
                 "查無此會員過去 VIP／儲值金／一般服務訂單可用的付款方式或發票設定，"
                 "請人工確認付款方式與發票後，至後台手動建立這筆儲值金訂單。"
             ),
+            "search_debug": search_debug,
             "session": session, "env_name": env_name,
         }
 
@@ -2877,6 +2900,7 @@ def create_stored_value_purchase_order(
         "company_no": invoice_source.get("company_no", ""),
         "region": region, "company_id": company_id,
         "line_message": line_message,
+        "search_debug": search_debug,
         "env_name": env_name, "session": session,
     }
 
