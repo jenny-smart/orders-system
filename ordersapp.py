@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.17
+# 版本：v8.18
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-04
+# 最後更新：2026-07-05
 #
 # Change Log
+# v8.18
+# - 批次建單的訂單一致性檢查結果顯示，配合 orders.py 的雙向比對更新：
+#   1. 方向一比對項目加入地址，訊息文字同步更新為「電話/地址/日期/時段」。
+#   2. 方向二（系統反查 Sheet）查到的異常沒有對應到特定列（row_num 為
+#      None），畫面改顯示「（系統反查）」而不是「第 None 列」。
 # v8.17
 # - 修正「新客資料拆解」與「訂單轉換」的 LINE 訊息文字框，成立新訂單後畫面還
 #   停留在上一張訂單內容的問題：這幾個 st.text_area 原本帶了固定 key
@@ -97,7 +102,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.17"
+__version__ = "8.18"
 
 import html
 import requests
@@ -568,14 +573,16 @@ if mode == "批次建單（Google Sheet）":
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
-            # v8.14：訂單一致性檢查結果——訂單編號跟 Google Sheet 該列的電話/日期/
-            # 時段是否一致，抓出訂單編號誤配對（M欄重複、或該列其實沒有真的成單）。
+            # v8.18：訂單一致性檢查結果——雙向比對 Google Sheet 與後台系統訂單，
+            # 抓出訂單編號誤配對（M欄重複、或該列其實沒有真的成單）、
+            # 或系統已成單但 Sheet 沒記錄的情況。
             if all_consistency_problems:
                 st.error(f"⚠️ 訂單一致性檢查發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
                 for _p in all_consistency_problems:
-                    st.warning(f"第 {_p.get('row_num')} 列（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
+                    _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查）"
+                    st.warning(f"{_row_label}（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
             elif total_processed > 0:
-                st.success("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/日期/時段相符。")
+                st.success("✅ 訂單一致性檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
 
 
 # =========================================================
