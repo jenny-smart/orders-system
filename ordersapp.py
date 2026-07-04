@@ -1,10 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.27
+# 版本：v8.28
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-08
 #
 # Change Log
+# v8.28
+# - 功能選單的下拉選項加上編號（1. 2. 3. ...），選項文字比較長時方便一眼
+#   對照要選第幾項，不用整段文字讀完才能定位。編號是動態產生的，之後增減
+#   選項不用手動改號碼。
 # v8.27
 # - 新增獨立的「雙向訂單檢查」功能（選單第13項），不再只能依附在批次建單
 #   的「全部執行完後做一次訂單一致性檢查」勾選框裡。這個功能可以直接針對
@@ -165,7 +169,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.27"
+__version__ = "8.28"
 
 import html
 import requests
@@ -573,10 +577,13 @@ FUNCTION_OPTIONS = [
 
 selected_label = st.selectbox(
     "功能選單",
-    [label for label, _, _ in FUNCTION_OPTIONS],
+    [f"{i}. {label}" for i, (label, _, _) in enumerate(FUNCTION_OPTIONS, start=1)],
     key="unified_function_select",
 )
-_selected_option = next(item for item in FUNCTION_OPTIONS if item[0] == selected_label)
+_selected_option = next(
+    item for i, item in enumerate(FUNCTION_OPTIONS, start=1)
+    if f"{i}. {item[0]}" == selected_label
+)
 _system_key, mode = _selected_option[1], _selected_option[2]
 
 st.markdown("<hr>", unsafe_allow_html=True)
