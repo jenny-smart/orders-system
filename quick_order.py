@@ -1,9 +1,24 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.23
+# 版本：v8.24
 # 最後更新：2026-07-05
 #
 # Change Log
+# v8.24
+# - 修正「儲值金購買」一直查不到會員過去訂單設定的真正根因：
+#   _find_payway_invoice_source_for_stored_value 跟 _fetch_latest_stored_
+#   value_order_no 裡查詢 /purchase 用的是裸的 `PURCHASE_URL`，但這個名稱在
+#   quick_order.py 裡從沒被 import 過（全部其他地方都是用 `orders.PURCHASE_URL`，
+#   因為它是依環境 dev/prod 動態設定的）。這會直接丟出 NameError，但剛好被
+#   函式自己的 `except Exception:` 整個吞掉，才會靜默顯示「查無資料」而不是
+#   報錯，很難察覺。已全部改成 `orders.PURCHASE_URL`。
+# - 依客服提供的精確規則調整搜尋範圍：
+#   1. 只採用「付款狀態：已付款」的訂單當範本，未付款的訂單一律不採用。
+#   2. 找不到 VIP/儲值金購買訂單時，退回的「一般服務訂單」精準限定為
+#      「專業清潔」類別（居家清潔/辦公室清潔/裝修細清/大掃除/搬出清潔/
+#      搬入清潔），不是任何非 VIP/儲值金的訂單都算數。
+#   已用實際訂單資料（VIP券兩筆已付款訂單、信用卡、二聯式會員載具）驗證過，
+#   結果正確。
 # v8.23
 # - 修正「儲值金購買」查不到會員過去 VIP/儲值金/一般服務訂單設定的問題：
 #   _find_payway_invoice_source_for_stored_value 跟 _fetch_latest_stored_
@@ -133,7 +148,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.23"
+__version__ = "8.24"
 
 import time
 import re
@@ -2614,9 +2629,13 @@ def _empty_invoice_info():
     }
 
 
+PROFESSIONAL_CLEANING_LABELS = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除", "搬出清潔", "搬入清潔"]
+
+
 def _classify_order_block_type(lines):
     """
-    v8.21：判斷一張訂單卡片是「VIP購買」「儲值金購買」還是一般「服務訂單」。
+    v8.23：判斷一張訂單卡片是「VIP購買」「儲值金購買」「專業清潔」還是其他
+    （家電清潔/傢俱清潔/整理收納等，不在儲值金購買發票來源的搜尋範圍內）。
     直接鎖定「建立時間」那一行的下一行（也就是購買項目那一行），避免誤抓到
     客服備註/財務備註裡出現的「VIP若取消...」等文字（那些是備註內容，不是
     購買項目）。
@@ -2628,7 +2647,14 @@ def _classify_order_block_type(lines):
         return "stored_value_purchase"
     if "VIP" in item_line:
         return "vip_purchase"
-    return "service"
+    if any(label in item_line for label in PROFESSIONAL_CLEANING_LABELS):
+        return "professional_cleaning"
+    return "other"
+
+
+def _is_paid_block(joined_text):
+    """v8.23：只有「付款狀態：已付款」的訂單，才能拿來當付款方式/發票設定的範本。"""
+    return bool(re.search(r"付款狀態[：:]\s*已付款", joined_text))
 
 
 def _parse_invoice_details_from_block(lines):
@@ -2670,17 +2696,20 @@ def _parse_invoice_details_from_block(lines):
 
 def _find_payway_invoice_source_for_stored_value(session, phone_norm):
     """
-    v8.21：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
+    v8.23：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
     應該沿用的付款方式與發票設定：
-    1. 最近一次 VIP 購買或儲值金購買訂單（依後台列表順序，取排序在前、也就是
-       較新的那一筆——不特別區分 VIP 跟儲值金哪個更優先，兩者一起找最新的）。
-    2. 都找不到才退回最近一次一般服務訂單。
+    1. 購買項目是「儲值金」或「VIP」、且付款狀態是「已付款」的訂單（依後台
+       列表順序，取排序在前、也就是較新的那一筆——不特別區分 VIP 跟儲值金
+       哪個更優先，兩者一起找最新一筆已付款的）。
+    2. 都找不到才退回購買項目是「專業清潔」（居家清潔/辦公室清潔/裝修細清/
+       大掃除/搬出清潔/搬入清潔）、且付款狀態是「已付款」的訂單。
     3. 都找不到則回傳空白，交由客服手動確認，不會默默送出錯誤的付款/發票設定。
+    未付款的訂單一律不採用，避免拿還沒真的成交的訂單當範本。
     """
     try:
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params["phone"] = phone_norm
-        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     except Exception:
         return {"payway": ""}, _empty_invoice_info()
     if resp.status_code != 200:
@@ -2688,18 +2717,21 @@ def _find_payway_invoice_source_for_stored_value(session, phone_norm):
 
     blocks = extract_order_cards_from_purchase_html(resp.text)
     vip_or_stored_block = None
-    service_block = None
+    professional_block = None
     for block in blocks:
         lines = block.get("lines", [])
+        joined = "\n".join(lines)
+        if not _is_paid_block(joined):
+            continue
         block_type = _classify_order_block_type(lines)
         if block_type in ("vip_purchase", "stored_value_purchase") and vip_or_stored_block is None:
             vip_or_stored_block = block
-        elif block_type == "service" and service_block is None:
-            service_block = block
-        if vip_or_stored_block and service_block:
+        elif block_type == "professional_cleaning" and professional_block is None:
+            professional_block = block
+        if vip_or_stored_block and professional_block:
             break
 
-    chosen_block = vip_or_stored_block or service_block
+    chosen_block = vip_or_stored_block or professional_block
     if not chosen_block:
         return {"payway": ""}, _empty_invoice_info()
 
@@ -2716,7 +2748,7 @@ def _fetch_latest_stored_value_order_no(session, phone_norm, amount):
     try:
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params["phone"] = phone_norm
-        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     except Exception:
         return None
     if resp.status_code != 200:
