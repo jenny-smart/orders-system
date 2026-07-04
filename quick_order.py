@@ -1,9 +1,14 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.38
+# 版本：v8.39
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.39
+# - 修正合併訂單 LINE 訊息重複顯示人時的 bug：_format_period_display 本身
+#   就會組好「（Ｎ人Ｍ小時），共X人時」的完整格式，之前又手動在後面重複
+#   加了一次同樣的文字，導致實際服務時間那行出現兩次一樣的人時說明。
+#   訂單轉換跟儲值金補價差都有這個問題，已一併修正。
 # v8.38
 # - build_line_message 新增 merged_service_time_line／hide_amount_line／
 #   custom_amount_line 三個可選欄位，讓呼叫端可以客製化「服務時間」那行
@@ -267,7 +272,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.38"
+__version__ = "8.39"
 
 import time
 import re
@@ -2368,7 +2373,6 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             order_result["merged_service_time_line"] = (
                 f"服務時間 : {order_no_a}＋{order_result['order_no']}  合併訂單\n"
                 f"                      實際服務時間：{new_date_s.replace('-', '/')} {_new_period_disp}"
-                f"（{new_person}人{new_hour}小時），共{_person_hours_new}人時"
             )
             order_result["hide_amount_line"] = True
 
@@ -3539,12 +3543,10 @@ def stored_value_makeup_create_paid_order(
     # 格式，另起一行顯示補價差訂單真正的服務時間；服務金額這行要顯示（跟
     # 訂單轉換不同），並註明已扣除多少儲值金餘額。
     _new_period_disp = _format_period_display(str(period_s).replace(" ", ""), str(person))
-    _person_hours = int(person) * int(hour)
     if stored_order_no:
         paid_order["merged_service_time_line"] = (
             f"服務時間 : {stored_order_no}＋{paid_order['order_no']}  合併訂單\n"
             f"                      實際服務時間：{str(service_date).replace('-', '/')} {_new_period_disp}"
-            f"（{person}人{hour}小時），共{_person_hours}人時"
         )
     _paid_amount = paid_order.get("service_amount") or paid_order.get("price_with_tax") or paid_order.get("price")
     paid_order["custom_amount_line"] = f"服務金額：{_paid_amount}（含稅，已扣除儲值金餘額${ctx['balance']}）"

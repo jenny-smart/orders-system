@@ -1,10 +1,25 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.36
+# 版本：v8.39
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-10
 #
 # Change Log
+# v8.39
+# - 配合 quick_order.py v8.39：修正合併訂單 LINE 訊息裡「實際服務時間」
+#   那行人時說明重複顯示兩次的問題（_format_period_display 本身就會組好
+#   完整格式，不用再手動補一次）。
+# - 確認訂單轉換／儲值金補價差的「不開立發票」標註機制兩邊呼叫方式完全
+#   一致（都是呼叫 _update_order_invoice_no_text），程式碼層面沒有不對稱
+#   的地方。
+# v8.38
+# - 修正儲值金補價差第二段的畫面確認訊息文字：後端實際寫入後台的是
+#   「不開立發票」，畫面確認訊息卻還顯示舊字「不用開發票」，兩邊文字
+#   不一致容易讓人誤以為標註失敗。已改成跟後端一致的「不開立發票」。
+# v8.37
+# - 修正訂單轉換第二段的 LINE 訊息被藏在預設收合的「🔍 細項」裡看起來像
+#   不見了的問題：改成跟其他流程（新客建單/儲值金補價差/儲值金購買）一致，
+#   直接顯示在畫面上，不用多點一次展開。細項只留原訂單A後台連結跟備註文字。
 # v8.36
 # - 訂單轉換的第三階段（比對金額差額）改回第二段完成後直接自動顯示，
 #   不用再另外按按鈕（配合 quick_order.py v8.38 的 LINE 訊息格式調整）。
@@ -213,7 +228,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.36"
+__version__ = "8.39"
 
 import html
 import requests
@@ -1530,20 +1545,22 @@ else:
             for r in [r for r in conv_stage2.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 第二段 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
 
-            with st.expander("🔍 細項", expanded=False):
-                st.markdown(f"[🔗 開啟原訂單A後台]({conv_stage2['purchase_url_a']})")
-
-                st.markdown("**第二段 新訂單 LINE 訊息**")
+            # v2026.07.10：LINE 訊息改成直接顯示，跟其他流程（新客建單/儲值金
+            # 補價差/儲值金購買）一致，不要藏在預設收合的「細項」裡看不到。
+            combined_msg = conv_stage2.get("combined_line_message", "")
+            if combined_msg:
+                st.markdown("#### 💬 合併 LINE 訊息（全部新訂單）")
+                st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed")
+                copy_button("複製合併 LINE 訊息", combined_msg, "copy_conv_combined_line")
+            else:
+                st.markdown("#### 💬 新訂單 LINE 訊息")
                 for r in new_orders_ok:
                     if r.get("line_message"):
-                        st.text_area(f"B{r['index']} LINE（{r['order_no']}）", r["line_message"], height=300, label_visibility="collapsed")
+                        st.text_area(f"B{r['index']} LINE（{r['order_no']}）", r["line_message"], height=320, label_visibility="collapsed")
                         copy_button(f"複製 B{r['index']} LINE 訊息", r["line_message"], f"copy_conv_line_{r['index']}")
 
-                combined_msg = conv_stage2.get("combined_line_message", "")
-                if combined_msg:
-                    st.markdown("**💬 合併 LINE 訊息（全部新訂單）**")
-                    st.text_area("合併 LINE 訊息", combined_msg, height=380, label_visibility="collapsed")
-                    copy_button("複製合併 LINE 訊息", combined_msg, "copy_conv_combined_line")
+            with st.expander("🔍 細項", expanded=False):
+                st.markdown(f"[🔗 開啟原訂單A後台]({conv_stage2['purchase_url_a']})")
 
                 st.markdown("**備註文字**")
                 note_a_status = "✅ 已自動寫入" if conv_stage2.get("note_a_ok") else f"⚠️ 需手動貼上（{conv_stage2.get('note_a_msg', '')}）"
@@ -1711,9 +1728,9 @@ else:
             else:
                 st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
             if paid_stage.get("invoice_note_ok"):
-                st.caption("✅ 發票號碼欄位已標註「不用開發票」")
+                st.caption("✅ 發票號碼欄位已標註「不開立發票」")
             else:
-                st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不用開發票」：{paid_stage.get('invoice_note_msg', '')}")
+                st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{paid_stage.get('invoice_note_msg', '')}")
             if po.get("order_no_duplicated"):
                 show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")
