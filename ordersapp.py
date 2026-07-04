@@ -1576,6 +1576,18 @@ else:
             for r in [r for r in conv_stage2.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 第二段 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
 
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("6", "第三階段：比對原訂單與新訂單金額差額")
+            _orig_amount = conv_stage2.get("service_amount_a_display", 0)
+            _new_amount = conv_stage2.get("new_amount_total", 0)
+            _new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
+            if conv_stage2.get("ph_warning"):
+                st.warning(conv_stage2["ph_warning"])
+            elif _orig_amount:
+                st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
+            else:
+                st.warning(f"⚠️ 金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {_new_amt_detail} = {_new_amount}元，請手動核對。")
+
             # v2026.07.10：LINE 訊息改成直接顯示，跟其他流程（新客建單/儲值金
             # 補價差/儲值金購買）一致，不要藏在預設收合的「細項」裡看不到。
             combined_msg = conv_stage2.get("combined_line_message", "")
@@ -1599,18 +1611,6 @@ else:
                 st.text_area("原訂單A備註", conv_stage2.get("note_a", ""), height=70, label_visibility="collapsed", key="conv_note_a_out")
                 copy_button("複製原訂單A備註", conv_stage2.get("note_a", ""), "copy_note_a")
                 st.caption(f"全單備註：{conv_stage2.get('note', '')}")
-
-            st.markdown("<hr>", unsafe_allow_html=True)
-            step("6", "第三階段：比對原訂單與新訂單金額差額")
-            _orig_amount = conv_stage2.get("service_amount_a_display", 0)
-            _new_amount = conv_stage2.get("new_amount_total", 0)
-            _new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
-            if conv_stage2.get("ph_warning"):
-                st.warning(conv_stage2["ph_warning"])
-            elif _orig_amount:
-                st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
-            else:
-                st.warning(f"⚠️ 金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {_new_amt_detail} = {_new_amount}元，請手動核對。")
     # --------------------------------------------------
     # 儲值金補價差
     # --------------------------------------------------

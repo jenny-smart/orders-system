@@ -276,7 +276,9 @@ __version__ = "8.39"
 
 import time
 import re
+import html
 from datetime import date, datetime, timedelta
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -1554,6 +1556,31 @@ def _fetch_order_edit_id(session, order_no):
     return m.group(1) if m else None
 
 
+def _extract_form_payload(form):
+    payload = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        typ = (inp.get("type") or "text").lower()
+        if typ in ("submit", "button", "file", "image"):
+            continue
+        if typ in ("checkbox", "radio") and not inp.has_attr("checked"):
+            continue
+        payload[name] = inp.get("value", "")
+    for ta in form.find_all("textarea"):
+        name = ta.get("name")
+        if name:
+            payload[name] = ta.text or ""
+    for sel in form.find_all("select"):
+        name = sel.get("name")
+        if not name:
+            continue
+        opt = sel.find("option", selected=True) or sel.find("option")
+        payload[name] = opt.get("value", "") if opt else ""
+    return payload
+
+
 def _update_order_invoice_no_text(session, base_url, order_no, invoice_no_text):
     """
     v2026.07.10：把訂單編輯頁（/purchase/edit/{id}）的「發票號碼」欄位改成
@@ -1567,24 +1594,39 @@ def _update_order_invoice_no_text(session, base_url, order_no, invoice_no_text):
         edit_id = _fetch_order_edit_id(session, order_no)
         if not edit_id:
             return False, f"找不到訂單 {order_no} 的編輯 ID"
+        phone = ""
+        try:
+            block = _fetch_purchase_block_for_order_no(session, order_no)
+            phone = _extract_phone_from_block_lines(block.get("lines", []))
+        except Exception:
+            phone = ""
         edit_url = f"{base_url}/purchase/edit/{edit_id}"
-        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        params = {"phone": phone} if phone else None
+        get_resp = session.get(edit_url, params=params, headers=HEADERS, allow_redirects=True)
         if get_resp.status_code != 200:
             return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+        soup = BeautifulSoup(get_resp.text, "html.parser")
+        form = soup.find("form")
+        if not form:
+            return False, "找不到訂單編輯表單"
+        existing = _extract_form_payload(form)
         token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
-        csrf = token_m.group(1) if token_m else ""
-        if not csrf:
-            return False, "無法取得 CSRF token"
-        existing = {}
-        for m2 in re.finditer(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>', get_resp.text):
-            existing[m2.group(1)] = m2.group(2)
-        for m2 in re.finditer(r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text):
-            existing[m2.group(1)] = m2.group(2).strip()
-        existing["_token"] = csrf
-        existing["_method"] = "PUT"
+        if "_token" not in existing and token_m:
+            existing["_token"] = token_m.group(1)
         existing["invoice_no"] = invoice_no_text
-        post_resp = session.post(edit_url, data=existing, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, allow_redirects=True)
+        action = html.unescape(form.get("action") or get_resp.url)
+        post_url = urljoin(get_resp.url, action)
+        method = (form.get("method") or "post").lower()
+        sender = session.get if method == "get" else session.post
+        post_resp = sender(post_url, data=existing, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, allow_redirects=True)
         success = post_resp.status_code in (200, 302)
+        if success:
+            try:
+                verify_block = _fetch_purchase_block_for_order_no(session, order_no)
+                if invoice_no_text in "\n".join(verify_block.get("lines", [])):
+                    return True, "已標註不開立發票"
+            except Exception:
+                pass
         return success, f"HTTP {post_resp.status_code}"
     except Exception as e:
         return False, str(e)
