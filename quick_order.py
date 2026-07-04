@@ -1,9 +1,22 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.25
+# 版本：v8.26
 # 最後更新：2026-07-07
 #
 # Change Log
+# v8.26
+# - 重新設計「儲值金購買」查詢會員歷史付款方式/發票的邏輯：改用後台「購買
+#   項目」(buy=vip/5/1) + 「付款狀態」(purchase_status=已付款) 伺服器端篩選
+#   直接查，不再用「只篩電話、查全部訂單、自己在前端分類」的做法。
+#   　根因：後台訂單列表預設一頁只有 20 筆，只用電話篩選（沒指定購買項目）
+#   　時，訂單量大的客戶很容易一頁就被一般清潔訂單佔滿，真正要找的 VIP／
+#   　儲值金購買訂單被擠到第二頁以後，程式只抓第一頁，就會誤判成「查無
+#   　資料」——這正是「康健診所」這種常態下單客戶一直查不到的真正原因。
+#   VIP／儲值金兩類會一起比對「建立時間」找真正最新的一筆，不是固定優先
+#   哪一類；都找不到才查專業清潔。用康健診所真實訂單資料（三筆已付款儲值金
+#   購買訂單）驗證過，能正確選到最新一筆並取出正確的付款方式/發票設定。
+# - search_debug 改成記錄「依序查了哪些類別、各查到幾筆、有哪些訂單編號」，
+#   查無資料時可以直接看出是哪個環節查不到，不用再靠反覆截圖排查。
 # v8.25
 # - 「儲值金購買」查不到會員過去訂單設定時，不再只顯示一句「查無資料」，
 #   改成把實際查詢過程回傳出來（HTTP 狀態碼、這支電話查到幾張訂單卡片、
@@ -155,7 +168,7 @@
 # v7.3 - PERIOD_DISPLAY_INFO / _format_period_display
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.25"
+__version__ = "8.26"
 
 import time
 import re
@@ -2701,58 +2714,73 @@ def _parse_invoice_details_from_block(lines):
     return _empty_invoice_info()
 
 
-def _find_payway_invoice_source_for_stored_value(session, phone_norm):
-    """
-    v8.25：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
-    應該沿用的付款方式與發票設定：
-    1. 購買項目是「儲值金」或「VIP」、且付款狀態是「已付款」的訂單（依後台
-       列表順序，取排序在前、也就是較新的那一筆——不特別區分 VIP 跟儲值金
-       哪個更優先，兩者一起找最新一筆已付款的）。
-    2. 都找不到才退回購買項目是「專業清潔」（居家清潔/辦公室清潔/裝修細清/
-       大掃除/搬出清潔/搬入清潔）、且付款狀態是「已付款」的訂單。
-    3. 都找不到則回傳空白，交由客服手動確認，不會默默送出錯誤的付款/發票設定。
-    未付款的訂單一律不採用，避免拿還沒真的成交的訂單當範本。
+def _extract_block_created_at(lines):
+    """從訂單卡片文字裡取出「建立時間」（YYYY-MM-DD HH:MM:SS），用於比較新舊。"""
+    joined = "\n".join(lines)
+    m = re.search(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", joined)
+    return m.group(0) if m else ""
 
-    v8.25 新增：同時回傳 debug 資訊（這支電話查到幾張訂單卡片、每張卡片的
-    訂單編號/分類結果/是否算已付款），查無資料時可以直接顯示給客服看，
-    不用每次都用猜的來回排查。
+
+def _query_purchase_blocks_by_phone_buy_paid(session, phone_norm, buy_value, label, debug):
     """
-    debug = {"http_status": None, "block_count": 0, "blocks": [], "error": ""}
+    v8.26：直接用後台「購買項目」(buy) + 「付款狀態」(purchase_status=已付款)
+    伺服器端篩選查詢，取代原本「只篩電話、查全部訂單再自己分類」的做法。
+    原本的做法在訂單量大的客戶身上會踩雷：後台訂單列表預設一頁只有 20 筆，
+    如果只用電話篩選（沒有指定購買項目），常下單的客戶很容易一頁就被一般
+    清潔訂單佔滿，真正要找的 VIP／儲值金購買訂單被擠到第二頁以後，
+    程式只抓第一頁，就會誤判成「查無資料」。
+    改用 buy 篩選之後，查詢結果只會有這個類別的訂單，不會被分頁排擠掉。
+    buy_value: "vip"=VIP券、"5"=儲值金、"1"=專業清潔（對應後台搜尋表單選項）。
+    """
     try:
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params["phone"] = phone_norm
+        params["buy"] = buy_value
+        params["purchase_status"] = "1"  # 已付款，直接讓後台篩掉未付款/取消/退款的訂單
         resp = session.get(orders.PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
     except Exception as e:
-        debug["error"] = f"查詢例外：{e}"
-        return {"payway": ""}, _empty_invoice_info(), debug
-    debug["http_status"] = resp.status_code
+        debug["queries"].append({"label": label, "error": str(e), "count": 0})
+        return []
     if resp.status_code != 200:
-        return {"payway": ""}, _empty_invoice_info(), debug
-
+        debug["queries"].append({"label": label, "http_status": resp.status_code, "count": 0})
+        return []
     blocks = extract_order_cards_from_purchase_html(resp.text)
-    debug["block_count"] = len(blocks)
-    vip_or_stored_block = None
-    professional_block = None
-    for block in blocks:
-        lines = block.get("lines", [])
-        joined = "\n".join(lines)
-        is_paid = _is_paid_block(joined)
-        block_type = _classify_order_block_type(lines)
-        debug["blocks"].append({
-            "order_no": block.get("order_no", ""),
-            "type": block_type,
-            "paid": is_paid,
-        })
-        if not is_paid:
-            continue
-        if block_type in ("vip_purchase", "stored_value_purchase") and vip_or_stored_block is None:
-            vip_or_stored_block = block
-        elif block_type == "professional_cleaning" and professional_block is None:
-            professional_block = block
-        if vip_or_stored_block and professional_block:
-            break
+    debug["queries"].append({
+        "label": label, "http_status": resp.status_code, "count": len(blocks),
+        "order_nos": [b.get("order_no", "") for b in blocks],
+    })
+    return blocks
 
-    chosen_block = vip_or_stored_block or professional_block
+
+def _find_payway_invoice_source_for_stored_value(session, phone_norm):
+    """
+    v8.26：依客服指定的優先順序，找出這支電話用來建立「儲值金購買」訂單時
+    應該沿用的付款方式與發票設定：
+    1. 購買項目是「儲值金」或「VIP」、且付款狀態是「已付款」的訂單裡，
+       取「最近一次」（依建立時間比對，不是依查詢類別優先，兩種一起比較
+       找最新的那一筆）。
+    2. 都找不到才退回購買項目是「專業清潔」、且付款狀態是「已付款」的訂單
+       裡最近一次的那一筆。
+    3. 都找不到則回傳空白，交由客服手動確認，不會默默送出錯誤的付款/發票設定。
+
+    v8.26 改用後台「購買項目」+「付款狀態」伺服器端篩選直接查（不再自己抓
+    全部訂單分類），避免訂單量大的客戶被分頁排擠掉查不到；同時回傳 debug
+    資訊（每個類別查了幾筆、有哪些訂單編號），查無資料時可以直接顯示。
+    """
+    debug = {"queries": [], "error": ""}
+
+    vip_blocks = _query_purchase_blocks_by_phone_buy_paid(session, phone_norm, "vip", "VIP券（已付款）", debug)
+    stored_blocks = _query_purchase_blocks_by_phone_buy_paid(session, phone_norm, "5", "儲值金（已付款）", debug)
+
+    combined = vip_blocks + stored_blocks
+    combined.sort(key=lambda b: _extract_block_created_at(b.get("lines", [])), reverse=True)
+    chosen_block = combined[0] if combined else None
+
+    if not chosen_block:
+        professional_blocks = _query_purchase_blocks_by_phone_buy_paid(session, phone_norm, "1", "專業清潔（已付款）", debug)
+        professional_blocks.sort(key=lambda b: _extract_block_created_at(b.get("lines", [])), reverse=True)
+        chosen_block = professional_blocks[0] if professional_blocks else None
+
     if not chosen_block:
         return {"payway": ""}, _empty_invoice_info(), debug
 
