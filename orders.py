@@ -3222,7 +3222,22 @@ def find_orders_without_line_link(
     elif paid_at_s or paid_at_e:
         pre_filter = {"paid_at_s": paid_at_s or _far_past, "paid_at_e": paid_at_e or _far_future}
 
-    all_blocks = _fetch_all_purchase_blocks_with_filters(session, pre_filter, max_pages=max_pages)
+    all_blocks = []
+    edit_id_map = {}
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update(pre_filter)
+        params["page"] = str(page)
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        edit_id_map.update(_extract_edit_id_map_from_raw_html(resp.text))
+        if len(blocks) < 20:
+            break
 
     results = []
     for block in all_blocks:
@@ -3246,6 +3261,8 @@ def find_orders_without_line_link(
             continue
 
         if "LINE" in lines:
+            continue
+        if not _order_edit_line_url_is_blank(session, order_no, edit_id_map.get(order_no)):
             continue
 
         phone = ""
@@ -3434,6 +3451,20 @@ def find_pending_stored_value_orders(
 def _purchase_edit_id_from_order_no(order_no):
     digits = re.sub(r"\D", "", str(order_no or ""))
     return str(int(digits)) if digits else ""
+
+
+def _order_edit_line_url_is_blank(session, order_no, edit_id=None):
+    edit_id = edit_id or _fetch_order_edit_id(session, order_no) or _purchase_edit_id_from_order_no(order_no)
+    if not edit_id:
+        return False
+    resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return False
+    soup = BeautifulSoup(resp.text, "html.parser")
+    line_input = soup.find("input", attrs={"name": "line"})
+    if line_input is None:
+        return False
+    return not str(line_input.get("value") or "").strip()
 
 
 def _fetch_order_edit_notice(session, order_no, edit_id=None):
