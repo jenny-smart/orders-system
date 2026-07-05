@@ -1,10 +1,17 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.10
+# 版本：v2026.07.11
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-10
+# 最後更新：2026-07-11
 #
 # Change Log
+# v2026.07.11
+# - 新增 find_orders_without_line_link：獨立工具，搜尋「訂購資訊」欄位裡
+#   沒有 LINE 連結的訂單，列出訂單編號/姓名/電話，可用訂購日期/付款日期/
+#   服務日期三種區間分別篩選（都可留空）。用實際頁面結構驗證過：判斷方式
+#   是看訂單卡片解析出來的 lines 裡有沒有出現純文字「LINE」這一行（對應
+#   <a href="https://chat.line.biz/...">LINE</a> 這個連結的顯示文字），
+#   沒有這一行代表這張訂單沒有綁 LINE。
 # v2026.07.10
 # - 修正批次建單同樣的規則漏洞：run_process_web 之前只檢查「時段存不存在」
 #   （slot_ok），沒有檢查「人數夠不夠」，導致時段有排班、但排的人數不夠這張
@@ -3024,6 +3031,83 @@ def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_s
         if len(blocks) < 20:
             break
     return all_blocks
+
+
+def find_orders_without_line_link(
+    env_name, backend_email, backend_password,
+    date_s=None, date_e=None,
+    paid_at_s=None, paid_at_e=None,
+    clean_date_s=None, clean_date_e=None,
+    max_pages=80,
+):
+    """
+    v2026.07.10：獨立工具——搜尋「訂購資訊」欄位裡沒有 LINE 連結的訂單，
+    列出訂單編號/姓名/電話。可用訂購日期/付款日期/服務日期三種區間分別
+    篩選（每種都可留空不篩），處理分頁。
+
+    判斷有沒有 LINE 連結的方式：後台訂單卡片裡，有綁 LINE 的客人會多一行
+    純文字「LINE」（連結文字，來自 <a href="https://chat.line.biz/...">LINE
+    </a>，這裡用 extract_order_cards_from_purchase_html 解析後只留得下
+    "LINE" 這個文字），沒有 LINE 的客人這一行整個不會出現。用這個判斷比
+    直接找 chat.line.biz 網址更準確，因為 extract_order_cards_from_purchase_html
+    是用 get_text() 解析，href 屬性本來就不會出現在解析結果裡。
+    """
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    all_blocks = []
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        if date_s:
+            params["date_s"] = date_s
+        if date_e:
+            params["date_e"] = date_e
+        if paid_at_s:
+            params["paid_at_s"] = paid_at_s
+        if paid_at_e:
+            params["paid_at_e"] = paid_at_e
+        if clean_date_s:
+            params["clean_date_s"] = clean_date_s
+        if clean_date_e:
+            params["clean_date_e"] = clean_date_e
+        params["page"] = str(page)
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        if len(blocks) < 20:
+            break
+
+    results = []
+    for block in all_blocks:
+        lines = block.get("lines", [])
+        if "LINE" in lines:
+            continue
+        order_no = block.get("order_no", "")
+        phone = ""
+        name = ""
+        for idx, ln in enumerate(lines):
+            if re.fullmatch(r"09\d{8}", ln):
+                phone = ln
+                if idx > 0:
+                    name = lines[idx - 1]
+                break
+        results.append({"order_no": order_no, "name": name, "phone": phone})
+
+    return results
 
 
 def run_standalone_consistency_check(env_name, backend_email, backend_password, sheet_name, region=None,
