@@ -3219,6 +3219,7 @@ def find_orders_without_line_link(
     for block in all_blocks:
         lines = block.get("lines", [])
         order_no = block.get("order_no", "")
+        joined = "\n".join(lines)
 
         created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
 
@@ -3236,6 +3237,8 @@ def find_orders_without_line_link(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
+        if re.search(r"付款狀態\s*[：:]\s*已退款", joined) or "取消訂單" in joined or "已取消" in joined:
+            continue
         if "LINE" in lines:
             continue
         if not _order_edit_line_url_is_blank(session, order_no):
