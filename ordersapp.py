@@ -582,8 +582,11 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
-def find_no_slot_rows(sheet_name, region):
+def find_no_slot_rows(sheet_name, region, candidate_rows=None):
     _, df = load_worksheet(sheet_name)
+    candidate_set = set(candidate_rows or [])
+    if candidate_set:
+        df = df[df["__sheet_row__"].isin(candidate_set)]
     rows = []
     for _, row in df.iterrows():
         status = str(row.get("狀態", "")).strip()
@@ -703,7 +706,7 @@ if mode == "批次建單（Google Sheet）":
     info_panel("功能說明", [
         "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
         "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        "可手動輸入列號，也可自動篩選「未安排、訂單編號空白、無班表」的列。",
+        "可手動輸入列號；勾自動篩選時，會在輸入的列號範圍內篩出「未安排、訂單編號空白、無班表」的列。",
     ])
     info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
     step("4", "執行設定")
@@ -741,7 +744,11 @@ if mode == "批次建單（Google Sheet）":
             st.error("請至少選擇一個執行項目"); st.stop()
         if auto_no_slot_rows:
             try:
-                target_rows = find_no_slot_rows(sheet_name.strip(), region)
+                candidate_rows = parse_row_input(row_input) if row_input.strip() else []
+            except Exception as e:
+                st.error(f"列號格式錯誤：{e}"); st.stop()
+            try:
+                target_rows = find_no_slot_rows(sheet_name.strip(), region, candidate_rows)
             except Exception as e:
                 st.error(f"自動篩選列號失敗：{e}"); st.stop()
             if not target_rows:
