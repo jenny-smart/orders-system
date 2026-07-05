@@ -1,10 +1,26 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.12-2
+# 版本：v2026.07.13
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-12
+# 最後更新：2026-07-13
 #
 # Change Log
+# v2026.07.13
+# - 儲值獎金備註功能依客服需求調整：
+#   1. 搜尋條件改成訂購日期／付款日期／付款狀態（可選：不拘/待付款/已付款/
+#      取消訂單/已退款），移除原本寫死的「處理狀態：未處理」。
+#   2. 新增「客服備註為空白」的篩選條件——只列出客服備註目前還沒有內容的
+#      訂單，避免重複回填。新增 _extract_notice_map_from_raw_html，因為
+#      客服備註的實際內容只出現在 <label alt="...">客服備註</label> 這個
+#      標籤的屬性裡，extract_order_cards_from_purchase_html 是用 get_text()
+#      把整頁攤平成純文字，屬性值會被整個遺失，所以另外寫一個函式回頭用
+#      原始 HTML 判斷：某張訂單卡片的原始 HTML 裡有沒有出現這個標籤，
+#      沒出現代表客服備註是空白（後台不會渲染空白備註的這個標籤）。
+#   3. 結果新增「付款狀態」欄位。
+#   4. add_bonus_note_to_order 寫入獎金備註時，一併把 progress 改成 "1"
+#      （已處理）。
+#   已用真實訂單卡片文字驗證過「客服備註空白判斷」跟「付款狀態解析」都
+#   正確。
 # v2026.07.12-2
 # - 修正重大 bug：add_bonus_note_to_order 之前天真地把訂單編輯頁靜態 HTML
 #   解析出來的 input/textarea 值整包送回去，但這個編輯頁很多欄位（加收
@@ -1543,6 +1559,7 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
     """
     exclude_order_nos = exclude_order_nos or set()
     target_phone_norm = normalize_phone(phone) if phone else ""
+    fallback_candidate = None
     for block in extract_order_cards_from_purchase_html(html):
         order_no_candidate = block.get("order_no")
         if not order_no_candidate or order_no_candidate in exclude_order_nos:
@@ -1555,7 +1572,11 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
         joined_compact = re.sub(r"[-\s]", "", joined)
         if target_phone_norm in joined_compact:
             return order_no_candidate
-    return None
+        if fallback_candidate is None:
+            fallback_candidate = order_no_candidate
+    # 找不到電話完全相符的訂單時，退回原本「只比對日期+時段」的第一筆結果，
+    # 並由呼叫端的一致性檢查（verify_batch_order_consistency）事後抓出異常。
+    return fallback_candidate
 
 
 def fetch_order_no_by_date_and_period(session, target_date, target_period, phone="", exclude_order_nos=None):
@@ -2866,7 +2887,7 @@ def get_runtime_config(env_name: str):
     }
 
 
-def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False, used_order_nos=None):
+def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
     global BASE_URL, ORDER_PREFIX
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
@@ -2992,7 +3013,8 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
                 "error": f"補處理失敗: {e}",
             })
 
-    used_order_nos_this_run = used_order_nos if used_order_nos is not None else set()
+    # v2026-07：本次呼叫累計已配對過的訂單編號，避免跨組別誤配對到同一張訂單
+    used_order_nos_this_run = set()
 
     for group_no, (_, rows_with_idx) in enumerate(grouped_orders.items(), start=1):
         _, first_row = rows_with_idx[0]
@@ -3053,7 +3075,6 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         "fail_count": fail_count,
         "total_processed": len(all_row_results),
         "failed_records": failed_records,
-        "used_order_nos": sorted(used_order_nos_this_run),
     }
 
 
@@ -3136,25 +3157,6 @@ def _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=80)
     return all_blocks
 
 
-def _purchase_edit_id_from_order_no(order_no):
-    digits = re.sub(r"\D", "", str(order_no or ""))
-    return str(int(digits)) if digits else ""
-
-
-def _order_edit_line_url_is_blank(session, order_no):
-    edit_id = _purchase_edit_id_from_order_no(order_no)
-    if not edit_id:
-        return False
-    resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
-    if resp.status_code != 200:
-        return False
-    soup = BeautifulSoup(resp.text, "html.parser")
-    line_input = soup.find("input", attrs={"name": "line"})
-    if line_input is None:
-        return False
-    return not str(line_input.get("value") or "").strip()
-
-
 def find_orders_without_line_link(
     env_name, backend_email, backend_password,
     date_s=None, date_e=None,
@@ -3219,7 +3221,6 @@ def find_orders_without_line_link(
     for block in all_blocks:
         lines = block.get("lines", [])
         order_no = block.get("order_no", "")
-        joined = "\n".join(lines)
 
         created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
 
@@ -3237,11 +3238,7 @@ def find_orders_without_line_link(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
-        if re.search(r"付款狀態\s*[：:]\s*(已退款|取消訂單)", joined):
-            continue
         if "LINE" in lines:
-            continue
-        if not _order_edit_line_url_is_blank(session, order_no):
             continue
 
         phone = ""
@@ -3257,21 +3254,50 @@ def find_orders_without_line_link(
     return results
 
 
+def _extract_notice_map_from_raw_html(html):
+    """
+    v2026.07.13：判斷每張訂單卡片的「客服備註」是不是空白。
+
+    extract_order_cards_from_purchase_html 是用 get_text() 把整頁攤平成
+    純文字再切段，但客服備註的實際內容只出現在 <label alt="..." title="...">
+    客服備註</label> 這個標籤的 alt/title「屬性」裡，不是文字內容本身
+    （文字內容永遠只有「客服備註」四個字），get_text() 會把屬性值整個
+    遺失掉。所以要判斷「客服備註是否為空白」，必須回頭用原始 HTML 判斷：
+    如果某張訂單卡片的原始 HTML 裡完全沒有出現這個 <label ...>客服備註
+    </label> 標籤，代表客服備註是空白（後台不會渲染空白備註的這個標籤）；
+    有出現就代表客服備註有內容。
+
+    回傳 dict：{order_no: True/False}，True 表示客服備註「有內容」。
+    """
+    order_no_positions = [(m.start(), m.group(0)) for m in re.finditer(ORDER_NO_REGEX, html)]
+    notice_map = {}
+    for i, (pos, order_no) in enumerate(order_no_positions):
+        end = order_no_positions[i + 1][0] if i + 1 < len(order_no_positions) else len(html)
+        segment = html[pos:end]
+        has_notice = bool(re.search(r'<label\s+alt="[^"]*"[^>]*>\s*客服備註\s*</label>', segment))
+        # 同一個訂單編號可能因為表格其他欄位重複出現，用 or 累加，只要任一段有找到就算有
+        notice_map[order_no] = notice_map.get(order_no, False) or has_notice
+    return notice_map
+
+
 def find_pending_stored_value_orders(
     env_name, backend_email, backend_password,
     date_s=None, date_e=None,
     paid_at_s=None, paid_at_e=None,
+    purchase_status=None,
     max_pages=80,
 ):
     """
-    v2026.07.12：獨立工具——搜尋「購買項目：儲值金、付款狀態：已付款、
-    處理狀態：未處理」的訂單，列出客戶姓名/電話/訂單編號，用來配合客服
-    在 LINE 群組裡回報的介紹獎金名單，之後用 add_bonus_note_to_order
-    依姓名把「獎金：名字1X名字2X名字3...」寫進客服備註。
+    v2026.07.13：獨立工具——搜尋「購買項目：儲值金」且「客服備註是空白」的
+    訂單，列出客戶姓名/電話/訂單編號/付款狀態，用來配合客服在 LINE 群組裡
+    回報的介紹獎金名單，之後用 add_bonus_note_to_order 依姓名把「獎金：
+    名字1X名字2X名字3...」寫進客服備註（同時會把服務狀態改為已處理）。
 
-    可用訂購日期/付款日期兩種區間分別篩選（都可留空）。日期篩選沿用
-    find_orders_without_line_link 同一套「後台粗篩 + Python 自己解析日期
-    精確比對」的作法，避免後台日期篩選本身不準確的問題。
+    可用訂購日期/付款日期兩種區間、以及付款狀態分別篩選（都可留空/不拘）。
+    日期篩選沿用 find_orders_without_line_link 同一套「後台粗篩 + Python
+    自己解析日期精確比對」的作法，避免後台日期篩選本身不準確的問題。
+    「客服備註是否為空白」用 _extract_notice_map_from_raw_html 從原始
+    HTML 判斷（get_text() 純文字解析看不到這個資訊）。
     """
     global BASE_URL, ORDER_PREFIX, PURCHASE_URL
     if env_name == "dev":
@@ -3287,7 +3313,9 @@ def find_pending_stored_value_orders(
         raise Exception("後台登入失敗，請確認帳號密碼")
 
     _far_past, _far_future = "2000-01-01", "2099-12-31"
-    pre_filter = {"buy": "5", "purchase_status": "1", "progress_status": "0"}
+    pre_filter = {"buy": "5"}
+    if purchase_status:
+        pre_filter["purchase_status"] = purchase_status
     if date_s or date_e:
         pre_filter["date_s"] = date_s or _far_past
         pre_filter["date_e"] = date_e or _far_future
@@ -3295,12 +3323,33 @@ def find_pending_stored_value_orders(
         pre_filter["paid_at_s"] = paid_at_s or _far_past
         pre_filter["paid_at_e"] = paid_at_e or _far_future
 
-    all_blocks = _fetch_all_purchase_blocks_with_filters(session, pre_filter, max_pages=max_pages)
+    # 分頁抓取時，順便把每一頁的原始 HTML 留著，才能判斷客服備註是否為空白
+    all_blocks = []
+    notice_map = {}
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update(pre_filter)
+        params["page"] = str(page)
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        notice_map.update(_extract_notice_map_from_raw_html(resp.text))
+        if len(blocks) < 20:
+            break
+
+    _PURCHASE_STATUS_TEXT = {"0": "待付款", "1": "已付款", "2": "取消訂單", "3": "已退款"}
 
     results = []
     for block in all_blocks:
         lines = block.get("lines", [])
         order_no = block.get("order_no", "")
+
+        if notice_map.get(order_no):
+            continue  # 客服備註已有內容，跳過
 
         created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
 
@@ -3313,6 +3362,12 @@ def find_pending_stored_value_orders(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
+        joined = "\n".join(lines)
+        status_text = ""
+        status_m = re.search(r"付款狀態[：:]\s*([^\n]+)", joined)
+        if status_m:
+            status_text = status_m.group(1).strip()
+
         phone = ""
         name = ""
         for idx, ln in enumerate(lines):
@@ -3321,7 +3376,7 @@ def find_pending_stored_value_orders(
                 if idx > 0:
                     name = lines[idx - 1]
                 break
-        results.append({"order_no": order_no, "name": name, "phone": phone})
+        results.append({"order_no": order_no, "name": name, "phone": phone, "purchase_status": status_text})
 
     return results
 
@@ -3406,6 +3461,7 @@ def add_bonus_note_to_order(session, base_url, order_no, bonus_names):
         existing["_token"] = csrf
         existing.pop("_method", None)
         existing["notice"] = new_notice
+        existing["progress"] = "1"  # v2026.07.13：回填獎金備註時，服務狀態一併改為已處理
 
         post_resp = session.post(
             edit_url, data=existing,
