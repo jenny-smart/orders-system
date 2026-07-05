@@ -1543,7 +1543,6 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
     """
     exclude_order_nos = exclude_order_nos or set()
     target_phone_norm = normalize_phone(phone) if phone else ""
-    fallback_candidate = None
     for block in extract_order_cards_from_purchase_html(html):
         order_no_candidate = block.get("order_no")
         if not order_no_candidate or order_no_candidate in exclude_order_nos:
@@ -1556,11 +1555,7 @@ def match_order_from_purchase_page(html, target_date, target_period, phone="", e
         joined_compact = re.sub(r"[-\s]", "", joined)
         if target_phone_norm in joined_compact:
             return order_no_candidate
-        if fallback_candidate is None:
-            fallback_candidate = order_no_candidate
-    # 找不到電話完全相符的訂單時，退回原本「只比對日期+時段」的第一筆結果，
-    # 並由呼叫端的一致性檢查（verify_batch_order_consistency）事後抓出異常。
-    return fallback_candidate
+    return None
 
 
 def fetch_order_no_by_date_and_period(session, target_date, target_period, phone="", exclude_order_nos=None):
@@ -2871,7 +2866,7 @@ def get_runtime_config(env_name: str):
     }
 
 
-def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False):
+def run_process_web(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False, used_order_nos=None):
     global BASE_URL, ORDER_PREFIX
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
@@ -2997,8 +2992,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
                 "error": f"補處理失敗: {e}",
             })
 
-    # v2026-07：本次呼叫累計已配對過的訂單編號，避免跨組別誤配對到同一張訂單
-    used_order_nos_this_run = set()
+    used_order_nos_this_run = used_order_nos if used_order_nos is not None else set()
 
     for group_no, (_, rows_with_idx) in enumerate(grouped_orders.items(), start=1):
         _, first_row = rows_with_idx[0]
@@ -3059,6 +3053,7 @@ def run_process_web(env_name, region, backend_email, backend_password, sheet_nam
         "fail_count": fail_count,
         "total_processed": len(all_row_results),
         "failed_records": failed_records,
+        "used_order_nos": sorted(used_order_nos_this_run),
     }
 
 
@@ -3139,6 +3134,25 @@ def _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=80)
         if len(blocks) < 20:
             break
     return all_blocks
+
+
+def _purchase_edit_id_from_order_no(order_no):
+    digits = re.sub(r"\D", "", str(order_no or ""))
+    return str(int(digits)) if digits else ""
+
+
+def _order_edit_line_url_is_blank(session, order_no):
+    edit_id = _purchase_edit_id_from_order_no(order_no)
+    if not edit_id:
+        return True
+    resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return True
+    soup = BeautifulSoup(resp.text, "html.parser")
+    line_input = soup.find("input", attrs={"name": "line"})
+    if line_input is None:
+        return True
+    return not str(line_input.get("value") or "").strip()
 
 
 def find_orders_without_line_link(
@@ -3222,7 +3236,7 @@ def find_orders_without_line_link(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
-        if "LINE" in lines:
+        if not _order_edit_line_url_is_blank(session, order_no):
             continue
 
         phone = ""
