@@ -1,10 +1,24 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.12
+# 版本：v2026.07.12-2
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-07-12
 #
 # Change Log
+# v2026.07.12-2
+# - 修正重大 bug：add_bonus_note_to_order 之前天真地把訂單編輯頁靜態 HTML
+#   解析出來的 input/textarea 值整包送回去，但這個編輯頁很多欄位（加收
+#   狀態/待退狀態的 radio、加收備註/待退備註的 textarea 等）是 Vue.js
+#   動態渲染的，靜態 HTML 裡看到的是還沒被渲染的樣板語法（例如 textarea
+#   內容是字面上的 "{{ purchase.chargeNote }}"），radio 的勾選狀態也不會
+#   反映在靜態 HTML 的 checked 屬性上。實際案例：本來「加收狀態：無」
+#   「待退狀態：無」，套用完變成「已加收」「已全額退款」，「加收備註」被
+#   寫入字面上的樣板字串。
+#   修法：改成從頁面內嵌在 <script> 裡的 `purchase: {...}` JSON 資料
+#   （Vue 的 data()）讀出這些欄位的真實值，蓋掉靜態 HTML 解析可能抓錯的
+#   部分，只有「notice」這個欄位是我們自己要更新的。已用模擬真實 Vue
+#   樣板情境的假頁面測試過，確認 isCharge/isRefund 正確送出原本的 0（無），
+#   chargeNote/refundNote 正確送出空字串，不再是樣板亂碼。
 # v2026.07.12
 # - 新增「儲值獎金備註」獨立工具：
 #   find_pending_stored_value_orders：搜尋購買項目儲值金、付款狀態已付款、
@@ -3307,12 +3321,23 @@ def _fetch_order_edit_id(session, order_no):
 
 def add_bonus_note_to_order(session, base_url, order_no, bonus_names):
     """
-    v2026.07.12：把「獎金：名字1X名字2X名字3...」這行文字加進訂單編輯頁的
-    「客服備註」（notice 欄位），保留原本客服備註內容（換行接在後面，不覆蓋），
-    其餘欄位（含服務狀態）原封不動送回去。
+    v2026.07.12（v2：修正欄位覆蓋 bug）：把「獎金：名字1X名字2X名字3...」這行
+    文字加進訂單編輯頁的「客服備註」（notice 欄位），保留原本客服備註內容
+    （換行接在後面，不覆蓋），其餘欄位原封不動送回去。
 
-    bonus_names：list[str]，例如 ["李佩蓉", "宋品鈞"]，會組成
-    「獎金：李佩蓉X宋品鈞」這樣的格式。
+    重要修正：訂單編輯頁很多欄位（加收狀態/待退狀態的 radio、加收備註/
+    待退備註的 textarea 等）是用 Vue.js 動態渲染的，靜態 HTML 裡看到的是
+    還沒被渲染的樣板語法（例如 textarea 內容是字面上的
+    "{{ purchase.chargeNote }}"），radio 的勾選狀態也不會反映在靜態 HTML
+    的 checked 屬性上。如果只是天真地把靜態 HTML 解析出來的 input/textarea
+    值整包送回去，會把這些欄位覆蓋成錯誤的樣板字串或錯誤的預設值（實際
+    案例：本來「加收狀態：無」「待退狀態：無」，套用完變成「已加收」
+    「已全額退款」，「加收備註」被寫入字面上的 "{{ purchase.chargeNote }}"）。
+
+    修法：這些欄位的真實值其實是內嵌在頁面 <script> 裡的
+    `purchase: {...}` JSON 資料（Vue 的 data()），不是從靜態 HTML 屬性
+    解析。改成優先從這包 JSON 讀出這些欄位的真實值，蓋掉靜態 HTML 解析
+    可能抓錯的部分，只有「notice」這個欄位是我們自己要更新的。
     """
     edit_id = _fetch_order_edit_id(session, order_no)
     if not edit_id:
@@ -3333,8 +3358,30 @@ def add_bonus_note_to_order(session, base_url, order_no, bonus_names):
         for m2 in re.finditer(r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text):
             existing[m2.group(1)] = m2.group(2).strip()
 
+        # 用頁面內嵌的 purchase JSON 蓋掉容易被靜態 HTML 解析錯的欄位
+        json_m = re.search(r'purchase:\s*(\{.*?\})\s*\n?\s*\}\s*\n?\s*\}', get_resp.text, re.S)
+        if json_m:
+            try:
+                purchase_json = json.loads(json_m.group(1))
+            except Exception:
+                purchase_json = {}
+        else:
+            purchase_json = {}
+
+        _json_backed_fields = [
+            "isCharge", "chargeDate", "chargePayment", "chargeInvoiceDate",
+            "chargeAmount", "chargeInvoice", "chargeNote",
+            "isRefund", "refundDate", "refundPayment", "refundAmount",
+            "refundNumber", "refundInvoiceDate", "refundInvoiceAmount",
+            "refundInvoice", "refundNote", "progress",
+        ]
+        for key in _json_backed_fields:
+            if key in purchase_json:
+                val = purchase_json.get(key)
+                existing[key] = "" if val is None else str(val)
+
         bonus_line = "獎金：" + "X".join(bonus_names)
-        old_notice = existing.get("notice", "").strip()
+        old_notice = str(purchase_json.get("notice") or existing.get("notice", "") or "").strip()
         new_notice = f"{old_notice}\n{bonus_line}" if old_notice else bonus_line
 
         existing["_token"] = csrf
