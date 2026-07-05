@@ -1,10 +1,25 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.11-4
+# 版本：v2026.07.12
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-11
+# 最後更新：2026-07-12
 #
 # Change Log
+# v2026.07.12
+# - 新增「儲值獎金備註」獨立工具：
+#   find_pending_stored_value_orders：搜尋購買項目儲值金、付款狀態已付款、
+#   處理狀態未處理的訂單，列出客戶姓名/電話/訂單編號（沿用 v2026.07.11-4
+#   同一套「後台粗篩＋Python 自己解析日期精確比對」的日期篩選作法）。
+#   add_bonus_note_to_order：依訂單編號，把「獎金：名字1X名字2...」加進
+#   訂單編輯頁的客服備註（notice 欄位），保留原本備註內容、不覆蓋，其餘
+#   欄位（含服務狀態）原封不動送回去。
+#   apply_bonus_notes：批次套用用的包裝函式，統一登入一次後逐筆呼叫
+#   add_bonus_note_to_order。
+#   另外新增 _fetch_order_edit_id 的 orders.py 本地版本（跟 quick_order.py
+#   同名函式邏輯一致，這裡另外放一份是因為 orders.py 不匯入 quick_order，
+#   避免循環匯入）。
+#   已用假 session 測試過搜尋跟寫入備註兩個函式，確認搜尋能正確解析姓名/
+#   電話，寫入備註時能正確保留既有備註內容並附加新的獎金行。
 # v2026.07.11-4
 # - find_orders_without_line_link 第四次修正漏單問題：v2026.07.11-3 遇到
 #   區間只填一邊時，選擇整個放棄該區間、改成完全不篩選、直接掃描前 80 頁。
@@ -3206,6 +3221,161 @@ def find_orders_without_line_link(
                 break
         results.append({"order_no": order_no, "name": name, "phone": phone})
 
+    return results
+
+
+def find_pending_stored_value_orders(
+    env_name, backend_email, backend_password,
+    date_s=None, date_e=None,
+    paid_at_s=None, paid_at_e=None,
+    max_pages=80,
+):
+    """
+    v2026.07.12：獨立工具——搜尋「購買項目：儲值金、付款狀態：已付款、
+    處理狀態：未處理」的訂單，列出客戶姓名/電話/訂單編號，用來配合客服
+    在 LINE 群組裡回報的介紹獎金名單，之後用 add_bonus_note_to_order
+    依姓名把「獎金：名字1X名字2X名字3...」寫進客服備註。
+
+    可用訂購日期/付款日期兩種區間分別篩選（都可留空）。日期篩選沿用
+    find_orders_without_line_link 同一套「後台粗篩 + Python 自己解析日期
+    精確比對」的作法，避免後台日期篩選本身不準確的問題。
+    """
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    _far_past, _far_future = "2000-01-01", "2099-12-31"
+    pre_filter = {"buy": "5", "purchase_status": "1", "progress_status": "0"}
+    if date_s or date_e:
+        pre_filter["date_s"] = date_s or _far_past
+        pre_filter["date_e"] = date_e or _far_future
+    elif paid_at_s or paid_at_e:
+        pre_filter["paid_at_s"] = paid_at_s or _far_past
+        pre_filter["paid_at_e"] = paid_at_e or _far_future
+
+    all_blocks = _fetch_all_purchase_blocks_with_filters(session, pre_filter, max_pages=max_pages)
+
+    results = []
+    for block in all_blocks:
+        lines = block.get("lines", [])
+        order_no = block.get("order_no", "")
+
+        created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
+
+        if date_s and (not created_at or created_at < date_s):
+            continue
+        if date_e and (not created_at or created_at > date_e):
+            continue
+        if paid_at_s and (not paid_date or paid_date < paid_at_s):
+            continue
+        if paid_at_e and (not paid_date or paid_date > paid_at_e):
+            continue
+
+        phone = ""
+        name = ""
+        for idx, ln in enumerate(lines):
+            if re.fullmatch(r"09\d{8}", ln):
+                phone = ln
+                if idx > 0:
+                    name = lines[idx - 1]
+                break
+        results.append({"order_no": order_no, "name": name, "phone": phone})
+
+    return results
+
+
+def _fetch_order_edit_id(session, order_no):
+    """跟 quick_order.py 裡同名函式邏輯一致，這裡另外放一份是因為 orders.py
+    不匯入 quick_order（避免循環匯入：quick_order 本身會匯入 orders）。"""
+    params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+    params["orderNo"] = str(order_no).strip()
+    resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return None
+    m = re.search(r"/purchase/edit/(\d+)", resp.text)
+    return m.group(1) if m else None
+
+
+def add_bonus_note_to_order(session, base_url, order_no, bonus_names):
+    """
+    v2026.07.12：把「獎金：名字1X名字2X名字3...」這行文字加進訂單編輯頁的
+    「客服備註」（notice 欄位），保留原本客服備註內容（換行接在後面，不覆蓋），
+    其餘欄位（含服務狀態）原封不動送回去。
+
+    bonus_names：list[str]，例如 ["李佩蓉", "宋品鈞"]，會組成
+    「獎金：李佩蓉X宋品鈞」這樣的格式。
+    """
+    edit_id = _fetch_order_edit_id(session, order_no)
+    if not edit_id:
+        return False, f"找不到訂單 {order_no} 的編輯 ID"
+    edit_url = f"{base_url}/purchase/edit/{edit_id}"
+    try:
+        get_resp = session.get(edit_url, headers=HEADERS, allow_redirects=True)
+        if get_resp.status_code != 200:
+            return False, f"無法開啟編輯頁面：HTTP {get_resp.status_code}"
+        token_m = re.search(r'<meta name="csrf-token" content="([^"]+)"', get_resp.text)
+        csrf = token_m.group(1) if token_m else ""
+        if not csrf:
+            return False, "無法取得 CSRF token"
+
+        existing = {}
+        for m2 in re.finditer(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"[^>]*>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2)
+        for m2 in re.finditer(r'<textarea[^>]+name="([^"]+)"[^>]*>([^<]*)</textarea>', get_resp.text):
+            existing[m2.group(1)] = m2.group(2).strip()
+
+        bonus_line = "獎金：" + "X".join(bonus_names)
+        old_notice = existing.get("notice", "").strip()
+        new_notice = f"{old_notice}\n{bonus_line}" if old_notice else bonus_line
+
+        existing["_token"] = csrf
+        existing.pop("_method", None)
+        existing["notice"] = new_notice
+
+        post_resp = session.post(
+            edit_url, data=existing,
+            headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=True,
+        )
+        if post_resp.status_code in (200, 302):
+            return True, new_notice
+        return False, f"HTTP {post_resp.status_code}"
+    except Exception as e:
+        return False, str(e)
+
+
+def apply_bonus_notes(env_name, backend_email, backend_password, mapping):
+    """
+    v2026.07.12：批次套用獎金備註。mapping 是 list of dict：
+    [{"order_no": ..., "cust_name": ..., "bonus_names": [...]}]
+    這裡統一登入一次後，逐筆呼叫 add_bonus_note_to_order。
+    """
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    results = []
+    for item in mapping:
+        ok, msg = add_bonus_note_to_order(session, BASE_URL, item["order_no"], item["bonus_names"])
+        results.append({**item, "ok": ok, "msg": msg})
     return results
 
 
