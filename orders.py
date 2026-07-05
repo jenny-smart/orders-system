@@ -3389,6 +3389,8 @@ def find_pending_stored_value_orders(
 
         if is_multi_status and allowed_status_texts and status_text not in allowed_status_texts:
             continue
+        if not _order_edit_notice_is_blank(session, order_no):
+            continue
 
         phone = ""
         name = ""
@@ -3401,6 +3403,21 @@ def find_pending_stored_value_orders(
         results.append({"order_no": order_no, "name": name, "phone": phone, "purchase_status": status_text})
 
     return results
+
+
+def _order_edit_notice_is_blank(session, order_no):
+    edit_id = _fetch_order_edit_id(session, order_no)
+    if not edit_id:
+        return False
+    resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
+    if resp.status_code != 200:
+        return False
+    soup = BeautifulSoup(resp.text, "html.parser")
+    notice = soup.find("textarea", attrs={"name": "notice"}) or soup.find("input", attrs={"name": "notice"})
+    if notice is None:
+        return False
+    value = notice.get("value") if notice.name == "input" else notice.get_text()
+    return not str(value or "").strip()
 
 
 def _fetch_order_edit_id(session, order_no):
