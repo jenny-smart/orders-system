@@ -3262,7 +3262,8 @@ def find_orders_without_line_link(
 
         if "LINE" in lines:
             continue
-        if not _order_edit_line_url_is_blank(session, order_no, edit_id_map.get(order_no)):
+        line_blank = _order_edit_line_url_is_blank(session, order_no, edit_id_map.get(order_no))
+        if line_blank is False:
             continue
 
         phone = ""
@@ -3421,7 +3422,7 @@ def find_pending_stored_value_orders(
             continue
         notice_text = _fetch_order_edit_notice(session, order_no, edit_id_map.get(order_no))
         if notice_text is None:
-            continue
+            notice_text = "（列表顯示有客服備註）" if notice_map.get(order_no) else ""
         has_notice = bool(str(notice_text).strip())
         if notice_status == "blank" and has_notice:
             continue
@@ -3456,14 +3457,14 @@ def _purchase_edit_id_from_order_no(order_no):
 def _order_edit_line_url_is_blank(session, order_no, edit_id=None):
     edit_id = edit_id or _fetch_order_edit_id(session, order_no) or _purchase_edit_id_from_order_no(order_no)
     if not edit_id:
-        return False
+        return None
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
-        return False
+        return None
     soup = BeautifulSoup(resp.text, "html.parser")
     line_input = soup.find("input", attrs={"name": "line"})
     if line_input is None:
-        return False
+        return None
     return not str(line_input.get("value") or "").strip()
 
 
