@@ -1,10 +1,18 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.11
+# 版本：v2026.07.11-2
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-07-11
 #
 # Change Log
+# v2026.07.11-2
+# - 修正 find_orders_without_line_link 重大漏單問題：實測發現把訂購日期／
+#   付款日期／服務日期三種區間「同時」塞進同一次查詢請求，後台會漏掉一大堆
+#   明明符合條件的訂單（用真實訂單編號 LC00212069、LC00212115 等驗證過）。
+#   改成「每一種有填的日期區間分別各自查一次」，結果依訂單編號合併去重，
+#   不管後台能不能正確同時處理多重日期篩選都不會漏單。新增輔助函式
+#   _fetch_all_purchase_blocks_with_filters，並用假 session 驗證過分開查詢
+#   各自能正確撈到不同訂單。
 # v2026.07.11
 # - 新增 find_orders_without_line_link：獨立工具，搜尋「訂購資訊」欄位裡
 #   沒有 LINE 連結的訂單，列出訂單編號/姓名/電話，可用訂購日期/付款日期/
@@ -3033,6 +3041,26 @@ def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_s
     return all_blocks
 
 
+def _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=80):
+    """依給定的篩選參數（會疊加在 PURCHASE_FILTER_PARAMS_TEMPLATE 上）撈出全部
+    分頁的訂單卡片。"""
+    all_blocks = []
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update(extra_params)
+        params["page"] = str(page)
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        if len(blocks) < 20:
+            break
+    return all_blocks
+
+
 def find_orders_without_line_link(
     env_name, backend_email, backend_password,
     date_s=None, date_e=None,
@@ -3041,16 +3069,22 @@ def find_orders_without_line_link(
     max_pages=80,
 ):
     """
-    v2026.07.10：獨立工具——搜尋「訂購資訊」欄位裡沒有 LINE 連結的訂單，
+    v2026.07.11：獨立工具——搜尋「訂購資訊」欄位裡沒有 LINE 連結的訂單，
     列出訂單編號/姓名/電話。可用訂購日期/付款日期/服務日期三種區間分別
     篩選（每種都可留空不篩），處理分頁。
+
+    v2026.07.11 修正：實測發現如果把訂購日期／付款日期／服務日期這三種
+    區間「同時」塞進同一次查詢請求，後台會漏掉一大堆明明符合條件的訂單
+    （用真實訂單編號驗證過，例如 LC00212069、LC00212115 等，這幾張訂單
+    明明日期都在篩選範圍內，卻完全沒被撈到）。改成「每一種有填的日期區間
+    分別各自查一次」（例如同時有填訂購日期和服務日期，就查兩次：一次只帶
+    訂購日期、一次只帶服務日期），再把結果依訂單編號合併去重，這樣不管
+    後台能不能正確同時處理多重日期篩選，都不會漏單。
 
     判斷有沒有 LINE 連結的方式：後台訂單卡片裡，有綁 LINE 的客人會多一行
     純文字「LINE」（連結文字，來自 <a href="https://chat.line.biz/...">LINE
     </a>，這裡用 extract_order_cards_from_purchase_html 解析後只留得下
-    "LINE" 這個文字），沒有 LINE 的客人這一行整個不會出現。用這個判斷比
-    直接找 chat.line.biz 網址更準確，因為 extract_order_cards_from_purchase_html
-    是用 get_text() 解析，href 屬性本來就不會出現在解析結果裡。
+    "LINE" 這個文字），沒有 LINE 的客人這一行整個不會出現。
     """
     global BASE_URL, ORDER_PREFIX, PURCHASE_URL
     if env_name == "dev":
@@ -3065,38 +3099,32 @@ def find_orders_without_line_link(
     if not login(session, backend_email, backend_password):
         raise Exception("後台登入失敗，請確認帳號密碼")
 
-    all_blocks = []
-    for page in range(1, max_pages + 1):
-        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
-        if date_s:
-            params["date_s"] = date_s
-        if date_e:
-            params["date_e"] = date_e
-        if paid_at_s:
-            params["paid_at_s"] = paid_at_s
-        if paid_at_e:
-            params["paid_at_e"] = paid_at_e
-        if clean_date_s:
-            params["clean_date_s"] = clean_date_s
-        if clean_date_e:
-            params["clean_date_e"] = clean_date_e
-        params["page"] = str(page)
-        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
-        if resp.status_code != 200:
-            break
-        blocks = extract_order_cards_from_purchase_html(resp.text)
-        if not blocks:
-            break
-        all_blocks.extend(blocks)
-        if len(blocks) < 20:
-            break
+    # 每一種有填的日期區間，各自組成一組獨立的查詢條件
+    filter_sets = []
+    if date_s or date_e:
+        filter_sets.append({"date_s": date_s or "", "date_e": date_e or ""})
+    if paid_at_s or paid_at_e:
+        filter_sets.append({"paid_at_s": paid_at_s or "", "paid_at_e": paid_at_e or ""})
+    if clean_date_s or clean_date_e:
+        filter_sets.append({"clean_date_s": clean_date_s or "", "clean_date_e": clean_date_e or ""})
+
+    if not filter_sets:
+        # 三種區間都沒填：不篩選，直接查全部（用 max_pages 限制掃描範圍）
+        filter_sets = [{}]
+
+    blocks_by_order_no = {}
+    for extra_params in filter_sets:
+        blocks = _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=max_pages)
+        for block in blocks:
+            order_no = block.get("order_no", "")
+            if order_no and order_no not in blocks_by_order_no:
+                blocks_by_order_no[order_no] = block
 
     results = []
-    for block in all_blocks:
+    for order_no, block in blocks_by_order_no.items():
         lines = block.get("lines", [])
         if "LINE" in lines:
             continue
-        order_no = block.get("order_no", "")
         phone = ""
         name = ""
         for idx, ln in enumerate(lines):
