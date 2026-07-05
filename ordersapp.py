@@ -949,9 +949,8 @@ elif mode == "儲值獎金備註":
         bn_paid_e = st.date_input("付款日期-迄", value=None, key="bn_paid_e")
 
     bn_status_map = {
-        "不拘": None, "待付款": "0", "已付款": "1",
+        "待付款": "0", "已付款": "1",
         "待付款＋已付款": ["0", "1"],
-        "取消訂單": "2", "已退款": "3",
     }
     bn_status_label = st.selectbox("付款狀態", list(bn_status_map.keys()), key="bn_status")
 
