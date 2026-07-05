@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.39
+# 版本：v8.40
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-10
+# 最後更新：2026-07-11
 #
 # Change Log
+# v8.40
+# - 選單新增第14項「查詢無LINE連結訂單」：搜尋訂購資訊裡沒有LINE連結的
+#   訂單，列出訂單編號/姓名/電話，可用訂購日期/付款日期/服務日期三種
+#   區間分別篩選（都可留空）。呼叫 orders.py 新增的
+#   find_orders_without_line_link。
 # v8.39
 # - 配合 quick_order.py v8.39：修正合併訂單 LINE 訊息裡「實際服務時間」
 #   那行人時說明重複顯示兩次的問題（_format_period_display 本身就會組好
@@ -228,7 +233,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.39"
+__version__ = "8.40"
 
 import html
 import requests
@@ -237,7 +242,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, timedelta
 
-from orders import run_process_web, get_region_by_address, run_standalone_consistency_check, load_worksheet
+from orders import run_process_web, get_region_by_address, run_batch_consistency_check, run_standalone_consistency_check, find_orders_without_line_link
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 try:
@@ -410,29 +415,6 @@ def h(value, default="未知"):
     return html.escape(text if text else default)
 
 
-def show_order_info_cards(order, extra_cards=None):
-    if not order:
-        return
-    amount = (
-        order.get("service_amount")
-        or order.get("price_with_tax")
-        or order.get("stored_value_amount")
-        or order.get("price")
-        or "—"
-    )
-    cards = [
-        ("訂單編號", order.get("order_no") or "—"),
-        ("金額", f"{amount} 元" if str(amount) != "—" else "—"),
-        ("車馬費", f"{order.get('fare') or '0'} 元"),
-        ("專員", order.get("staff") or "（無班表資料）"),
-    ]
-    if extra_cards:
-        cards = extra_cards
-    cols = st.columns(len(cards))
-    for col, (label, value) in zip(cols, cards):
-        col.metric(label, value)
-
-
 def person_hour_display(person, hour):
     return f"{person}人{hour}小時" if (person or hour) else "未知"
 
@@ -582,22 +564,6 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
-def find_no_slot_rows(sheet_name, region, candidate_rows=None):
-    _, df = load_worksheet(sheet_name)
-    candidate_set = set(candidate_rows or [])
-    if candidate_set:
-        df = df[df["__sheet_row__"].isin(candidate_set)]
-    rows = []
-    for _, row in df.iterrows():
-        status = str(row.get("狀態", "")).strip()
-        order_no = str(row.get("訂單編號", "")).strip()
-        reason_text = f"{row.get('原因', '')} {row.get('沒班表日期', '')}"
-        if status == "未安排" and not order_no and "無班表" in str(reason_text):
-            if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
-                rows.append(int(row["__sheet_row__"]))
-    return rows
-
-
 def format_log_message(msg):
     text = str(msg)
     text = text.replace("\\n", "\n")
@@ -673,6 +639,9 @@ FUNCTION_OPTIONS = [
     ("雙向訂單檢查：不用重新跑批次建單，直接針對一份已經有訂單編號的成單工作表，"
      "跟後台系統做一次雙向比對，找出「工作表有、後台沒有」或「後台有、工作表沒填」的訂單。",
      "orders", "雙向訂單檢查"),
+    ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單，列出訂單編號/姓名/電話，"
+     "可用訂購日期/付款日期/服務日期分別篩選。",
+     "orders", "查詢無LINE連結訂單"),
 ]
 
 selected_label = st.selectbox(
@@ -706,7 +675,10 @@ if mode == "批次建單（Google Sheet）":
     info_panel("功能說明", [
         "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
         "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        "可手動輸入列號；勾自動篩選時，會在輸入的列號範圍內篩出「未安排、訂單編號空白、無班表」的列。",
+        "全部列都執行完、Google Sheet 回填完成後，會再做一次「訂單一致性檢查」：",
+        "方向一從 Sheet 出發，依電話/地址/日期/時段回查系統訂單是否相符；"
+        "方向二反過來，從系統該電話的實際訂單查回 Sheet，抓出「系統其實已成單，"
+        "但 Sheet 沒記錄」的情況。這是整批列都跑完後才統一做一次，不是每一列各自比對。",
     ])
     info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
     step("4", "執行設定")
@@ -726,7 +698,12 @@ if mode == "批次建單（Google Sheet）":
     # v8.14：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟。
     # 與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致。
     batch_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="batch_allow_auto_lemon")
-    auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
+    # v8.19：一致性檢查改成看得到的獨立勾選框，預設開啟；在「全部列都執行完」
+    # 之後才統一做一次整批雙向比對，而不是每一列各自比對一次。
+    batch_run_consistency_check = st.checkbox(
+        "全部執行完後做一次訂單一致性檢查（雙向比對電話/地址/日期/時段）",
+        value=True, key="batch_run_consistency_check",
+    )
     st.markdown("<hr>", unsafe_allow_html=True)
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
@@ -742,22 +719,10 @@ if mode == "批次建單（Google Sheet）":
             st.error("請輸入工作表名稱"); st.stop()
         if not selected_actions:
             st.error("請至少選擇一個執行項目"); st.stop()
-        if auto_no_slot_rows:
-            try:
-                candidate_rows = parse_row_input(row_input) if row_input.strip() else []
-            except Exception as e:
-                st.error(f"列號格式錯誤：{e}"); st.stop()
-            try:
-                target_rows = find_no_slot_rows(sheet_name.strip(), region, candidate_rows)
-            except Exception as e:
-                st.error(f"自動篩選列號失敗：{e}"); st.stop()
-            if not target_rows:
-                st.info("沒有符合「未安排＋訂單編號空白＋無班表」的列。"); st.stop()
-        else:
-            try:
-                target_rows = parse_row_input(row_input)
-            except Exception as e:
-                st.error(f"列號格式錯誤：{e}"); st.stop()
+        try:
+            target_rows = parse_row_input(row_input)
+        except Exception as e:
+            st.error(f"列號格式錯誤：{e}"); st.stop()
         logs = []
         def ui_log(msg):
             logs.append(format_log_message(msg))
@@ -766,7 +731,6 @@ if mode == "批次建單（Google Sheet）":
         total_success = 0
         total_fail = 0
         total_processed = 0
-        used_order_nos_this_batch = set()
         with st.spinner("執行中，請稍候…"):
             for row_no in target_rows:
                 ui_log(f"▶ 開始執行第 {row_no} 列…")
@@ -777,7 +741,6 @@ if mode == "批次建單（Google Sheet）":
                         sheet_name=sheet_name.strip(), start_row=row_no, end_row=row_no,
                         selected_actions=selected_actions, logger=ui_log,
                         allow_auto_lemon_shift=batch_allow_auto_lemon,
-                        used_order_nos=used_order_nos_this_batch,
                     )
                     if isinstance(result, dict):
                         total_success += result.get("success_count", 0)
@@ -787,6 +750,23 @@ if mode == "批次建單（Google Sheet）":
                     total_fail += 1
                     ui_log(f"❌ 第 {row_no} 列失敗：{e}")
         ui_log("===== 建單流程執行完成 =====")
+
+        # v8.19：所有列都跑完、Google Sheet 都回填之後，才統一做一次整批
+        # 一致性檢查（雙向比對），而不是每一列各自比對一次。
+        all_consistency_problems = []
+        consistency_ran = False
+        if batch_run_consistency_check and total_processed > 0:
+            ui_log("▶ 開始整批訂單一致性檢查（雙向比對）…")
+            try:
+                with st.spinner("整批比對中，請稍候…"):
+                    all_consistency_problems = run_batch_consistency_check(
+                        env_name=env, region=region,
+                        backend_email=backend_email.strip(), backend_password=backend_password.strip(),
+                        sheet_name=sheet_name.strip(), target_rows=target_rows, logger=ui_log,
+                    )
+                consistency_ran = True
+            except Exception as e:
+                ui_log(f"❌ 一致性檢查失敗：{e}")
         ui_log("===== 全部執行完成 =====")
 
         with result_container:
@@ -802,6 +782,20 @@ if mode == "批次建單（Google Sheet）":
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("5", "訂單一致性檢查（雙向比對）")
+            if not batch_run_consistency_check:
+                st.info("本次未勾選「全部執行完後做一次訂單一致性檢查」，未執行比對。")
+            elif not consistency_ran:
+                st.warning("一致性檢查未成功執行，請查看上方執行過程的錯誤訊息。")
+            elif all_consistency_problems:
+                st.error(f"⚠️ 發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
+                for _p in all_consistency_problems:
+                    _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查）"
+                    st.warning(f"{_row_label}（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
+            else:
+                st.success("✅ 檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
 
 
 
@@ -860,6 +854,67 @@ elif mode == "雙向訂單檢查":
                 st.warning(f"{_row_label}（訂單 {_p.get('order_no', '') or '（無）'}）：{_p.get('issue')}")
         else:
             st.success(f"✅ 工作表「{dc_result.get('sheet_name')}」檢查通過，訂單編號皆與電話/地址/日期/時段相符，後台也沒有查到工作表未記錄的訂單。")
+
+elif mode == "查詢無LINE連結訂單":
+    step("3", "查詢無LINE連結訂單")
+    info_panel("功能說明", [
+        "搜尋訂購資訊裡沒有LINE連結的訂單，列出訂單編號/姓名/電話。",
+        "三種日期區間都可以留空不篩，訂購日期/付款日期/服務日期各自獨立，"
+        "可以只填其中一種，也可以同時填多種（會同時套用）。",
+    ])
+
+    st.markdown("**訂購日期區間**")
+    nl_col1, nl_col2 = st.columns(2)
+    with nl_col1:
+        nl_date_s = st.date_input("訂購日期-起", value=None, key="nl_date_s")
+    with nl_col2:
+        nl_date_e = st.date_input("訂購日期-迄", value=None, key="nl_date_e")
+
+    st.markdown("**付款日期區間**")
+    nl_col3, nl_col4 = st.columns(2)
+    with nl_col3:
+        nl_paid_s = st.date_input("付款日期-起", value=None, key="nl_paid_s")
+    with nl_col4:
+        nl_paid_e = st.date_input("付款日期-迄", value=None, key="nl_paid_e")
+
+    st.markdown("**服務日期區間**")
+    nl_col5, nl_col6 = st.columns(2)
+    with nl_col5:
+        nl_clean_s = st.date_input("服務日期-起", value=None, key="nl_clean_s")
+    with nl_col6:
+        nl_clean_e = st.date_input("服務日期-迄", value=None, key="nl_clean_e")
+
+    if st.button("🔍 開始搜尋", use_container_width=True, key="nl_run_btn", type="primary"):
+        if not backend_email.strip() or not backend_password.strip():
+            st.error("請先在上方輸入後台帳號密碼")
+        else:
+            try:
+                with st.spinner("登入後台 → 搜尋訂單中（依篩選範圍大小，可能需要一點時間）…"):
+                    nl_results = find_orders_without_line_link(
+                        env_name=env,
+                        backend_email=backend_email.strip(),
+                        backend_password=backend_password.strip(),
+                        date_s=nl_date_s.strftime("%Y-%m-%d") if nl_date_s else None,
+                        date_e=nl_date_e.strftime("%Y-%m-%d") if nl_date_e else None,
+                        paid_at_s=nl_paid_s.strftime("%Y-%m-%d") if nl_paid_s else None,
+                        paid_at_e=nl_paid_e.strftime("%Y-%m-%d") if nl_paid_e else None,
+                        clean_date_s=nl_clean_s.strftime("%Y-%m-%d") if nl_clean_s else None,
+                        clean_date_e=nl_clean_e.strftime("%Y-%m-%d") if nl_clean_e else None,
+                    )
+                st.session_state.nl_results = nl_results
+            except Exception as e:
+                st.error(f"搜尋失敗：{e}")
+
+    nl_results = st.session_state.get("nl_results")
+    if nl_results is not None:
+        if nl_results:
+            st.warning(f"⚠️ 找到 {len(nl_results)} 筆沒有LINE連結的訂單：")
+            st.dataframe(
+                [{"訂單編號": r["order_no"], "姓名": r["name"], "電話": r["phone"]} for r in nl_results],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.success("✅ 這個篩選範圍內的訂單都有LINE連結。")
 
 # =========================================================
 # 其他功能
@@ -1033,7 +1088,6 @@ else:
                                 nc_result["mail_sent"] = False
                                 nc_result["mail_msg"] = "尚未發送"
                             st.session_state.q_order_result = nc_result
-                            show_order_info_cards(nc_result)
                             st.success(f"✅ 訂單建立成功：{nc_result['order_no']}")
                         except Exception as e:
                             st.error(f"建單失敗：{e}")
@@ -1381,7 +1435,6 @@ else:
         # 顯示建單結果
         _r = st.session_state.get("nc_result", {})
         if _r.get("order_no"):
-            show_order_info_cards(_r)
             st.success(
                 f"✅ 訂單：{_r['order_no']}　{_r.get('date_s')} {_r.get('period_s')}　"
                 f"{_r.get('person')}人{_r.get('hour')}小時　{_r.get('price_with_tax', 0):,}元　"
@@ -1540,12 +1593,6 @@ else:
             for r in new_orders_ok:
                 ph_str = f"{r['person']}人{r['hour']}小時"
                 _r_order_result = r.get("order_result") or {}
-                show_order_info_cards({
-                    "order_no": r.get("order_no"),
-                    "service_amount": r.get("price_with_tax"),
-                    "fare": _r_order_result.get("fare", "0"),
-                    "staff": _r_order_result.get("staff"),
-                })
                 st.success(
                     f"✅ 第二段：新訂單 {r['order_no']}，{r['date_s']} {r['period_s']} {ph_str}，"
                     f"折價券 {r['coupon_code']}（{r['price_with_tax']}元）　"
@@ -1566,18 +1613,6 @@ else:
                     )
             for r in [r for r in conv_stage2.get("new_order_results", []) if r.get("error")]:
                 st.error(f"❌ 第二段 B{r['index']}（{r['date_s']} {r['period_s']}）失敗：{r['error']}")
-
-            st.markdown("<hr>", unsafe_allow_html=True)
-            step("6", "第三階段：比對原訂單與新訂單金額差額")
-            _orig_amount = conv_stage2.get("service_amount_a_display", 0)
-            _new_amount = conv_stage2.get("new_amount_total", 0)
-            _new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
-            if conv_stage2.get("ph_warning"):
-                st.warning(conv_stage2["ph_warning"])
-            elif _orig_amount:
-                st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
-            else:
-                st.warning(f"⚠️ 金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {_new_amt_detail} = {_new_amount}元，請手動核對。")
 
             # v2026.07.10：LINE 訊息改成直接顯示，跟其他流程（新客建單/儲值金
             # 補價差/儲值金購買）一致，不要藏在預設收合的「細項」裡看不到。
@@ -1602,6 +1637,18 @@ else:
                 st.text_area("原訂單A備註", conv_stage2.get("note_a", ""), height=70, label_visibility="collapsed", key="conv_note_a_out")
                 copy_button("複製原訂單A備註", conv_stage2.get("note_a", ""), "copy_note_a")
                 st.caption(f"全單備註：{conv_stage2.get('note', '')}")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("6", "第三階段：比對原訂單與新訂單金額差額")
+            _orig_amount = conv_stage2.get("service_amount_a_display", 0)
+            _new_amount = conv_stage2.get("new_amount_total", 0)
+            _new_amt_detail = "＋".join(f"{r['price_with_tax']}元" for r in new_orders_ok) if new_orders_ok else "0元"
+            if conv_stage2.get("ph_warning"):
+                st.warning(conv_stage2["ph_warning"])
+            elif _orig_amount:
+                st.success(f"✅ 金額比對：原訂單A {_orig_amount}元 ＝ 新訂單合計 {_new_amt_detail} = {_new_amount}元")
+            else:
+                st.warning(f"⚠️ 金額比對：原訂單A金額解析失敗，無法自動比較，新訂單合計 {_new_amt_detail} = {_new_amount}元，請手動核對。")
     # --------------------------------------------------
     # 儲值金補價差
     # --------------------------------------------------
@@ -1740,26 +1787,19 @@ else:
         if paid_stage:
             po = paid_stage["paid_order"]
             cb = paid_stage.get("coupon_b", {})
-            show_order_info_cards(po)
             st.success(
                 f"✅ 第二段完成：客付補價差訂單 {po.get('order_no', '—')}；"
                 f"優惠券B {cb.get('coupon_code') or cb.get('coupon_prefix')}。　"
                 f"👤 專員：{po.get('staff') or '（無班表資料）'}"
             )
-            if paid_stage.get("auto_settle_zero_amount"):
-                if paid_stage.get("mark_paid_ok"):
-                    st.caption("✅ 已標記為已付款")
-                else:
-                    st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
-                if paid_stage.get("invoice_note_ok"):
-                    st.caption("✅ 發票號碼欄位已標註「不開立發票」")
-                else:
-                    st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{paid_stage.get('invoice_note_msg', '')}")
+            if paid_stage.get("mark_paid_ok"):
+                st.caption("✅ 已標記為已付款")
             else:
-                st.warning(
-                    f"⚠️ 服務金額（總金額扣除車馬費）為 {paid_stage.get('payable_amount_after_fare', '—')} 元，"
-                    "此單需付款並開立發票，已保留待付款狀態且未標註不開立發票。"
-                )
+                st.warning(f"⚠️ 標記已付款失敗，請至後台手動改成已付款：{paid_stage.get('mark_paid_msg', '')}")
+            if paid_stage.get("invoice_note_ok"):
+                st.caption("✅ 發票號碼欄位已標註「不開立發票」")
+            else:
+                st.warning(f"⚠️ 發票欄位標註失敗，請至後台手動填寫「不開立發票」：{paid_stage.get('invoice_note_msg', '')}")
             if po.get("order_no_duplicated"):
                 show_duplicate_order_warning(po.get("order_no"), po.get("order_no_duplicate_count", 2), dedup_key=f"sv_paid_{po.get('order_no')}")
             st.markdown("#### 📋 備註文字")
@@ -1860,15 +1900,6 @@ else:
                     else:
                         st.info("查詢過程沒有回傳任何結果，請檢查上方是否有例外訊息。")
             elif sv2_result.get("success"):
-                show_order_info_cards(
-                    sv2_result,
-                    extra_cards=[
-                        ("訂單編號", sv2_result.get("order_no") or "—"),
-                        ("儲值金額", f"{sv2_result.get('stored_value_amount')} 元"),
-                        ("贈購物金", f"{sv2_result.get('bonus')} 元"),
-                        ("付款方式", sv2_result.get("payway") or "—"),
-                    ],
-                )
                 st.success(
                     f"✅ 訂單：{sv2_result.get('order_no') or '（已送出，但查不到訂單編號，請至後台確認）'}　"
                     f"儲值金額：{sv2_result.get('stored_value_amount')}元　"
@@ -1921,15 +1952,11 @@ else:
     if order_result:
         st.markdown("<hr>", unsafe_allow_html=True)
         step("5", "執行結果")
-        show_order_info_cards(
-            order_result,
-            extra_cards=[
-                ("訂單編號", order_result["order_no"]),
-                ("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—"),
-                ("車馬費", order_result.get("fare") or "0"),
-                ("確認信", "已發送" if order_result.get("mail_sent") else "未發送"),
-            ],
-        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("訂單編號", order_result["order_no"])
+        c2.metric("金額（含稅）", order_result.get("service_amount") or order_result.get("price_with_tax") or "—")
+        c3.metric("車馬費", order_result.get("fare") or "0")
+        c4.metric("確認信", "已發送" if order_result.get("mail_sent") else "未發送")
         st.success(f"✅ 訂單建立成功：{order_result['order_no']}　👤 專員：{order_result.get('staff') or '（無班表資料）'}")
         if order_result.get("price_mismatch_warning"):
             st.warning(order_result["price_mismatch_warning"])
