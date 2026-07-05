@@ -3417,8 +3417,13 @@ def find_pending_stored_value_orders(
     return results
 
 
+def _purchase_edit_id_from_order_no(order_no):
+    digits = re.sub(r"\D", "", str(order_no or ""))
+    return str(int(digits)) if digits else ""
+
+
 def _fetch_order_edit_notice(session, order_no):
-    edit_id = _fetch_order_edit_id(session, order_no)
+    edit_id = _purchase_edit_id_from_order_no(order_no) or _fetch_order_edit_id(session, order_no)
     if not edit_id:
         return None
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
