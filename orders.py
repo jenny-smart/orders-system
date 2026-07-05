@@ -3292,6 +3292,7 @@ def find_pending_stored_value_orders(
     date_s=None, date_e=None,
     paid_at_s=None, paid_at_e=None,
     purchase_status=None,
+    notice_status="blank",
     max_pages=80,
 ):
     """
@@ -3368,9 +3369,6 @@ def find_pending_stored_value_orders(
         lines = block.get("lines", [])
         order_no = block.get("order_no", "")
 
-        if notice_map.get(order_no):
-            continue  # 客服備註已有內容，跳過
-
         created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
 
         if date_s and (not created_at or created_at < date_s):
@@ -3390,7 +3388,13 @@ def find_pending_stored_value_orders(
 
         if allowed_status_texts and status_text not in allowed_status_texts:
             continue
-        if not _order_edit_notice_is_blank(session, order_no):
+        notice_text = _fetch_order_edit_notice(session, order_no)
+        if notice_text is None:
+            continue
+        has_notice = bool(str(notice_text).strip())
+        if notice_status == "blank" and has_notice:
+            continue
+        if notice_status == "nonblank" and not has_notice:
             continue
 
         phone = ""
@@ -3406,25 +3410,26 @@ def find_pending_stored_value_orders(
             "name": name,
             "phone": phone,
             "purchase_status": status_text,
-            "notice": "",
+            "paid_date": paid_date or "",
+            "notice": notice_text,
         })
 
     return results
 
 
-def _order_edit_notice_is_blank(session, order_no):
+def _fetch_order_edit_notice(session, order_no):
     edit_id = _fetch_order_edit_id(session, order_no)
     if not edit_id:
-        return False
+        return None
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
-        return False
+        return None
     soup = BeautifulSoup(resp.text, "html.parser")
     notice = soup.find("textarea", attrs={"name": "notice"}) or soup.find("input", attrs={"name": "notice"})
     if notice is None:
-        return False
+        return None
     value = notice.get("value") if notice.name == "input" else notice.get_text()
-    return not str(value or "").strip()
+    return str(value or "").strip()
 
 
 def _fetch_order_edit_id(session, order_no):

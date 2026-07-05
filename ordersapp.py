@@ -953,6 +953,8 @@ elif mode == "儲值獎金備註":
         "待付款＋已付款": ["0", "1"],
     }
     bn_status_label = st.selectbox("付款狀態", list(bn_status_map.keys()), key="bn_status")
+    bn_notice_map = {"空白": "blank", "非空白": "nonblank"}
+    bn_notice_label = st.selectbox("客服備註", list(bn_notice_map.keys()), key="bn_notice_status")
 
     if st.button("🔍 ① 開始搜尋", use_container_width=True, key="bn_search_btn", type="primary"):
         if not backend_email.strip() or not backend_password.strip():
@@ -969,6 +971,7 @@ elif mode == "儲值獎金備註":
                         paid_at_s=bn_paid_s.strftime("%Y-%m-%d") if bn_paid_s else None,
                         paid_at_e=bn_paid_e.strftime("%Y-%m-%d") if bn_paid_e else None,
                         purchase_status=bn_status_map[bn_status_label],
+                        notice_status=bn_notice_map[bn_notice_label],
                     )
                 st.session_state.bn_results = bn_results
                 st.session_state.bn_apply_results = None
@@ -978,9 +981,9 @@ elif mode == "儲值獎金備註":
     bn_results = st.session_state.get("bn_results")
     if bn_results is not None:
         if bn_results:
-            st.success(f"✅ 找到 {len(bn_results)} 筆客服備註空白的儲值金訂單：")
+            st.success(f"✅ 找到 {len(bn_results)} 筆符合條件的儲值金訂單：")
             st.dataframe(
-                [{"訂單編號": r["order_no"], "姓名": r["name"], "付款狀態": r.get("purchase_status", ""), "客服備註": r.get("notice", "")} for r in bn_results],
+                [{"訂單編號": r["order_no"], "客戶姓名": r["name"], "付款日期": r.get("paid_date", ""), "客服備註": r.get("notice", "")} for r in bn_results],
                 use_container_width=True, hide_index=True,
             )
 
