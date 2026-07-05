@@ -1,10 +1,20 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.11-3
+# 版本：v2026.07.11-4
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
 # 最後更新：2026-07-11
 #
 # Change Log
+# v2026.07.11-4
+# - find_orders_without_line_link 第四次修正漏單問題：v2026.07.11-3 遇到
+#   區間只填一邊時，選擇整個放棄該區間、改成完全不篩選、直接掃描前 80 頁。
+#   但實測發現這樣還是抓不到 LC00212069 這種很新的訂單——研判是後台在
+#   完全沒有篩選條件時的預設排序並不是「新到舊」（很可能是依 ID 由舊到
+#   新），導致掃描前 80 頁只掃得到很久以前的舊訂單，新訂單永遠輪不到。
+#   改成：不管只填了起或迄的哪一邊，都自動幫忙補上另一邊寬鬆的日期
+#   （很早的 2000-01-01 或很晚的 2099-12-31），確保送給後台的一定是
+#   「起訖都有值」的完整區間，不會再整個放棄篩選條件。用假 session 驗證過
+#   實際送出的查詢參數確實是完整區間，也確認能正確抓到 LC00212069。
 # v2026.07.11-3
 # - find_orders_without_line_link 再次修正漏單問題：實測發現不管是「三種
 #   區間同時送」還是「每種區間分開各送一次」，只要區間裡有任何一邊留空
@@ -3146,15 +3156,19 @@ def find_orders_without_line_link(
         raise Exception("後台登入失敗，請確認帳號密碼")
 
     # 只用「其中一種」區間當後台端的粗篩，優先順序：服務日期 > 訂購日期 > 付款日期。
-    # 而且只在起訖都有填的時候才拿來當後台篩選參數（起訖只填一邊時，後台的
-    # 篩選行為不可靠，寧可不篩，全部交給下面的 Python 端比對）。
+    # v2026.07.11-4：不管使用者只填了起或迄的哪一邊，都自動補上一個寬鬆的
+    # 另一邊（很早的日期 / 很晚的日期），確保送給後台的一定是「起訖都有值」
+    # 的完整區間。這是因為實測發現只要區間有一邊是空的，後台就會整個放棄
+    # 這個篩選條件，退回某種不可控的預設排序（很可能是依 ID 由舊到新），
+    # 導致像 LC00212069 這種很新的訂單，掃描 80 頁都排不到、永遠掃不到。
+    _far_past, _far_future = "2000-01-01", "2099-12-31"
     pre_filter = {}
-    if clean_date_s and clean_date_e:
-        pre_filter = {"clean_date_s": clean_date_s, "clean_date_e": clean_date_e}
-    elif date_s and date_e:
-        pre_filter = {"date_s": date_s, "date_e": date_e}
-    elif paid_at_s and paid_at_e:
-        pre_filter = {"paid_at_s": paid_at_s, "paid_at_e": paid_at_e}
+    if clean_date_s or clean_date_e:
+        pre_filter = {"clean_date_s": clean_date_s or _far_past, "clean_date_e": clean_date_e or _far_future}
+    elif date_s or date_e:
+        pre_filter = {"date_s": date_s or _far_past, "date_e": date_e or _far_future}
+    elif paid_at_s or paid_at_e:
+        pre_filter = {"paid_at_s": paid_at_s or _far_past, "paid_at_e": paid_at_e or _far_future}
 
     all_blocks = _fetch_all_purchase_blocks_with_filters(session, pre_filter, max_pages=max_pages)
 
