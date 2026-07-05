@@ -632,7 +632,8 @@ with col_e:
 with col_p:
     backend_password = st.text_input("後台密碼", type="password")
 with col_env:
-    env = st.selectbox("環境", ["prod", "dev"], index=0)
+    env_label = st.selectbox("環境", ["prod（正式機 backend）", "dev（測試機 backend-dev）"], index=0)
+    env = "dev" if env_label.startswith("dev") else "prod"
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
