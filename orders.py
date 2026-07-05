@@ -3023,6 +3023,102 @@ def _fetch_all_purchase_blocks_by_date_range(session, date_s, date_e, purchase_s
     return all_blocks
 
 
+def _extract_order_dates_from_block_lines(lines):
+    created_at = None
+    service_date = None
+    paid_date = None
+    for ln in lines:
+        m_paid = re.search(r"付款日期[：:]\s*(\d{4}-\d{2}-\d{2})", ln)
+        if m_paid:
+            paid_date = m_paid.group(1)
+            continue
+        m_full = re.fullmatch(r"(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}", ln)
+        if m_full and created_at is None:
+            created_at = m_full.group(1)
+            continue
+        m_start = re.match(r"^(\d{4}-\d{2}-\d{2})", ln)
+        if m_start and created_at is not None and service_date is None:
+            service_date = m_start.group(1)
+    return created_at, service_date, paid_date
+
+
+def _fetch_all_purchase_blocks_with_filters(session, extra_params, max_pages=80):
+    all_blocks = []
+    for page in range(1, max_pages + 1):
+        params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
+        params.update(extra_params)
+        params["page"] = str(page)
+        resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
+        if resp.status_code != 200:
+            break
+        blocks = extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        if len(blocks) < 20:
+            break
+    return all_blocks
+
+
+def find_orders_without_line_link(
+    env_name, backend_email, backend_password,
+    date_s=None, date_e=None,
+    paid_at_s=None, paid_at_e=None,
+    clean_date_s=None, clean_date_e=None,
+    max_pages=80,
+):
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    if env_name == "dev":
+        BASE_URL = BASE_URL_DEV
+        ORDER_PREFIX = ORDER_PREFIX_DEV
+    else:
+        BASE_URL = BASE_URL_PROD
+        ORDER_PREFIX = ORDER_PREFIX_PROD
+    PURCHASE_URL = f"{BASE_URL}/purchase"
+
+    session = requests.Session()
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
+
+    far_past, far_future = "2000-01-01", "2099-12-31"
+    pre_filter = {}
+    if clean_date_s or clean_date_e:
+        pre_filter = {"clean_date_s": clean_date_s or far_past, "clean_date_e": clean_date_e or far_future}
+    elif date_s or date_e:
+        pre_filter = {"date_s": date_s or far_past, "date_e": date_e or far_future}
+    elif paid_at_s or paid_at_e:
+        pre_filter = {"paid_at_s": paid_at_s or far_past, "paid_at_e": paid_at_e or far_future}
+
+    results = []
+    for block in _fetch_all_purchase_blocks_with_filters(session, pre_filter, max_pages=max_pages):
+        lines = block.get("lines", [])
+        created_at, service_date, paid_date = _extract_order_dates_from_block_lines(lines)
+        if date_s and (not created_at or created_at < date_s):
+            continue
+        if date_e and (not created_at or created_at > date_e):
+            continue
+        if clean_date_s and (not service_date or service_date < clean_date_s):
+            continue
+        if clean_date_e and (not service_date or service_date > clean_date_e):
+            continue
+        if paid_at_s and (not paid_date or paid_date < paid_at_s):
+            continue
+        if paid_at_e and (not paid_date or paid_date > paid_at_e):
+            continue
+        if "LINE" in lines:
+            continue
+
+        phone = ""
+        name = ""
+        for idx, ln in enumerate(lines):
+            if re.fullmatch(r"09\d{8}", ln):
+                phone = ln
+                name = lines[idx - 1] if idx > 0 else ""
+                break
+        results.append({"order_no": block.get("order_no", ""), "name": name, "phone": phone})
+    return results
+
+
 def run_standalone_consistency_check(env_name, backend_email, backend_password, sheet_name, region=None,
                                        date_range_start=None, date_range_end=None):
     """
