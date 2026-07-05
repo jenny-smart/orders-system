@@ -1,0 +1,82 @@
+# ============================================================
+# 放置位置：orders-system repo 底下的
+#           .github/workflows/sync-to-tool-system.yml
+#
+# 功能：orders-system 的 main branch 一有 push，就自動把
+#       ordersapp.py / orders.py / quick_order.py / accounts.py
+#       複製一份到 tool-system repo 的 tools/orders_system/ 目錄，
+#       自動 commit + push，觸發 Streamlit Cloud 自動重新部署。
+#
+# 事前準備（只需要做一次）：
+# 1. 到 GitHub → 右上角頭像 → Settings → Developer settings →
+#    Personal access tokens → Fine-grained tokens，建立一個新 token，
+#    只勾選 tool-system 這個 repo 的 Contents: Read and write 權限。
+# 2. 到 orders-system repo → Settings → Secrets and variables →
+#    Actions → New repository secret，
+#    Name 填 TOOL_SYSTEM_PUSH_TOKEN，Value 貼上剛剛的 token。
+# 3. 下面 SYNC_FILES 清單如果之後訂單系統又拆出新的檔案
+#    （例如新增 xxx_helper.py），要記得把檔名加進清單。
+# ============================================================
+name: Sync ordersapp to tool-system
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ordersapp.py"
+      - "orders.py"
+      - "quick_order.py"
+      - "accounts.py"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout orders-system（來源）
+        uses: actions/checkout@v4
+        with:
+          path: orders-system
+
+      - name: Checkout tool-system（目的地）
+        uses: actions/checkout@v4
+        with:
+          repository: jenny-smart/tool-system
+          token: ${{ secrets.TOOL_SYSTEM_PUSH_TOKEN }}
+          path: tool-system
+
+      - name: 複製檔案到 tool-system/tools/orders_system/
+        run: |
+          set -e
+          mkdir -p tool-system/tools/orders_system
+
+          # ↓↓↓ 需要同步的檔案清單，之後有新增檔案就加在這裡 ↓↓↓
+          SYNC_FILES="ordersapp.py orders.py quick_order.py accounts.py"
+
+          for f in $SYNC_FILES; do
+            if [ -f "orders-system/$f" ]; then
+              cp "orders-system/$f" "tool-system/tools/orders_system/$f"
+              echo "已複製：$f"
+            else
+              echo "⚠️ 找不到 orders-system/$f，略過"
+            fi
+          done
+
+      - name: 檢查是否有變動
+        id: diff
+        run: |
+          cd tool-system
+          git add tools/orders_system
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit 並 push 到 tool-system
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          cd tool-system
+          git config user.name "orders-system-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "🔄 自動同步 orders-system → $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
