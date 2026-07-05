@@ -3144,14 +3144,14 @@ def _purchase_edit_id_from_order_no(order_no):
 def _order_edit_line_url_is_blank(session, order_no):
     edit_id = _purchase_edit_id_from_order_no(order_no)
     if not edit_id:
-        return True
+        return False
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
     if resp.status_code != 200:
-        return True
+        return False
     soup = BeautifulSoup(resp.text, "html.parser")
     line_input = soup.find("input", attrs={"name": "line"})
     if line_input is None:
-        return True
+        return False
     return not str(line_input.get("value") or "").strip()
 
 
@@ -3236,6 +3236,8 @@ def find_orders_without_line_link(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
+        if "LINE" in lines:
+            continue
         if not _order_edit_line_url_is_blank(session, order_no):
             continue
 
