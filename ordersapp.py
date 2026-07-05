@@ -1,10 +1,16 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.42
+# 版本：v8.44
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-12
+# 最後更新：2026-07-13
 #
 # Change Log
+# v8.44
+# - 儲值獎金備註的付款狀態下拉選單新增「待付款＋已付款」組合選項。
+# v8.43
+# - 配合 orders.py v2026.07.13：儲值獎金備註畫面新增「付款狀態」篩選
+#   下拉選單，移除原本寫死的處理狀態篩選；搜尋結果表格新增「付款狀態」
+#   欄位；套用成功訊息補充說明「服務狀態已改為已處理」。
 # v8.42
 # - 修正 NameError: name 're' is not defined——儲值獎金備註套用按鈕裡用了
 #   re.split 解析獎金人員名字，但 ordersapp.py 頂部沒有 import re。已補上。
@@ -242,7 +248,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.42"
+__version__ = "8.44"
 
 import html
 import re
@@ -252,7 +258,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, timedelta
 
-from orders import run_process_web, get_region_by_address, run_standalone_consistency_check, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes, load_worksheet
+from orders import run_process_web, get_region_by_address, run_batch_consistency_check, run_standalone_consistency_check, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
 try:
@@ -574,22 +580,6 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
-def find_no_slot_rows(sheet_name, region, candidate_rows=None):
-    _, df = load_worksheet(sheet_name)
-    candidate_set = set(candidate_rows or [])
-    if candidate_set:
-        df = df[df["__sheet_row__"].isin(candidate_set)]
-    rows = []
-    for _, row in df.iterrows():
-        status = str(row.get("狀態", "")).strip()
-        order_no = str(row.get("訂單編號", "")).strip()
-        reason_text = f"{row.get('原因', '')} {row.get('沒班表日期', '')}"
-        if status == "未安排" and not order_no and "無班表" in str(reason_text):
-            if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
-                rows.append(int(row["__sheet_row__"]))
-    return rows
-
-
 def format_log_message(msg):
     text = str(msg)
     text = text.replace("\\n", "\n")
@@ -668,8 +658,8 @@ FUNCTION_OPTIONS = [
     ("查詢無LINE連結訂單：搜尋訂購資訊裡沒有LINE連結的訂單，列出訂單編號/姓名/電話，"
      "可用訂購日期/付款日期/服務日期分別篩選。",
      "orders", "查詢無LINE連結訂單"),
-    ("儲值獎金備註：搜尋購買項目儲值金、已付款、未處理的訂單並列出客戶姓名名單，"
-     "依姓名把「獎金：名字1X名字2」加進客服備註。",
+    ("儲值獎金備註：搜尋購買項目儲值金、客服備註為空白的訂單並列出客戶姓名/電話/付款狀態名單，"
+     "依姓名把「獎金：名字1X名字2」加進客服備註（並改為已處理）。",
      "orders", "儲值獎金備註"),
 ]
 
@@ -704,7 +694,10 @@ if mode == "批次建單（Google Sheet）":
     info_panel("功能說明", [
         "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
         "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        "勾自動篩選時，會在輸入的列號範圍內篩出「未安排、訂單編號空白、無班表」的列。",
+        "全部列都執行完、Google Sheet 回填完成後，會再做一次「訂單一致性檢查」：",
+        "方向一從 Sheet 出發，依電話/地址/日期/時段回查系統訂單是否相符；"
+        "方向二反過來，從系統該電話的實際訂單查回 Sheet，抓出「系統其實已成單，"
+        "但 Sheet 沒記錄」的情況。這是整批列都跑完後才統一做一次，不是每一列各自比對。",
     ])
     info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
     step("4", "執行設定")
@@ -724,7 +717,12 @@ if mode == "批次建單（Google Sheet）":
     # v8.14：查無班表時是否自動補檸檬人，預設不勾選，需客服明確開啟。
     # 與舊客快速建單、新客資料拆解、訂單轉換三個流程行為一致。
     batch_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人排班", value=False, key="batch_allow_auto_lemon")
-    auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
+    # v8.19：一致性檢查改成看得到的獨立勾選框，預設開啟；在「全部列都執行完」
+    # 之後才統一做一次整批雙向比對，而不是每一列各自比對一次。
+    batch_run_consistency_check = st.checkbox(
+        "全部執行完後做一次訂單一致性檢查（雙向比對電話/地址/日期/時段）",
+        value=True, key="batch_run_consistency_check",
+    )
     st.markdown("<hr>", unsafe_allow_html=True)
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
@@ -740,22 +738,10 @@ if mode == "批次建單（Google Sheet）":
             st.error("請輸入工作表名稱"); st.stop()
         if not selected_actions:
             st.error("請至少選擇一個執行項目"); st.stop()
-        if auto_no_slot_rows:
-            try:
-                candidate_rows = parse_row_input(row_input) if row_input.strip() else []
-            except Exception as e:
-                st.error(f"列號格式錯誤：{e}"); st.stop()
-            try:
-                target_rows = find_no_slot_rows(sheet_name.strip(), region, candidate_rows)
-            except Exception as e:
-                st.error(f"自動篩選列號失敗：{e}"); st.stop()
-            if not target_rows:
-                st.info("沒有符合「未安排＋訂單編號空白＋無班表」的列。"); st.stop()
-        else:
-            try:
-                target_rows = parse_row_input(row_input)
-            except Exception as e:
-                st.error(f"列號格式錯誤：{e}"); st.stop()
+        try:
+            target_rows = parse_row_input(row_input)
+        except Exception as e:
+            st.error(f"列號格式錯誤：{e}"); st.stop()
         logs = []
         def ui_log(msg):
             logs.append(format_log_message(msg))
@@ -764,7 +750,6 @@ if mode == "批次建單（Google Sheet）":
         total_success = 0
         total_fail = 0
         total_processed = 0
-        used_order_nos_this_batch = set()
         with st.spinner("執行中，請稍候…"):
             for row_no in target_rows:
                 ui_log(f"▶ 開始執行第 {row_no} 列…")
@@ -775,7 +760,6 @@ if mode == "批次建單（Google Sheet）":
                         sheet_name=sheet_name.strip(), start_row=row_no, end_row=row_no,
                         selected_actions=selected_actions, logger=ui_log,
                         allow_auto_lemon_shift=batch_allow_auto_lemon,
-                        used_order_nos=used_order_nos_this_batch,
                     )
                     if isinstance(result, dict):
                         total_success += result.get("success_count", 0)
@@ -785,6 +769,23 @@ if mode == "批次建單（Google Sheet）":
                     total_fail += 1
                     ui_log(f"❌ 第 {row_no} 列失敗：{e}")
         ui_log("===== 建單流程執行完成 =====")
+
+        # v8.19：所有列都跑完、Google Sheet 都回填之後，才統一做一次整批
+        # 一致性檢查（雙向比對），而不是每一列各自比對一次。
+        all_consistency_problems = []
+        consistency_ran = False
+        if batch_run_consistency_check and total_processed > 0:
+            ui_log("▶ 開始整批訂單一致性檢查（雙向比對）…")
+            try:
+                with st.spinner("整批比對中，請稍候…"):
+                    all_consistency_problems = run_batch_consistency_check(
+                        env_name=env, region=region,
+                        backend_email=backend_email.strip(), backend_password=backend_password.strip(),
+                        sheet_name=sheet_name.strip(), target_rows=target_rows, logger=ui_log,
+                    )
+                consistency_ran = True
+            except Exception as e:
+                ui_log(f"❌ 一致性檢查失敗：{e}")
         ui_log("===== 全部執行完成 =====")
 
         with result_container:
@@ -800,6 +801,20 @@ if mode == "批次建單（Google Sheet）":
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            step("5", "訂單一致性檢查（雙向比對）")
+            if not batch_run_consistency_check:
+                st.info("本次未勾選「全部執行完後做一次訂單一致性檢查」，未執行比對。")
+            elif not consistency_ran:
+                st.warning("一致性檢查未成功執行，請查看上方執行過程的錯誤訊息。")
+            elif all_consistency_problems:
+                st.error(f"⚠️ 發現 {len(all_consistency_problems)} 筆異常，請人工確認：")
+                for _p in all_consistency_problems:
+                    _row_label = f"第 {_p.get('row_num')} 列" if _p.get("row_num") is not None else "（系統反查）"
+                    st.warning(f"{_row_label}（訂單 {_p.get('order_no', '')}）：{_p.get('issue')}")
+            else:
+                st.success("✅ 檢查通過，本次寫回的訂單編號皆與 Google Sheet 電話/地址/日期/時段相符。")
 
 
 
@@ -923,9 +938,11 @@ elif mode == "查詢無LINE連結訂單":
 elif mode == "儲值獎金備註":
     step("3", "儲值獎金備註")
     info_panel("功能說明", [
-        "① 先搜尋「購買項目：儲值金、付款狀態：已付款、處理狀態：未處理」的訂單，列出客戶姓名名單。",
+        "① 先搜尋「購買項目：儲值金」且「客服備註目前是空白」的訂單，列出客戶姓名/電話/付款狀態名單"
+        "（客服備註已經有內容的訂單不會出現，避免重複回填）。",
         "② 拿名單去對照 LINE 群組裡回報的介紹獎金名單，把「客戶姓名：獎金人員1X獎金人員2」貼進下面的輸入框，一行一筆。",
-        "③ 按下套用，會依姓名比對剛剛搜尋到的訂單，把「獎金：獎金人員1X獎金人員2」加進該筆訂單的客服備註（保留原本備註內容，不會覆蓋）。",
+        "③ 按下套用，會依姓名比對剛剛搜尋到的訂單，把「獎金：獎金人員1X獎金人員2」加進該筆訂單的客服備註"
+        "（保留原本備註內容，不會覆蓋），並把服務狀態一併改為「已處理」。",
     ])
 
     st.markdown("**訂購日期區間**")
@@ -942,6 +959,13 @@ elif mode == "儲值獎金備註":
     with bn_col4:
         bn_paid_e = st.date_input("付款日期-迄", value=None, key="bn_paid_e")
 
+    bn_status_map = {
+        "不拘": None, "待付款": "0", "已付款": "1",
+        "待付款＋已付款": ["0", "1"],
+        "取消訂單": "2", "已退款": "3",
+    }
+    bn_status_label = st.selectbox("付款狀態", list(bn_status_map.keys()), key="bn_status")
+
     if st.button("🔍 ① 開始搜尋", use_container_width=True, key="bn_search_btn", type="primary"):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先在上方輸入後台帳號密碼")
@@ -956,6 +980,7 @@ elif mode == "儲值獎金備註":
                         date_e=bn_date_e.strftime("%Y-%m-%d") if bn_date_e else None,
                         paid_at_s=bn_paid_s.strftime("%Y-%m-%d") if bn_paid_s else None,
                         paid_at_e=bn_paid_e.strftime("%Y-%m-%d") if bn_paid_e else None,
+                        purchase_status=bn_status_map[bn_status_label],
                     )
                 st.session_state.bn_results = bn_results
                 st.session_state.bn_apply_results = None
@@ -965,9 +990,9 @@ elif mode == "儲值獎金備註":
     bn_results = st.session_state.get("bn_results")
     if bn_results is not None:
         if bn_results:
-            st.success(f"✅ 找到 {len(bn_results)} 筆待處理的儲值金訂單，客戶姓名名單：")
+            st.success(f"✅ 找到 {len(bn_results)} 筆客服備註空白的儲值金訂單，客戶姓名名單：")
             st.dataframe(
-                [{"訂單編號": r["order_no"], "姓名": r["name"], "電話": r["phone"]} for r in bn_results],
+                [{"訂單編號": r["order_no"], "姓名": r["name"], "電話": r["phone"], "付款狀態": r.get("purchase_status", "")} for r in bn_results],
                 use_container_width=True, hide_index=True,
             )
 
@@ -1022,11 +1047,11 @@ elif mode == "儲值獎金備註":
             if bn_apply_results:
                 for r in bn_apply_results:
                     if r["ok"]:
-                        st.success(f"✅ {r['order_no']}（{r['cust_name']}）：已寫入「獎金：{'X'.join(r['bonus_names'])}」")
+                        st.success(f"✅ {r['order_no']}（{r['cust_name']}）：已寫入「獎金：{'X'.join(r['bonus_names'])}」，服務狀態已改為已處理")
                     else:
                         st.error(f"❌ {r['order_no']}（{r['cust_name']}）：{r['msg']}")
         else:
-            st.info("這個篩選範圍內沒有待處理的儲值金訂單。")
+            st.info("這個篩選範圍內沒有客服備註空白的儲值金訂單。")
 
 # =========================================================
 # 其他功能
