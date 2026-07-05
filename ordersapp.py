@@ -978,9 +978,9 @@ elif mode == "儲值獎金備註":
     bn_results = st.session_state.get("bn_results")
     if bn_results is not None:
         if bn_results:
-            st.success(f"✅ 找到 {len(bn_results)} 筆客服備註空白的儲值金訂單，客戶姓名名單：")
+            st.success(f"✅ 找到 {len(bn_results)} 筆客服備註空白的儲值金訂單：")
             st.dataframe(
-                [{"訂單編號": r["order_no"], "姓名": r["name"], "電話": r["phone"], "付款狀態": r.get("purchase_status", "")} for r in bn_results],
+                [{"訂單編號": r["order_no"], "姓名": r["name"], "付款狀態": r.get("purchase_status", ""), "客服備註": r.get("notice", "")} for r in bn_results],
                 use_container_width=True, hide_index=True,
             )
 

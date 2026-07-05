@@ -3329,8 +3329,9 @@ def find_pending_stored_value_orders(
 
     is_multi_status = isinstance(purchase_status, (list, tuple, set))
     allowed_status_texts = None
-    if is_multi_status:
-        allowed_status_texts = {_PURCHASE_STATUS_TEXT.get(str(s), "") for s in purchase_status}
+    if purchase_status:
+        status_values = purchase_status if is_multi_status else [purchase_status]
+        allowed_status_texts = {_PURCHASE_STATUS_TEXT.get(str(s), "") for s in status_values}
         allowed_status_texts.discard("")
 
     _far_past, _far_future = "2000-01-01", "2099-12-31"
@@ -3387,7 +3388,7 @@ def find_pending_stored_value_orders(
         if status_m:
             status_text = status_m.group(1).strip()
 
-        if is_multi_status and allowed_status_texts and status_text not in allowed_status_texts:
+        if allowed_status_texts and status_text not in allowed_status_texts:
             continue
         if not _order_edit_notice_is_blank(session, order_no):
             continue
@@ -3400,7 +3401,13 @@ def find_pending_stored_value_orders(
                 if idx > 0:
                     name = lines[idx - 1]
                 break
-        results.append({"order_no": order_no, "name": name, "phone": phone, "purchase_status": status_text})
+        results.append({
+            "order_no": order_no,
+            "name": name,
+            "phone": phone,
+            "purchase_status": status_text,
+            "notice": "",
+        })
 
     return results
 
