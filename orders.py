@@ -3287,6 +3287,18 @@ def _extract_notice_map_from_raw_html(html):
     return notice_map
 
 
+def _extract_edit_id_map_from_raw_html(html):
+    order_no_positions = [(m.start(), m.group(0)) for m in re.finditer(ORDER_NO_REGEX, html)]
+    edit_id_map = {}
+    for i, (pos, order_no) in enumerate(order_no_positions):
+        end = order_no_positions[i + 1][0] if i + 1 < len(order_no_positions) else len(html)
+        segment = html[pos:end]
+        m = re.search(r"/purchase/edit/(\d+)", segment)
+        if m:
+            edit_id_map[order_no] = m.group(1)
+    return edit_id_map
+
+
 def find_pending_stored_value_orders(
     env_name, backend_email, backend_password,
     date_s=None, date_e=None,
@@ -3349,6 +3361,7 @@ def find_pending_stored_value_orders(
     # 分頁抓取時，順便把每一頁的原始 HTML 留著，才能判斷客服備註是否為空白
     all_blocks = []
     notice_map = {}
+    edit_id_map = {}
     for page in range(1, max_pages + 1):
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update(pre_filter)
@@ -3361,6 +3374,7 @@ def find_pending_stored_value_orders(
             break
         all_blocks.extend(blocks)
         notice_map.update(_extract_notice_map_from_raw_html(resp.text))
+        edit_id_map.update(_extract_edit_id_map_from_raw_html(resp.text))
         if len(blocks) < 20:
             break
 
@@ -3388,7 +3402,7 @@ def find_pending_stored_value_orders(
 
         if allowed_status_texts and status_text not in allowed_status_texts:
             continue
-        notice_text = _fetch_order_edit_notice(session, order_no)
+        notice_text = _fetch_order_edit_notice(session, order_no, edit_id_map.get(order_no))
         if notice_text is None:
             continue
         has_notice = bool(str(notice_text).strip())
@@ -3422,8 +3436,8 @@ def _purchase_edit_id_from_order_no(order_no):
     return str(int(digits)) if digits else ""
 
 
-def _fetch_order_edit_notice(session, order_no):
-    edit_id = _purchase_edit_id_from_order_no(order_no) or _fetch_order_edit_id(session, order_no)
+def _fetch_order_edit_notice(session, order_no, edit_id=None):
+    edit_id = edit_id or _fetch_order_edit_id(session, order_no) or _purchase_edit_id_from_order_no(order_no)
     if not edit_id:
         return None
     resp = session.get(f"{BASE_URL}/purchase/edit/{edit_id}", headers=HEADERS, allow_redirects=True)
