@@ -3260,10 +3260,10 @@ def find_orders_without_line_link(
         if paid_at_e and (not paid_date or paid_date > paid_at_e):
             continue
 
-        if "LINE" in lines:
-            continue
         line_blank = _order_edit_line_url_is_blank(session, order_no, edit_id_map.get(order_no))
         if line_blank is False:
+            continue
+        if line_blank is None and "LINE" in lines:
             continue
 
         phone = ""
@@ -3274,6 +3274,8 @@ def find_orders_without_line_link(
                 if idx > 0:
                     name = lines[idx - 1]
                 break
+        if "檸檬" in name or "保留" in name:
+            continue
         results.append({"order_no": order_no, "name": name, "phone": phone})
 
     return results
