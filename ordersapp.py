@@ -925,6 +925,11 @@ elif mode == "查詢無LINE連結訂單":
             f"符合「沒有LINE連結」{nl_debug['matched_without_line']} 筆。"
             "（如果候選訂單是 0 筆，代表問題出在登入/篩選這一關，不是真的都有 LINE 連結）"
         )
+        if nl_debug.get("hit_page_limit"):
+            st.warning(
+                f"⚠️ 掃描撞到頁數上限（80 頁）就停了，代表符合篩選條件的候選訂單可能還有更多"
+                "沒掃到，結果可能不完整。建議縮小日期範圍，或請 Claude 調高 max_pages。"
+            )
     if nl_results is not None:
         if nl_results:
             st.warning(f"⚠️ 找到 {len(nl_results)} 筆沒有LINE連結的訂單：")
@@ -999,6 +1004,11 @@ elif mode == "儲值獎金備註":
             f"後台掃描到候選訂單 {bn_debug['scanned_candidates']} 筆，符合條件 {bn_debug['matched']} 筆。"
             "（如果候選訂單是 0 筆，代表問題出在登入/篩選這一關）"
         )
+        if bn_debug.get("hit_page_limit"):
+            st.warning(
+                f"⚠️ 掃描撞到頁數上限（80 頁）就停了，結果可能不完整。"
+                "建議縮小日期範圍，或請 Claude 調高 max_pages。"
+            )
     if bn_results is not None:
         if bn_results:
             st.success(f"✅ 找到 {len(bn_results)} 筆符合條件的儲值金訂單：")
