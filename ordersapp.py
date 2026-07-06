@@ -1,11 +1,17 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.44
+# 版本：v8.45
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-07-13
+# 最後更新：2026-07-07
 #
 # Change Log
-# v8.44
+# v8.45
+# - 顯示新客建單流程回傳的 existing_member_warning（電話其實已是舊客會員
+#   時的提醒）。
+# - 舊客服務地址欄位新增「➕ 輸入新地址」選項：原本只能從既有地址下拉選單
+#   挑選，選了新地址選項後會跳出文字輸入框，供客服直接輸入新地址。
+# - 14/15 搜尋結果加上除錯資訊顯示（候選訂單數、是否撞到頁數上限）。
+# 舊版：v8.44（最後更新誤植為 2026-07-13，今天實際日期為 2026-07-07）
 # - 儲值獎金備註的付款狀態下拉選單新增「待付款＋已付款」組合選項。
 # v8.43
 # - 配合 orders.py v2026.07.13：儲值獎金備註畫面新增「付款狀態」篩選
@@ -1257,11 +1263,32 @@ else:
                 step("3", "舊客服務資訊")
                 info_panel("使用說明", ["先確認服務地址。", "確認服務類別、付款方式與區域。", "依客人狀況選擇『已知日期』或『依需求搜尋』。"])
                 if not addr_options:
-                    st.error("此會員沒有留存地址，請改用新客建單或先至後台補會員地址。")
+                    # v2026.07.06 修正：原本會員沒有留存地址就直接擋下、要求改走
+                    # 新客建單，但後端（quick_create_order／quick_check_available_slots）
+                    # 現在已經支援舊客約新地址，這裡改成給一個文字輸入框讓客服直接輸入。
+                    st.warning("此會員沒有留存地址，請直接輸入本次服務的新地址。")
+                    q_address = st.text_input("服務地址（新地址）", key="old_address_new_only").strip()
+                    last_summary = None
                 else:
                     last_summary = get_last_paid_summary(lookup["session"], lookup["phone"], member_payload, addr_options)
                     default_addr_index = addr_options.index(last_summary["address"]) if last_summary and last_summary.get("address") in addr_options else 0
-                    q_address = st.selectbox("服務地址", addr_options, index=default_addr_index, key="old_address")
+                    NEW_ADDRESS_OPTION = "➕ 輸入新地址（不在下面清單裡）"
+                    q_address_choice = st.selectbox(
+                        "服務地址", addr_options + [NEW_ADDRESS_OPTION],
+                        index=default_addr_index, key="old_address",
+                    )
+                    if q_address_choice == NEW_ADDRESS_OPTION:
+                        # v2026.07.06 修正：原本這裡只能從會員既有地址清單挑選，
+                        # 舊客要約沒約過的新地址完全沒有輸入管道，只能被迫走新客
+                        # 建單流程。現在加一個「輸入新地址」選項，選了之後給文字
+                        # 輸入框，讓客服直接打新地址，後端會用 geocode+查詢區域
+                        # 的方式處理（跟新客建單新地址邏輯一致）。
+                        q_address = st.text_input("新服務地址", key="old_address_new").strip()
+                    else:
+                        q_address = q_address_choice
+                if not q_address:
+                    st.info("請輸入或選擇服務地址。")
+                elif True:
                     if len(addr_options) > 1:
                         st.caption(f"⚠️ 此客人留存 {len(addr_options)} 個地址，請務必跟客人確認本次地點是否正確。")
                         per_addr_summary = get_last_paid_per_address(lookup["session"], lookup["phone"], member_payload, addr_options, within_days=365)
