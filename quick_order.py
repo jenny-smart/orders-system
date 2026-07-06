@@ -1,10 +1,27 @@
 # ============================================================
 # 檔名：quick_order.py
-# 版本：v8.39
-# 最後更新：2026-07-10
+# 版本：v8.40
+# 最後更新：2026-07-07
 #
 # Change Log
-# v8.39
+# v8.40
+# - 新客建單時查到電話其實已是舊客會員，新增 existing_member_warning 提醒
+#   （不再默默沿用舊會員資料，完全不告知客服）。
+# - 舊客可以約新地址：quick_create_order／quick_check_available_slots
+#   原本地址不在會員既有清單裡就直接擋單，現在改成當新地址處理（跟新客
+#   建單新地址邏輯一致，用 geocode + check_contain 動態算區域）。
+# - quick_create_order 補上跟新客流程一致的 address_mismatch_warning
+#   （比對後台實際存的地址跟送出地址是否一致）。
+# - 修正 check_contain 參數名稱打錯的 bug：新客新地址那段原本送
+#   member_id/clean_type_id（snake_case），後台實際要的是
+#   memberId/cleanTypeId（camelCase，比對後台原始頁面 JS 確認），打錯導致
+#   後台永遠收不到正確參數、查無區域。
+# - LINE通知服務名稱不再寫死「居家清潔」，改成依 clean_type_id／訂單卡片
+#   文字動態代入正確服務名稱（build_line_message 新增 CLEAN_TYPE_NAME_MAP；
+#   用訂單編號查詢時新增 _extract_service_type_label 直接從卡片文字判斷）。
+# - 儲值金購買 LINE 訊息（信用卡/ATM）原本 6 段文字全部黏在一起，補上段落
+#   空行。
+# 舊版：v8.39（最後更新誤植為 2026-07-10，今天實際日期為 2026-07-07）
 # - 修正合併訂單 LINE 訊息重複顯示人時的 bug：_format_period_display 本身
 #   就會組好「（Ｎ人Ｍ小時），共X人時」的完整格式，之前又手動在後面重複
 #   加了一次同樣的文字，導致實際服務時間那行出現兩次一樣的人時說明。
@@ -753,6 +770,23 @@ def _date_not_after_today(date_text):
         return datetime.strptime(str(date_text), "%Y-%m-%d").date() <= date.today()
     except Exception:
         return False
+
+
+def _extract_service_type_label(lines):
+    """
+    v2026.07.06：從訂單卡片的文字行裡抓實際服務類型（居家清潔／辦公室清潔／
+    裝修細清／大掃除／搬出清潔／搬入清潔），用於「用訂單編號查詢/重新產生
+    LINE通知」這個路徑——之前這裡完全沒有抓服務類型，導致 build_line_message
+    永遠拿不到 clean_type_id，訊息一律顯示「居家清潔」，不管實際訂的是什麼
+    服務。訂單列表卡片上服務類型是獨立一行文字（例如圖片裡的橘字「辦公室
+    清潔」），直接逐行比對已知類別名稱即可。
+    """
+    known_labels = ["居家清潔", "辦公室清潔", "裝修細清", "大掃除", "搬出清潔", "搬入清潔"]
+    for line in lines:
+        text = str(line).strip()
+        if text in known_labels:
+            return text
+    return ""
 
 
 def _extract_payway_line(joined_text):
@@ -2578,7 +2612,10 @@ def build_line_message(order_result):
     CLEAN_TYPE_NAME_MAP = {
         "1": "居家清潔", "2": "辦公室清潔", "3": "裝修細清",
     }
-    service_label = CLEAN_TYPE_NAME_MAP.get(str(order_result.get("clean_type_id") or ""), "居家清潔")
+    service_label = (
+        order_result.get("service_label")
+        or CLEAN_TYPE_NAME_MAP.get(str(order_result.get("clean_type_id") or ""), "居家清潔")
+    )
     payway = order_result["payway"]
     region = order_result["region"]
     date_disp = order_result["date"].replace("-", "/")
@@ -3233,7 +3270,8 @@ def build_line_message_from_order_no(env_name, backend_email, backend_password, 
         "period_s": service_time, "actual_period": actual_time, "combined_period": "",
         "person": person_extracted, "service_amount": service_amount,
         "price_with_tax": service_amount, "fare": fare, "payway": payway,
-        "region": region, "env_name": env_name, "session": session,
+        "region": region, "service_label": _extract_service_type_label(lines),
+        "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={block['order_no']}",
     }
     return result, build_line_message(result)
@@ -3270,10 +3308,16 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
             raise Exception(f"訂單 {ono} 缺少服務地址，無法合併")
         if not payway:
             raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
-        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region})
+        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines)})
     payways = {o["payway"] for o in orders_info if o["payway"]}
     if len(payways) > 1:
         raise Exception(f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。")
+    # v2026.07.06：跟付款方式一樣，合併多筆訂單時服務類型也可能不同
+    # （例如一筆居家清潔一筆辦公室清潔），不能只沿用第一筆的服務類型，
+    # 否則訊息裡的服務名稱可能跟其中一筆訂單實際的服務不符。
+    service_labels = {o["service_label"] for o in orders_info if o["service_label"]}
+    if len(service_labels) > 1:
+        raise Exception(f"合併的訂單服務類型不同（{', '.join(service_labels)}），請分開輸入分別產生通知。")
     unique_dates = sorted({o["service_date"] for o in orders_info})
     all_same_date = len(unique_dates) == 1
     if all_same_date:
@@ -3312,7 +3356,8 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "multi_date": multi_date, "person": first["person"],
         "service_amount": amount_display, "price_with_tax": str(total_amount),
         "fare": str(total_fare) if total_fare else "0", "payway": first["payway"],
-        "region": first["region"], "env_name": env_name, "session": session,
+        "region": first["region"], "service_label": first["service_label"],
+        "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
     }
     return result, build_line_message(result)
