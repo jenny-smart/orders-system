@@ -1,11 +1,22 @@
 # ============================================================
 # 檔名：orders.py
-# 版本：v2026.07.13-2
+# 版本：v2026.07.07-1
 # 模組：批次建單核心引擎（Google Sheet → 後台訂單，供 ordersapp.py 呼叫）
-# 最後更新：2026-07-13
+# 最後更新：2026-07-07
 #
 # Change Log
-# v2026.07.13-2
+# v2026.07.07-1
+# - 修正 add_bonus_note_to_order 找不到編輯ID的 bug：原本只靠線上搜尋拿
+#   編輯ID，找不到就直接失敗；現在加上跟其他函式一致的 fallback，改用
+#   訂單編號直接算編輯ID（_purchase_edit_id_from_order_no）。
+# - find_orders_without_line_link / find_pending_stored_value_orders 新增
+#   return_debug 參數，回傳候選訂單數/是否撞到頁數上限等除錯資訊。
+# - 修正 LOGIN_URL 沒有跟著 env_name 切換環境的 bug（3處：
+#   find_orders_without_line_link、find_pending_stored_value_orders、
+#   apply_bonus_notes）：原本只切換 BASE_URL/PURCHASE_URL，LOGIN_URL 卻
+#   永遠停在模組載入當下 env.py 的 ENV 對應網域，導致選 prod 時其實是
+#   登入 dev、卻拿 dev 的 session cookie 去查 prod，永遠查不到資料。
+# 舊版：v2026.07.13-2（此日期為先前誤植，今天實際日期為 2026-07-07）
 # - find_pending_stored_value_orders 的 purchase_status 參數新增支援傳入
 #   list/tuple（例如 ["0","1"] 代表「待付款＋已付款」的組合篩選）。因為
 #   後台的付款狀態欄位只吃單一值，傳清單時不會送給後台篩選，改成抓回來
