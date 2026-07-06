@@ -3170,6 +3170,7 @@ def find_orders_without_line_link(
     paid_at_s=None, paid_at_e=None,
     clean_date_s=None, clean_date_e=None,
     max_pages=80,
+    return_debug=False,
 ):
     """
     v2026.07.11-3：獨立工具——搜尋「訂購資訊」欄位裡沒有 LINE 連結的訂單，
@@ -3278,6 +3279,18 @@ def find_orders_without_line_link(
             continue
         results.append({"order_no": order_no, "name": name, "phone": phone})
 
+    if return_debug:
+        # v2026.07.06：診斷用資訊，方便分辨「prod 找不到資料」到底是卡在
+        # 哪一關——是後台列表頁根本抓不到候選訂單（scanned_candidates 是
+        # 0，代表登入/篩選參數/分頁在該環境有問題），還是候選訂單有抓到、
+        # 只是逐筆判斷後真的都有 LINE 連結。
+        debug = {
+            "env": env_name,
+            "base_url": BASE_URL,
+            "scanned_candidates": len(all_blocks),
+            "matched_without_line": len(results),
+        }
+        return results, debug
     return results
 
 
@@ -3326,6 +3339,7 @@ def find_pending_stored_value_orders(
     purchase_status=None,
     notice_status="blank",
     max_pages=80,
+    return_debug=False,
 ):
     """
     v2026.07.13-2：獨立工具——搜尋「購買項目：儲值金」且「客服備註是空白」的
@@ -3448,6 +3462,14 @@ def find_pending_stored_value_orders(
             "notice": notice_text,
         })
 
+    if return_debug:
+        debug = {
+            "env": env_name,
+            "base_url": BASE_URL,
+            "scanned_candidates": len(all_blocks),
+            "matched": len(results),
+        }
+        return results, debug
     return results
 
 
@@ -3517,7 +3539,15 @@ def add_bonus_note_to_order(session, base_url, order_no, bonus_names):
     解析。改成優先從這包 JSON 讀出這些欄位的真實值，蓋掉靜態 HTML 解析
     可能抓錯的部分，只有「notice」這個欄位是我們自己要更新的。
     """
-    edit_id = _fetch_order_edit_id(session, order_no)
+    # v2026.07.06 修正：跟 _order_edit_line_url_is_blank / _fetch_order_edit_notice
+    # 用同一套「先試線上搜尋，找不到再退而求其次用訂單編號直接算」的邏輯。
+    # 原本這裡只呼叫 _fetch_order_edit_id（用 orderNo 參數送一次 PURCHASE_URL
+    # 查詢），如果那次查詢因為任何原因沒抓到（分頁、篩選參數、prod 資料量
+    # 較大等），就直接判定「找不到編輯 ID」而失敗，即使訂單編號本身其實
+    # 就能算出正確的編輯 ID（LC00212093 → 212093，跟後台編輯頁網址
+    # /purchase/edit/212093 一致）。加上這個 fallback 之後，就算線上搜尋
+    # 失敗，也能用訂單編號直接算出編輯 ID 繼續執行。
+    edit_id = _fetch_order_edit_id(session, order_no) or _purchase_edit_id_from_order_no(order_no)
     if not edit_id:
         return False, f"找不到訂單 {order_no} 的編輯 ID"
     edit_url = f"{base_url}/purchase/edit/{edit_id}"

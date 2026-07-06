@@ -899,7 +899,7 @@ elif mode == "查詢無LINE連結訂單":
         else:
             try:
                 with st.spinner("登入後台 → 搜尋訂單中（依篩選範圍大小，可能需要一點時間）…"):
-                    nl_results = find_orders_without_line_link(
+                    nl_results, nl_debug = find_orders_without_line_link(
                         env_name=env,
                         backend_email=backend_email.strip(),
                         backend_password=backend_password.strip(),
@@ -909,12 +909,22 @@ elif mode == "查詢無LINE連結訂單":
                         paid_at_e=nl_paid_e.strftime("%Y-%m-%d") if nl_paid_e else None,
                         clean_date_s=nl_clean_s.strftime("%Y-%m-%d") if nl_clean_s else None,
                         clean_date_e=nl_clean_e.strftime("%Y-%m-%d") if nl_clean_e else None,
+                        return_debug=True,
                     )
                 st.session_state.nl_results = nl_results
+                st.session_state.nl_debug = nl_debug
             except Exception as e:
                 st.error(f"搜尋失敗：{e}")
 
     nl_results = st.session_state.get("nl_results")
+    nl_debug = st.session_state.get("nl_debug")
+    if nl_debug is not None:
+        st.caption(
+            f"🔧 除錯資訊：環境＝{nl_debug['env']}，實際連線＝{nl_debug['base_url']}，"
+            f"後台掃描到候選訂單 {nl_debug['scanned_candidates']} 筆，"
+            f"符合「沒有LINE連結」{nl_debug['matched_without_line']} 筆。"
+            "（如果候選訂單是 0 筆，代表問題出在登入/篩選這一關，不是真的都有 LINE 連結）"
+        )
     if nl_results is not None:
         if nl_results:
             st.warning(f"⚠️ 找到 {len(nl_results)} 筆沒有LINE連結的訂單：")
@@ -963,7 +973,7 @@ elif mode == "儲值獎金備註":
         else:
             try:
                 with st.spinner("登入後台 → 搜尋儲值金待處理訂單中…"):
-                    bn_results = find_pending_stored_value_orders(
+                    bn_results, bn_debug = find_pending_stored_value_orders(
                         env_name=env,
                         backend_email=backend_email.strip(),
                         backend_password=backend_password.strip(),
@@ -973,13 +983,22 @@ elif mode == "儲值獎金備註":
                         paid_at_e=bn_paid_e.strftime("%Y-%m-%d") if bn_paid_e else None,
                         purchase_status=bn_status_map[bn_status_label],
                         notice_status=bn_notice_map[bn_notice_label],
+                        return_debug=True,
                     )
                 st.session_state.bn_results = bn_results
+                st.session_state.bn_debug = bn_debug
                 st.session_state.bn_apply_results = None
             except Exception as e:
                 st.error(f"搜尋失敗：{e}")
 
     bn_results = st.session_state.get("bn_results")
+    bn_debug = st.session_state.get("bn_debug")
+    if bn_debug is not None:
+        st.caption(
+            f"🔧 除錯資訊：環境＝{bn_debug['env']}，實際連線＝{bn_debug['base_url']}，"
+            f"後台掃描到候選訂單 {bn_debug['scanned_candidates']} 筆，符合條件 {bn_debug['matched']} 筆。"
+            "（如果候選訂單是 0 筆，代表問題出在登入/篩選這一關）"
+        )
     if bn_results is not None:
         if bn_results:
             st.success(f"✅ 找到 {len(bn_results)} 筆符合條件的儲值金訂單：")
