@@ -1,10 +1,14 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.45
+# 版本：v8.46
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-07
 #
 # Change Log
+# v8.46
+# - 「新客資料拆解」（貼上整段文字建單）加上明確的電話查會員步驟：解析出
+#   電話後可按鈕查詢是否已是既有會員，是的話直接告知（含既有地址），
+#   不用等建單失敗/成功才知道，跟「舊客快速建單」一樣先查電話再繼續。
 # v8.45
 # - 顯示新客建單流程回傳的 existing_member_warning（電話其實已是舊客會員
 #   時的提醒）。
@@ -1454,6 +1458,42 @@ else:
                 st.selectbox("付款方式（手動選擇）", ["信用卡", "ATM"], key="nc_payway_manual_select")
             elif _nc_live_parsed.get("payway"):
                 st.caption(f"✅ 已偵測付款方式：{_nc_live_parsed['payway']}")
+
+            # v2026.07.07：不管新客舊客，都應該先查電話是不是已經是會員，
+            # 而不是等建單失敗/成功之後才知道。這裡加一個明確的查詢按鈕
+            # （不自動查，避免每次貼上內容變動都觸發一次後台登入），
+            # 查到既有會員就直接告知，並列出既有地址供參考，避免客服
+            # 誤把舊客當新客處理。
+            _nc_phone_parsed = _nc_live_parsed.get("phone", "").strip()
+            if _nc_phone_parsed:
+                if st.button("🔍 查詢此電話是否為既有會員", key="nc_member_check_btn"):
+                    if not backend_email.strip() or not backend_password.strip():
+                        st.error("請先在上方輸入後台帳號密碼")
+                    else:
+                        try:
+                            with st.spinner("查詢中…"):
+                                st.session_state.nc_member_check = qo.quick_lookup_member(
+                                    env_name=env, backend_email=backend_email.strip(),
+                                    backend_password=backend_password.strip(),
+                                    phone=_nc_phone_parsed,
+                                    clean_type_id=CLEAN_TYPE_ID_MAP.get("居家清潔", "1"),
+                                )
+                        except Exception as e:
+                            st.error(f"查詢失敗：{e}")
+                _nc_check = st.session_state.get("nc_member_check")
+                if _nc_check is not None:
+                    _nc_check_member = _nc_check.get("member_payload")
+                    if _nc_check_member:
+                        _m = _nc_check_member.get("member", {})
+                        _addrs = [a.get("address", "") for a in _nc_check_member.get("member", {}).get("memberAddressList", []) if a.get("address")]
+                        st.warning(
+                            f"⚠️ 這支電話（{_nc_phone_parsed}）其實已經是舊客會員"
+                            f"（姓名：{_m.get('name', '')}），不是新客！"
+                            + (f" 既有地址：{'、'.join(_addrs)}" if _addrs else "")
+                            + " 建議改用「舊客快速建單」處理，避免漏看歷史訂單/地址。"
+                        )
+                    else:
+                        st.success(f"✅ 這支電話（{_nc_phone_parsed}）查無會員資料，是新客，可以繼續往下建單。")
 
         step("2", "服務設定")
         sc1, sc2, sc3 = st.columns(3)
