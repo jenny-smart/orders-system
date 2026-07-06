@@ -4049,9 +4049,18 @@ def quick_create_new_customer_order(env_name, backend_email, backend_password, c
         check_resp = session.post(
             f"{base_url}/ajax/check_contain",
             data={
-                "_token": csrf, "member_id": member_id,
+                # v2026.07.06 修正：後台 /ajax/check_contain 實際要的參數名稱是
+                # camelCase（memberId／cleanTypeId），跟畫面手動點「查詢地區」時
+                # 送出的一致（後台原始頁面 JS：'memberId=' + ... + '&cleanTypeId=' + ...）。
+                # 這裡原本誤用成 snake_case（member_id／clean_type_id），後台完全
+                # 收不到正確的會員 ID 和服務類別，導致 check_contain 永遠查不到
+                # 正確區域——不管地址寫得多正確都一樣會失敗，或（改這個修正前）
+                # 靜默套用固定 fallback 值，導致每筆新地址都被誤標成同一個區域
+                # （例如大安區）。這才是「常常是大安區」現象的真正原因，不是後台
+                # 自己的地址正規化行為。
+                "_token": csrf, "memberId": member_id,
                 "address": address, "lat": str(geo_lat or ""), "lng": str(geo_lng or ""),
-                "clean_type_id": clean_type_id,
+                "cleanTypeId": clean_type_id,
             },
             headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
         )
