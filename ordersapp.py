@@ -1602,6 +1602,8 @@ else:
                 st.warning(_r["price_mismatch_warning"])
             if _r.get("address_mismatch_warning"):
                 st.warning(_r["address_mismatch_warning"])
+            if _r.get("existing_member_warning"):
+                st.warning(_r["existing_member_warning"])
             if _r.get("order_no_duplicated"):
                 show_duplicate_order_warning(_r.get("order_no"), _r.get("order_no_duplicate_count", 2), dedup_key=f"nc_{_r.get('order_no')}")
             if not _r.get("mail_sent"):
