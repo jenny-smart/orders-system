@@ -3225,19 +3225,23 @@ def find_orders_without_line_link(
 
     all_blocks = []
     edit_id_map = {}
+    hit_page_limit = True
     for page in range(1, max_pages + 1):
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update(pre_filter)
         params["page"] = str(page)
         resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
         if resp.status_code != 200:
+            hit_page_limit = False
             break
         blocks = extract_order_cards_from_purchase_html(resp.text)
         if not blocks:
+            hit_page_limit = False
             break
         all_blocks.extend(blocks)
         edit_id_map.update(_extract_edit_id_map_from_raw_html(resp.text))
         if len(blocks) < 20:
+            hit_page_limit = False
             break
 
     results = []
@@ -3289,6 +3293,7 @@ def find_orders_without_line_link(
             "base_url": BASE_URL,
             "scanned_candidates": len(all_blocks),
             "matched_without_line": len(results),
+            "hit_page_limit": hit_page_limit,
         }
         return results, debug
     return results
@@ -3396,20 +3401,24 @@ def find_pending_stored_value_orders(
     all_blocks = []
     notice_map = {}
     edit_id_map = {}
+    hit_page_limit = True
     for page in range(1, max_pages + 1):
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update(pre_filter)
         params["page"] = str(page)
         resp = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
         if resp.status_code != 200:
+            hit_page_limit = False
             break
         blocks = extract_order_cards_from_purchase_html(resp.text)
         if not blocks:
+            hit_page_limit = False
             break
         all_blocks.extend(blocks)
         notice_map.update(_extract_notice_map_from_raw_html(resp.text))
         edit_id_map.update(_extract_edit_id_map_from_raw_html(resp.text))
         if len(blocks) < 20:
+            hit_page_limit = False
             break
 
     results = []
@@ -3468,6 +3477,7 @@ def find_pending_stored_value_orders(
             "base_url": BASE_URL,
             "scanned_candidates": len(all_blocks),
             "matched": len(results),
+            "hit_page_limit": hit_page_limit,
         }
         return results, debug
     return results
