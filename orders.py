@@ -3195,7 +3195,7 @@ def find_orders_without_line_link(
     </a>，這裡用 extract_order_cards_from_purchase_html 解析後只留得下
     "LINE" 這個文字），沒有 LINE 的客人這一行整個不會出現。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
         ORDER_PREFIX = ORDER_PREFIX_DEV
@@ -3203,6 +3203,10 @@ def find_orders_without_line_link(
         BASE_URL = BASE_URL_PROD
         ORDER_PREFIX = ORDER_PREFIX_PROD
     PURCHASE_URL = f"{BASE_URL}/purchase"
+    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
+    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
+    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
+    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
@@ -3364,7 +3368,7 @@ def find_pending_stored_value_orders(
     「客服備註是否為空白」用 _extract_notice_map_from_raw_html 從原始
     HTML 判斷（get_text() 純文字解析看不到這個資訊）。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
         ORDER_PREFIX = ORDER_PREFIX_DEV
@@ -3372,6 +3376,10 @@ def find_pending_stored_value_orders(
         BASE_URL = BASE_URL_PROD
         ORDER_PREFIX = ORDER_PREFIX_PROD
     PURCHASE_URL = f"{BASE_URL}/purchase"
+    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
+    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
+    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
+    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
@@ -3625,7 +3633,7 @@ def apply_bonus_notes(env_name, backend_email, backend_password, mapping):
     [{"order_no": ..., "cust_name": ..., "bonus_names": [...]}]
     這裡統一登入一次後，逐筆呼叫 add_bonus_note_to_order。
     """
-    global BASE_URL, ORDER_PREFIX, PURCHASE_URL
+    global BASE_URL, ORDER_PREFIX, PURCHASE_URL, LOGIN_URL
     if env_name == "dev":
         BASE_URL = BASE_URL_DEV
         ORDER_PREFIX = ORDER_PREFIX_DEV
@@ -3633,6 +3641,10 @@ def apply_bonus_notes(env_name, backend_email, backend_password, mapping):
         BASE_URL = BASE_URL_PROD
         ORDER_PREFIX = ORDER_PREFIX_PROD
     PURCHASE_URL = f"{BASE_URL}/purchase"
+    LOGIN_URL = f"{BASE_URL}/login"  # v2026.07.06 修正：原本這裡漏了同步更新 LOGIN_URL，
+    # 導致不管選哪個環境，login() 永遠登入模組載入當下 env.py 的 ENV 對應網域
+    # （目前是 dev），session cookie 只在該網域有效，選 prod 時後續查詢就會
+    # 因為帶著錯網域的 cookie 被當成未登入，掃到 0 筆候選訂單。
 
     session = requests.Session()
     if not login(session, backend_email, backend_password):
