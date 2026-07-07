@@ -2,6 +2,12 @@
 # 檔名：tools/memo_system/ui.py（原 memo-system/memoapp.py）
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
+# 更新記錄：
+# 2026-07-08
+# - ATM 待付款清單的預設訂購日期迄改用 atm.default_date_until_tw()，避免
+#   Streamlit Cloud UTC 日期造成前一天判斷錯誤。
+# - 清潔異動加時/減時發生時間改為「服務前／專員回報」，移除「服務後」。
+# - 清潔異動階段 B 畫面文案改為待加收/已加收，對應 change_order.py v1.9。
 # ============================================================
 def render_memo_system(forced_main_section=None, shared_backend_email=None, shared_backend_password=None, shared_env=None):
     # memoapp.py
@@ -628,7 +634,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "🔄 服務異動": """
         <div class="info-strip"><b>支援項目</b><ul>
         <li>車馬費、異動費</li><li>服務前加時、服務前減時</li>
-        <li>服務後加時、服務後減時</li><li>退款、客訴退款、物損退款</li>
+        <li>專員回報加時、專員回報減時</li><li>退款、客訴退款、物損退款</li>
         </ul><b>建議流程</b><ol>
         <li>階段 A：查詢試算</li><li>確認後寫入工作表</li><li>階段 B：同步回後台</li>
         </ol></div>""",
@@ -981,7 +987,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("3", "待付款清單查詢")
         c1, c2 = st.columns([1, 2])
         with c1: region = st.selectbox("要貼到哪個地區的工作表", ["台北", "台中"], key="atm_list_region")
-        with c2: date_until = st.date_input("訂購日期-迄（預設為前一天）", value=date.today() - timedelta(days=1), key="atm_list_date_until")
+        with c2: date_until = st.date_input("訂購日期-迄（預設為前一天）", value=date.fromisoformat(atm.default_date_until_tw()), key="atm_list_date_until")
 
         search_btn = st.button("🔍 查詢待付款 ATM 名單", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
@@ -1237,9 +1243,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # ============================================================
 
     SCENARIO_OPTIONS = [
-        "僅開車馬費發票", "異動費(待收款)", "異動費(待退款)",
-        "異動平日轉週末(待收款)", "異動週末轉平日(待退款)",
-        "加時(待收款)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
+        "僅開車馬費發票", "異動費(待加收)", "異動費(待退款)",
+        "異動平日轉週末(待加收)", "異動週末轉平日(待退款)",
+        "加時(待加收)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
     ]
 
     def _order_money(order, key, default=0):
@@ -1256,9 +1262,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         return 30
 
     def apply_time_change_label(row, scenario, timing):
-        prefix = f"{timing}加時" if scenario == "加時(待收款)" else f"{timing}減時"
+        prefix = f"{timing}加時" if scenario == "加時(待加收)" else f"{timing}減時"
         j = str(row.get("J", ""))
-        for old in ("服務前加時", "當天加時", "服務後加時", "服務前減時", "當天減時", "服務後減時"):
+        for old in ("服務前加時", "當天加時", "服務後加時", "專員回報加時", "服務前減時", "當天減時", "服務後減時", "專員回報減時"):
             j = j.replace(old, prefix)
         if j: row["J"] = j
         note = str(row.get("_calc_note", ""))
@@ -1370,7 +1376,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         c1, c2 = st.columns([1, 1.5])
         with c1:
             scenario = st.radio("情境", SCENARIO_OPTIONS, key="co_scenario")
-            is_time_change = scenario in ("加時(待收款)", "減時(待退款)")
+            is_time_change = scenario in ("加時(待加收)", "減時(待退款)")
             is_manual_refund = scenario in ("客訴(待退款)", "物損(待退款)")
             time_change_timing = "服務前"; change_hours = None; change_person = None
             if is_time_change:
@@ -1381,10 +1387,10 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 else:
                     try: _svc_date = date.fromisoformat(str(_svc))
                     except: _svc_date = date.today()
-                _auto_timing = "服務後" if _svc_date <= date.today() else "服務前"
-                _auto_idx = 1 if _auto_timing == "服務後" else 0
+                _auto_timing = "專員回報" if _svc_date <= date.today() else "服務前"
+                _auto_idx = 1 if _auto_timing == "專員回報" else 0
                 st.caption(f"⚡ 依服務日 {_svc_date} 自動判斷：{_auto_timing}（可手動調整）")
-                time_change_timing = st.radio("加減時發生時間", ["服務前", "服務後"], index=_auto_idx, horizontal=True, key="co_time_change_timing")
+                time_change_timing = st.radio("加減時發生時間", ["服務前", "專員回報"], index=_auto_idx, horizontal=True, key="co_time_change_timing")
                 change_hours = st.number_input("異動時數（小時）", min_value=0.0, step=0.5, value=1.0, key="co_time_hours")
                 change_person = st.number_input("異動人數", min_value=1, step=1, value=1, key="co_time_person")
             manual_amount = None
@@ -1403,7 +1409,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 for order in selected_orders:
                     if scenario == "僅開車馬費發票":
                         calc_rows.append(change_order.build_fare_row(order, service_date=service_date_input)); continue
-                    if scenario == "加時(待收款)":
+                    if scenario == "加時(待加收)":
                         time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
                         row = change_order.build_addtime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
@@ -1411,7 +1417,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
                         row = change_order.build_reducetime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
-                    if scenario == "異動平日轉週末(待收款)":
+                    if scenario == "異動平日轉週末(待加收)":
                         time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.TIME_RATE_DAY_TYPE_DIFF, label="平日轉週末每人時差額")
                         calc_rows.append(change_order.build_weekday_to_weekend_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "異動週末轉平日(待退款)":
@@ -1422,7 +1428,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     if scenario == "物損(待退款)":
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_DAMAGE_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     fee_info = change_order.calc_change_fee(order, service_date=service_date_input)
-                    if scenario == "異動費(待收款)":
+                    if scenario == "異動費(待加收)":
                         calc_rows.append(change_order.build_charge_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     else:
                         fee_info = apply_refund_fee_on_service_amount(order, fee_info)
@@ -1474,7 +1480,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_change_order_stage_b():
         step("3", "讀取清潔異動工作表待處理列")
-        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依狀態寫回後台</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待加收、待退款、已加收、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依狀態寫回後台</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
         c_region, c_rows = st.columns([1, 3])
         with c_region:
             region = st.selectbox("地區", ["台北", "台中"], key="co_region_b")
@@ -1507,7 +1513,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.markdown("---"); step("4", "待處理清單（請勾選要回填的項目）")
             selected = []
             for item in pending:
-                status = item.get("status") or ("待收款" if item["kind"] == "charge" else "待退款")
+                status = item.get("status") or ("待加收" if item["kind"] == "charge" else "待退款")
                 checked = st.checkbox(f"{item['order_no']}（{status}，Sheet 第 {item['sheet_row']} 列）", value=True, key=f"co_pick_{item['sheet_row']}")
                 detail = f"H 欄姓名：{item.get('customer_name','')}　｜　J 欄：{item.get('j_note','')}"
                 if item.get("kind") == "refund": detail += f"　｜　Y 欄：{item.get('refund_invoice_type','')}"
@@ -1706,4 +1712,3 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     elif main_section == "📐 評估文字工具":
         render_assessment_section()
-
