@@ -32,10 +32,9 @@ ATM 對帳自動化模組
 
 修正（2026-07-07 之二）：
 - search_atm_unpaid_orders 回傳的每筆資料新增 "line_url"（從 purchaseList
-  內嵌 JSON 的 member.line 直接取得，不用另外爬頁面），供 UI 端把姓名做成
-  可點擊的 LINE 連結。注意：paste_atm_unpaid_list 寫入 Sheet 的 I~L 欄沒有
-  加這個新欄位——M 欄（COL_LAST_CODE）已經是「末碼」配對邏輯在用，不能
-  拿來放 LINE 網址，如果要把 LINE 網址也寫進 Sheet，需要另外找一欄。
+  內嵌 JSON 的 member.line 直接取得，不用另外爬頁面）。paste_atm_unpaid_list
+  現在會把這個網址額外寫進 H 欄（跟 I~L 同一列），Google Sheets 會自動把
+  純網址變成可點擊連結；姓名（K欄）本身維持純文字不變。
 """
 import json
 import os
@@ -920,6 +919,13 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
             "range": f"I{row_num}:L{row_num}",
             "values": [[r["year_month"], r["order_no"], r["name"], r["net_amount"]]],
         })
+        # v2026-07-07：LINE 聊天連結網址另外寫進 H 欄（純網址，Google Sheets
+        # 貼上/寫入後會自動變成可點擊連結；不能跟姓名塞在同一格）。
+        if r.get("line_url"):
+            updates.append({
+                "range": f"H{row_num}",
+                "values": [[r["line_url"]]],
+            })
 
     memo.with_retry(ws.batch_update, updates, value_input_option="RAW")
 
