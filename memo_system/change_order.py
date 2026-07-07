@@ -1,11 +1,16 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v1.7
+# 版本：v1.8
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-07
 #
 # Change Log
+# v1.8
+# - 所有 build_*_row 函式新增 "D": order.get("line_url", "")，把客戶 LINE
+#   聊天連結網址寫進清潔異動工作表的 D 欄（純網址，Google Sheets 寫入後
+#   會自動變成可點擊連結）。append_rows_to_sheet 不用改，D 欄本來就沒被
+#   K 欄公式那類保護邏輯排除，會照現有機制正常寫入。
 # v1.7
 # - _parse_order_row 新增抓取客戶 LINE 聊天連結網址（line_url），從訂單卡片
 #   裡 chat.line.biz 的 <a> 連結直接取得。customer_name 本身維持純文字不變
@@ -642,6 +647,7 @@ def build_fare_row(order: dict, service_date: date = None, today: date = None) -
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     return {
         "A": "清潔", "B": "待處理發票", "C": TYPE_FARE,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": "", "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": f"車馬費 ${fare}",
@@ -657,6 +663,7 @@ def build_charge_row(order: dict, change_fee_info: dict, service_note: str,
     j_value = _format_change_fee_j(order, change_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
@@ -676,6 +683,7 @@ def build_refund_row(order: dict, change_fee_info: dict, service_note: str,
     j_value = _format_change_fee_j(order, change_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
@@ -752,6 +760,7 @@ def build_addtime_row(order: dict, time_fee_info: dict, service_note: str,
     j_value = _format_people_hours_fee_j(f"{timing}加時", "待收", time_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
@@ -771,6 +780,7 @@ def build_reducetime_row(order: dict, time_fee_info: dict, service_note: str,
     j_value = _format_people_hours_fee_j(f"{timing}減時", "待退", time_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
@@ -793,6 +803,7 @@ def build_weekday_to_weekend_row(order: dict, time_fee_info: dict, service_note:
     j_value = _format_people_hours_fee_j("異動平日轉週末", "待收", time_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
@@ -811,6 +822,7 @@ def build_weekend_to_weekday_row(order: dict, time_fee_info: dict, service_note:
     j_value = _format_people_hours_fee_j("異動週末轉平日", "待退", time_fee_info)
     return {
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
@@ -845,6 +857,7 @@ def build_manual_refund_row(order: dict, amount, refund_type_label: str, service
     )
     return {
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": refund_type_label,
+        "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
         "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
