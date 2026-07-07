@@ -1,11 +1,22 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v1.9
+# 版本：v2.1
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-08
 #
 # Change Log
+# v2.1
+# - B 欄為「已退款」時，已全額／已部份退款改依「退款金額」與「總金額－車馬費」判斷：
+#   退款金額大於等於總金額扣車馬費時回填已全額退款，低於則回填已部份退款。
+# v2.0
+# - ATM 待收款／已收款回填後台時，服務狀態改為已處理，收款方式改讀
+#   Google Sheet R 欄，發票日期改讀 Google Sheet AA 欄，並將待收備註插入
+#   財務備註最上方，不覆蓋原本內容。
+# - 待退款／已部份退款／已全額退款回填後台時，服務狀態改為已處理，
+#   並將待退備註插入財務備註最上方，不覆蓋原本內容。
+# - 異動寫入 Google Sheet 時，F 欄客戶類別改為依付款方式判斷：
+#   付款方式為儲值金寫入 VIP，非儲值金寫入一般客。
 # v1.9
 # - 階段 B 回填系統改以 B 欄「待加收／已加收／待退款／已退款」為準，
 #   並保留舊「待收款／已收款」相容；加收列只回填加收欄位，退款列只回填
@@ -281,7 +292,7 @@ STATUS_DONE_REFUND = "已退款"
 STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待收款"}
 STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已收款"}
 STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND}
-STATUS_DONE_REFUND_ALIASES = {STATUS_DONE_REFUND}
+STATUS_DONE_REFUND_ALIASES = {STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款"}
 SYNC_STATUSES = {
     *STATUS_PENDING_CHARGE_ALIASES,
     *STATUS_PENDING_REFUND_ALIASES,
@@ -669,6 +680,11 @@ def calc_refund_amount(order: dict, change_fee: int) -> int:
     return max(get_service_amount(order) - _money_int(change_fee), 0)
 
 
+def _customer_type_from_order(order: dict) -> str:
+    """Google Sheet F 欄客戶類別：付款方式為儲值金寫 VIP，其他一律寫一般客。"""
+    return "VIP" if str((order or {}).get("payway") or "").strip() == "儲值金" else "一般客"
+
+
 # ============================================================
 # 階段 A-3：組合一筆要寫入 Sheet 的列（三種情境）
 # ============================================================
@@ -681,7 +697,7 @@ def build_fare_row(order: dict, service_date: date = None, today: date = None) -
         "A": "清潔", "B": "待處理發票", "C": TYPE_FARE,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": "", "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": f"車馬費 ${fare}",
         "_calc_amount": fare,
     }
@@ -697,7 +713,7 @@ def build_charge_row(order: dict, change_fee_info: dict, service_note: str,
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
         "K": service_note or "",
         "M": "", "N": change_fee_info["change_fee"], "O": "",
@@ -717,7 +733,7 @@ def build_refund_row(order: dict, change_fee_info: dict, service_note: str,
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
         "J": j_value,
         "K": service_note or "",
@@ -801,7 +817,7 @@ def build_addtime_row(order: dict, time_fee_info: dict, service_note: str,
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
         "K": service_note or "",
         "M": "", "N": time_fee_info["amount"], "O": "",
@@ -821,7 +837,7 @@ def build_reducetime_row(order: dict, time_fee_info: dict, service_note: str,
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
         "J": j_value,
         "K": service_note or "",
@@ -844,7 +860,7 @@ def build_weekday_to_weekend_row(order: dict, time_fee_info: dict, service_note:
         "A": "清潔", "B": STATUS_PENDING_CHARGE, "C": TYPE_CHARGE,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
         "K": service_note or "",
         "M": "", "N": time_fee_info["amount"], "O": "",
@@ -863,7 +879,7 @@ def build_weekend_to_weekday_row(order: dict, time_fee_info: dict, service_note:
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": TYPE_REFUND,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value, "J": j_value,
         "K": service_note or "",
         "R": _refund_payway(order),
@@ -898,7 +914,7 @@ def build_manual_refund_row(order: dict, amount, refund_type_label: str, service
         "A": "清潔", "B": STATUS_PENDING_REFUND, "C": refund_type_label,
         "D": order.get("line_url", ""),
         "E": _today_taipei_str(today),
-        "F": customer_type, "G": order["order_no"], "H": order["customer_name"],
+        "F": _customer_type_from_order(order), "G": order["order_no"], "H": order["customer_name"],
         "I": i_value,
         "J": j_value,
         "K": service_note or "",
@@ -977,6 +993,7 @@ CHECK_REFUND_PARTIAL = [
 ]
 
 FIELD_CHARGE_DATE = ["chargeDate", "charge_date", "addChargeDate", "extraChargeDate"]
+FIELD_CHARGE_PAYMENT = ["chargePayment", "charge_payment", "addChargePayment", "extraChargePayment"]
 FIELD_CHARGE_AMOUNT = ["chargeAmount", "charge_amount", "addChargeAmount", "extraChargeAmount"]
 FIELD_CHARGE_INVOICE = ["chargeInvoice", "charge_invoice", "addChargeInvoice"]
 FIELD_CHARGE_INVOICE_DATE = ["chargeInvoiceDate", "charge_invoice_date", "invoiceDate", "invoice_date"]
@@ -1206,6 +1223,14 @@ def _set_field(form_data: dict, controls: dict, names: list, value,
     return name
 
 
+def _set_progress_done(form_data: dict, controls: dict, ui_logger=None):
+    """服務狀態設定為已處理（後台 progress=1）。"""
+    return _set_field(
+        form_data, controls, ["progress", "progress_status", "progressStatus"], "1",
+        keywords=["服務狀態"], fallback_name="progress", allow_blank=True, ui_logger=ui_logger,
+    )
+
+
 def _prepend_field(form_data: dict, controls: dict, names: list, note: str,
                    keywords: list = None, ui_logger=None):
     note = str(note or "").strip()
@@ -1333,8 +1358,11 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
     if status in STATUS_PENDING_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "1", ui_logger=ui_logger)
         _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
+        _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
+        _set_field(form_data, controls, FIELD_CHARGE_PAYMENT, _sheet_cell(raw, "R"),
+                   keywords=["加收金流", "收款方式", "收款金流"], fallback_name="chargePayment", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_AMOUNT, _sheet_cell(raw, "N"),
                    keywords=["加收金額", "收款金額"], fallback_name="chargeAmount", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_INVOICE, charge_invoice,
@@ -1353,6 +1381,7 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
     if status in STATUS_PENDING_REFUND_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
         _set_radio_value(form_data, controls, "isRefund", "1", ui_logger=ui_logger)
+        _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_DATE, refund_date,
                    keywords=["退款日期", "退款時間"], fallback_name="refundDate", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_AMOUNT, _sheet_cell(raw, "S"),
@@ -1373,8 +1402,11 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
     if status in STATUS_DONE_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "2", ui_logger=ui_logger)
         _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
+        _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
+        _set_field(form_data, controls, FIELD_CHARGE_PAYMENT, _sheet_cell(raw, "R"),
+                   keywords=["加收金流", "收款方式", "收款金流"], fallback_name="chargePayment", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_AMOUNT, _sheet_cell(raw, "N"),
                    keywords=["加收金額", "收款金額"], fallback_name="chargeAmount", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_INVOICE, charge_invoice,
@@ -1392,11 +1424,23 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
 
     if status in STATUS_DONE_REFUND_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
+        _set_progress_done(form_data, controls, ui_logger=ui_logger)
 
         refund_amount = _parse_money_value(_sheet_cell(raw, "S"))
         order_total = _parse_money_value((order or {}).get("total"))
-        is_full_refund = bool(order_total and refund_amount == order_total)
-        _set_radio_value(form_data, controls, "isRefund", "3" if is_full_refund else "2", ui_logger=ui_logger)
+        travel_fee = _parse_money_value((order or {}).get("travel_fee"))
+        service_amount = max(order_total - travel_fee, 0)
+
+        if status == "已全額退款":
+            refund_status_value = "3"
+        elif status in {"已部份退款", "已部分退款"}:
+            refund_status_value = "2"
+        else:
+            # B 欄若仍使用舊狀態「已退款」，依退款金額判斷部分／全額：
+            # 退款金額 >= 總金額 - 車馬費 → 已全額退款；否則 → 已部份退款。
+            is_full_refund = bool(service_amount and refund_amount >= service_amount)
+            refund_status_value = "3" if is_full_refund else "2"
+        _set_radio_value(form_data, controls, "isRefund", refund_status_value, ui_logger=ui_logger)
 
         _set_field(form_data, controls, FIELD_REFUND_DATE, refund_date,
                    keywords=["退款日期", "退款時間"], fallback_name="refundDate", ui_logger=ui_logger)
