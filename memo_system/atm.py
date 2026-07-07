@@ -29,6 +29,13 @@ ATM 對帳自動化模組
   search_atm_unpaid_orders 的 UI 端決定的），所以請把 UI 端算 date_until
   預設值的地方，從 date.today() - timedelta(days=1) 改成
   atm.default_date_until_tw()。
+
+修正（2026-07-07 之二）：
+- search_atm_unpaid_orders 回傳的每筆資料新增 "line_url"（從 purchaseList
+  內嵌 JSON 的 member.line 直接取得，不用另外爬頁面），供 UI 端把姓名做成
+  可點擊的 LINE 連結。注意：paste_atm_unpaid_list 寫入 Sheet 的 I~L 欄沒有
+  加這個新欄位——M 欄（COL_LAST_CODE）已經是「末碼」配對邏輯在用，不能
+  拿來放 LINE 網址，如果要把 LINE 網址也寫進 Sheet，需要另外找一欄。
 """
 import json
 import os
@@ -855,6 +862,10 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
         total = item.get("total") or 0
         fare = item.get("fare") or 0
         net_amount = total - fare
+        # v2026-07-07 新增：purchaseList 內嵌 JSON 裡的 member 物件本來就有
+        # "line" 這個欄位（會員的 LINE 聊天連結網址），不用另外爬頁面，
+        # 直接從這裡取出來給 UI 端用（例如把姓名做成可點擊的 LINE 連結）。
+        line_url = str((item.get("member") or {}).get("line") or "")
 
         rows.append({
             "year_month": year_month,
@@ -863,6 +874,7 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
             "total": total,
             "fare": fare,
             "net_amount": net_amount,
+            "line_url": line_url,
         })
         log(f"  - {year_month}　{order_no}　{name}　總金額{total} - 車馬費{fare} = {net_amount}")
 
