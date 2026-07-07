@@ -18,11 +18,22 @@ ATM 對帳自動化模組
   原本的 try/except 會把 open_by_key 的權限錯誤也吞掉，
   導致 fallback 到本機 JSON 檔案，產生誤導性的 FileNotFoundError。
   現在只有「取得憑證」這步會 fallback，open_by_key 的錯誤會直接拋出。
+
+修正（2026-07-07）：
+- 新增 today_tw() / default_date_until_tw()：Streamlit Cloud 伺服器用 UTC
+  時間，呼叫端（UI）原本如果是用 date.today() - timedelta(days=1) 算「查詢
+  待付款清單，訂購日期迄＝前一天」，會拿到 UTC 的日期而不是台灣的日期。
+  當台灣已經過了午夜、進入新的一天，但 UTC 還停在前一天時，這樣算出來的
+  「前一天」就會多錯一天（例如台灣 7/7，卻算成 7/5，而不是預期的 7/6）。
+  atm.py 本身不決定「查詢到前一天」這個預設值（是呼叫
+  search_atm_unpaid_orders 的 UI 端決定的），所以請把 UI 端算 date_until
+  預設值的地方，從 date.today() - timedelta(days=1) 改成
+  atm.default_date_until_tw()。
 """
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, date as _date
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Callable
 from difflib import SequenceMatcher
@@ -62,6 +73,25 @@ def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
 
 def _now_text() -> str:
     return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y/%m/%d %H:%M:%S")
+
+
+def today_tw() -> _date:
+    """
+    v2026-07-07 新增：用台灣時區算「今天」，取代 date.today()
+    （date.today() 在 Streamlit Cloud 上是 UTC 時間，比台灣慢 8 小時，
+    午夜到早上 8 點之間會誤判成前一天）。
+    """
+    return datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+
+def default_date_until_tw(days_back: int = 1) -> str:
+    """
+    v2026-07-07 新增：查詢 ATM 待付款清單時，UI 預設帶入的「訂購日期迄」
+    （通常是「前一天」）要用這個函式算，不要用 date.today() - timedelta(...)。
+    回傳格式為 YYYY-MM-DD 字串，直接餵給 search_atm_unpaid_orders 的
+    date_until 參數。
+    """
+    return (today_tw() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
 
 def _clear_data_validation(ws, row: int, col_start: int, col_end: int):
@@ -778,7 +808,15 @@ def auto_match_bank_rows(
 # -----------------------------------------------------------------------------
 # 待付款清單查詢
 # -----------------------------------------------------------------------------
-def search_atm_unpaid_orders(session, date_until: str, ui_logger=None) -> List[Dict]:
+def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logger=None) -> List[Dict]:
+    """
+    v2026-07-07 修正：date_until 改成可選參數，沒有傳入時自動用
+    default_date_until_tw()（台灣時區的前一天）當預設值，不再依賴呼叫端
+    自己算「前一天」——避免呼叫端用 date.today() - timedelta(1)（在
+    Streamlit Cloud 上是 UTC 時間）算出差一天的錯誤日期。
+    """
+    if not date_until:
+        date_until = default_date_until_tw()
     log = make_logger(ui_logger)
     url = f"{memo.BASE_URL}/purchase"
     params = {
