@@ -1,11 +1,17 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v1.6
+# 版本：v1.7
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-06-24
+# 最後更新：2026-07-07
 #
 # Change Log
+# v1.7
+# - _parse_order_row 新增抓取客戶 LINE 聊天連結網址（line_url），從訂單卡片
+#   裡 chat.line.biz 的 <a> 連結直接取得。customer_name 本身維持純文字不變
+#   （因為會被寫進清潔異動工作表 H 欄，不能塞 markdown 語法進去），line_url
+#   是另外給 UI 端用來把姓名顯示成可點擊連結的欄位。
+# v1.6
 # v1.4
 # v1.5
 # - 修正 v1.5 遺留的 row_spec 未定義錯誤。
@@ -341,6 +347,13 @@ def _parse_order_row(row) -> dict:
     name_tag = row.select_one('a[href*="/member?keyword"]')
     customer_name = name_tag.get_text(strip=True) if name_tag else ""
 
+    # v1.7 新增：客戶 LINE 聊天連結網址。跟 customer_name 分開存放——
+    # customer_name 之後會被原封不動寫進清潔異動工作表 H 欄，不能塞
+    # markdown/超連結語法進去，line_url 只給 UI 端顯示用（例如把姓名顯示
+    # 成可點擊連結），不會被寫進 Sheet。
+    line_tag = row.select_one('a[href*="chat.line.biz"]')
+    line_url = line_tag.get("href", "").strip() if line_tag else ""
+
     tds = row.select("td")
     date_cell = tds[2] if len(tds) > 2 else None
     date_cell_text = date_cell.get_text("\n", strip=True) if date_cell else ""
@@ -372,6 +385,7 @@ def _parse_order_row(row) -> dict:
         "purchase_id": purchase_id,
         "order_no": order_no,
         "customer_name": customer_name,
+        "line_url": line_url,
         "period_text": period_text,
         "service_hours": _parse_period_hours(period_text),
         "cleaner_count": cleaner_count,
