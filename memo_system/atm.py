@@ -35,6 +35,10 @@ ATM 對帳自動化模組
   內嵌 JSON 的 member.line 直接取得，不用另外爬頁面）。paste_atm_unpaid_list
   現在會把這個網址額外寫進 H 欄（跟 I~L 同一列），Google Sheets 會自動把
   純網址變成可點擊連結；姓名（K欄）本身維持純文字不變。
+
+修正（2026-07-08）：
+- ATM 對帳②「配對銀行明細」配合 H 欄 LINE 連結：候選資料移動與清空範圍
+  從 I:O 改為 H:O，避免配對上移時漏搬或殘留 H 欄。
 """
 import json
 import os
@@ -586,6 +590,7 @@ def auto_match_bank_rows(
     COL_INCOME = 5
     COL_NOTE = 6
     COL_SUMMARY = 7
+    COL_EXTRA = 8
     COL_MONTH = 9
     COL_MATCH_ORDER_NO = 10
     COL_NAME = 11
@@ -621,6 +626,7 @@ def auto_match_bank_rows(
 
         candidates.append({
             "row": idx,
+            "extra": memo.safe_cell(row, COL_EXTRA),
             "year_month": memo.safe_cell(row, COL_MONTH),
             "order_no": order_no,
             "name": name,
@@ -747,23 +753,23 @@ def auto_match_bank_rows(
                     status_text = "已配對"
                     display_last_code = c["last_code"]
 
-                values = [[c["year_month"], c["order_no"], c["name"], c["amount"], display_last_code, c["service_type"], c["fee_type"]]]
+                values = [[c.get("extra", ""), c["year_month"], c["order_no"], c["name"], c["amount"], display_last_code, c["service_type"], c["fee_type"]]]
                 source_row = int(c.get("row") or 0)
 
-                _copy_data_validation(ws, source_row, idx, [COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
-                memo.with_retry(ws.update, f"I{idx}:O{idx}", values, value_input_option="RAW")
+                _copy_data_validation(ws, source_row, idx, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
+                memo.with_retry(ws.update, f"H{idx}:O{idx}", values, value_input_option="RAW")
                 _clear_data_validation(ws, idx, COL_RECONCILED_AT, COL_RECONCILED_AT)
                 _clear_data_validation(ws, idx, COL_RECON_STATUS, COL_RECON_STATUS)
                 memo.with_retry(ws.update_cell, idx, COL_RECONCILED_AT, _now_text())
                 memo.with_retry(ws.update_cell, idx, COL_RECON_STATUS, status_text)
 
                 if source_row and source_row != idx:
-                    _copy_data_validation(ws, idx, source_row, [COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
-                    memo.with_retry(ws.update, f"I{source_row}:O{source_row}", [["", "", "", "", "", "", ""]], value_input_option="RAW")
-                    _copy_data_validation(ws, idx, source_row, [COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
+                    _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
+                    memo.with_retry(ws.update, f"H{source_row}:O{source_row}", [["", "", "", "", "", "", "", ""]], value_input_option="RAW")
+                    _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                     _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                     memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
-                    log(f"↳ 已從下方待配對列表移除原候選列第{source_row}列 I:O 與 T")
+                    log(f"↳ 已從下方待配對列表移除原候選列第{source_row}列 H:O 與 T")
 
                 if needs_confirm:
                     result["confirm_required"] += 1
