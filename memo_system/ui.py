@@ -222,7 +222,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     .preview-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
     .preview-sub   { color: #444; font-size: 14px; line-height: 1.7; }
 
-    [data-testid="stCode"] { border-radius: 12px !important; font-size: 13px !important; background: white !important; color: #1C1C1E !important; min-height: auto !important; }
+    [data-testid="stCode"] { border-radius: 12px !important; font-size: 13px !important; background:white !important; color:#1C1C1E !important; min-height:auto !important; }
     .streamlit-expanderHeader { font-weight: 700 !important; font-size: 0.95rem !important; }
     .streamlit-expander { border-radius: var(--radius) !important; border: 1px solid var(--border) !important; }
     hr { border-color: #ececec !important; margin: 1.6rem 0 !important; }
@@ -934,11 +934,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         c1, c2, c3 = st.columns([2, 1.3, 1.3])
         with c1:
-            lemon_names_raw = st.text_input(
-                "檸檬人名單",
-                placeholder="檸檬人1,檸檬人2,檸檬人3",
-                key="lemon_assign_names",
-            )
+            lemon_names_raw = st.text_input("檸檬人名單", placeholder="檸檬人1,檸檬人2,檸檬人3", key="lemon_assign_names")
         with c2:
             assign_start = st.date_input("開始日期", key="lemon_assign_start")
         with c3:
@@ -1238,11 +1234,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     clear_ui_log(f"❌ 執行錯誤：{e}"); st.error(str(e))
 
         else:
-            step("3", "設定要掃描的日期區間")
+            step("3", "設定要掃描並清空的日期區間")
             c1, c2 = st.columns(2)
             with c1: scan_start = st.date_input("開始日期", key="lemon_scan_start")
             with c2: scan_end = st.date_input("結束日期", key="lemon_scan_end")
-            scan_btn = st.button("🔍 掃描未配班清單", use_container_width=True)
+            scan_btn = st.button("🔍 掃描並清空未配班清單", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
             with st.expander("執行 LOG", expanded=True):
                 log_box_local = st.empty()
@@ -1257,15 +1253,26 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 try:
                     st.session_state.logs = []; st.session_state.lemon_scan_entries = None; st.session_state.lemon_clear_results = None
                     clear_ui_log("===== 開始掃描未配班清單中的檸檬人 =====")
-                    if not st.session_state.credentials_ready:
-                        raise RuntimeError("請先在上方輸入後台帳號與密碼")
-                    with st.spinner("掃描中，請稍候…"):
+                    with st.spinner("掃描並清空中，請稍候…"):
                         session = get_session(ui_logger=clear_ui_log)
-                        entries = shift.find_unassigned_lemon_bookings_range(session=session, date_start=scan_start.strftime("%Y-%m-%d"), date_end=scan_end.strftime("%Y-%m-%d"), ui_logger=clear_ui_log)
-                    st.session_state.lemon_scan_entries = entries
-                    clear_ui_log("===== 掃描完成 ====="); st.rerun()
+                        entries = shift.find_unassigned_lemon_bookings_range(
+                            session=session,
+                            date_start=scan_start.strftime("%Y-%m-%d"),
+                            date_end=scan_end.strftime("%Y-%m-%d"),
+                            ui_logger=clear_ui_log,
+                        )
+                        st.session_state.lemon_scan_entries = entries
+                        if entries:
+                            clear_ui_log("===== 開始清空候補檸檬人佔用的時段 =====")
+                            results = shift.clear_unassigned_lemon_bookings(session=session, entries=entries, ui_logger=clear_ui_log)
+                            st.session_state.lemon_clear_results = results
+                            clear_ui_log("===== 清空完成，請重新整理後台班表確認 =====")
+                        else:
+                            st.session_state.lemon_clear_results = []
+                            clear_ui_log("===== 掃描完成，沒有需要清空的檸檬人 =====")
+                    st.rerun()
                 except Exception as e:
-                    clear_ui_log(f"❌ 掃描失敗：{e}"); st.error(str(e))
+                    clear_ui_log(f"❌ 掃描/清空失敗：{e}"); st.error(str(e))
 
             entries = st.session_state.lemon_scan_entries
             if entries is not None:
@@ -1278,17 +1285,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     st.metric("發現的檸檬人數", len(by_name))
                     for name, dates in by_name.items():
                         st.markdown(f'<div class="preview-card preview-ok"><div class="preview-title">{name}</div><div class="preview-sub"><b>佔用日期：</b>{"、".join(sorted(set(dates)))}</div></div>', unsafe_allow_html=True)
-                    st.markdown('<div class="warn-strip"><b>確認前請檢查</b><ul><li>檸檬人名稱</li><li>佔用日期</li><li>清空後無法逐筆復原</li></ul></div>', unsafe_allow_html=True)
-                    if st.button("🚀 確認清空以上檸檬人佔用的時段", type="primary", use_container_width=True):
-                        try:
-                            clear_ui_log("===== 開始清空候補檸檬人佔用的時段 =====")
-                            with st.spinner("清空中，請稍候…"):
-                                session = get_session(ui_logger=clear_ui_log)
-                                results = shift.clear_unassigned_lemon_bookings(session=session, entries=entries, ui_logger=clear_ui_log)
-                            st.session_state.lemon_clear_results = results
-                            clear_ui_log("===== 清空完成 ====="); st.rerun()
-                        except Exception as e:
-                            clear_ui_log(f"❌ 清空失敗：{e}"); st.error(str(e))
+                    st.markdown('<div class="warn-strip"><b>已自動執行清空</b><ul><li>請重新整理後台班表確認結果</li><li>若仍顯示，請確認是否是未配班訂單本身尚未重新整理</li></ul></div>', unsafe_allow_html=True)
 
             if st.session_state.lemon_clear_results is not None:
                 st.markdown("---"); step("5", "清空結果")
