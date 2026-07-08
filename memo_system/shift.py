@@ -453,11 +453,8 @@ def process_import_file(rows: List[Dict], dry_run: bool = True, ui_logger=None, 
         "skipped": [], "errors": [], "dry_run_payloads": [],
     }
 
-    lemon_rows = [r for r in rows if LEMON_REN_NAME_PATTERN.match(r.get("name", ""))]
-    rows = [r for r in rows if not LEMON_REN_NAME_PATTERN.match(r.get("name", ""))]
-    if lemon_rows:
-        log(f"⏭ 已略過 {len(lemon_rows)} 筆檸檬人資料（請改用「檸檬人空檔勾選」功能處理）")
-
+    # 2026-07：排班匯入不再排除「檸檬人」。
+    # 檸檬人已是後台專員帳號，可與一般專員一樣直接依匯入檔勾班。
     grouped = group_rows_by_name_and_month(rows)
     session = session or memo.login(ui_logger=ui_logger)
     build_cleaner_directory(session, force_refresh=True)
@@ -500,6 +497,117 @@ def process_import_file(rows: List[Dict], dry_run: bool = True, ui_logger=None, 
                 result["errors"].append(msg)
 
     return result
+
+
+# =============================================================================
+# 檸檬人 / 指定人員批次勾班
+# =============================================================================
+def assign_person_shift_dates(
+    session: requests.Session,
+    name: str,
+    dates_to_assign: List[str],
+    type_values: List[str],
+    ui_logger=None,
+) -> Dict:
+    """
+    將指定人員在多個日期批次勾選指定班別。
+
+    規則：
+    - 依月份分批讀取 / 儲存，保留該人其他日期的原排班。
+    - 對於本次指定的日期，先清掉當日既有 all/1/2/3，再寫入本次指定班別，
+      避免「全8」與「上4 / 下4」互斥殘留。
+    - type_values 可包含多個班別，例如 ["上4", "下4"]。
+    """
+    log = make_logger(ui_logger)
+    clean_types = [t for t in type_values if t and t != CLEAR_TYPE]
+    result = {
+        "name": name, "cleaner_id": None,
+        "assigned_dates": [], "assigned_slot_count": 0,
+        "processed_months": 0, "errors": [],
+    }
+
+    if not clean_types:
+        msg = "❌ 請至少選擇一個要勾選的班別"
+        log(msg)
+        result["errors"].append(msg)
+        return result
+
+    unknown = [t for t in clean_types if t not in TYPE_MAP]
+    if unknown:
+        msg = f"❌ 未知班別：{unknown}"
+        log(msg)
+        result["errors"].append(msg)
+        return result
+
+    cleaner_id = find_cleaner_id_by_name(session, name)
+    if not cleaner_id:
+        msg = f"❌ 找不到「{name}」的後台帳號"
+        log(msg)
+        result["errors"].append(msg)
+        return result
+
+    result["cleaner_id"] = cleaner_id
+
+    by_month: Dict[str, List[str]] = {}
+    for d in dates_to_assign:
+        by_month.setdefault(d[:7], []).append(d)
+
+    for month, dates in by_month.items():
+        try:
+            token, existing, hidden_fields = get_shift_page_state(session, cleaner_id, month)
+
+            month_rows = []
+            for d in sorted(set(dates)):
+                for t in clean_types:
+                    month_rows.append({"date": d, "type": t, "name": name, "area": ""})
+
+            new_entries, clear_dates = build_new_shift_entries(month_rows, log=log)
+            mentioned_dates = clear_dates | {k.rsplit("_", 1)[0] for k in new_entries}
+            merged = merge_shift_entries(existing, new_entries, mentioned_dates)
+
+            warnings = check_merged_conflicts(merged)
+            for w in warnings:
+                log(w)
+
+            submit_shift_payload(
+                session, cleaner_id, token, merged,
+                month=month,
+                hidden_fields=hidden_fields,
+            )
+
+            assigned_dates = sorted(set(dates))
+            result["assigned_dates"].extend(assigned_dates)
+            result["assigned_slot_count"] += len(new_entries)
+            result["processed_months"] += 1
+            log(
+                f"✅ [{name} {month}] 已勾選 {assigned_dates}，"
+                f"班別：{clean_types}，共 {len(new_entries)} 筆"
+            )
+
+        except Exception as e:
+            msg = f"❌ [{name} {month}] 勾班失敗：{e}"
+            log(msg)
+            result["errors"].append(msg)
+
+    return result
+
+
+def assign_person_shift_range(
+    session: requests.Session,
+    name: str,
+    date_start: str,
+    date_end: str,
+    type_values: List[str],
+    ui_logger=None,
+) -> Dict:
+    dates = date_range(date_start, date_end)
+    return assign_person_shift_dates(
+        session=session,
+        name=name,
+        dates_to_assign=dates,
+        type_values=type_values,
+        ui_logger=ui_logger,
+    )
 
 
 # =============================================================================
@@ -676,6 +784,51 @@ def find_unassigned_lemon_bookings(
     for e in entries:
         log(f"  - {e['date']}　{e['name']}（原始文字：{e['raw']}）")
     return entries
+
+
+def find_unassigned_lemon_bookings_range(
+    session: requests.Session,
+    date_start: str,
+    date_end: str,
+    ui_logger=None,
+) -> List[Dict]:
+    """
+    掃描一段日期內未配班清單中的檸檬人。
+
+    後台 /schedule 以週為單位顯示，因此這裡逐日查詢後去重，
+    再只保留落在 date_start ~ date_end 的項目。
+    """
+    log = make_logger(ui_logger)
+    start = date.fromisoformat(date_start)
+    end = date.fromisoformat(date_end)
+    if end < start:
+        start, end = end, start
+
+    seen = set()
+    results = []
+
+    for d in date_range(start.isoformat(), end.isoformat()):
+        url = f"{memo.BASE_URL}/schedule"
+        r = memo.session_get(session, url, params={"date": d})
+        r.raise_for_status()
+        actual_query_date = _parse_schedule_query_date(r.text, d)
+        entries = parse_unassigned_lemon_entries(r.text, actual_query_date)
+
+        for e in entries:
+            e_date = date.fromisoformat(e["date"])
+            if not (start <= e_date <= end):
+                continue
+            key = (e["date"], e["name"], e.get("raw", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(e)
+
+    results.sort(key=lambda x: (x["date"], x["name"], x.get("raw", "")))
+    log(f"在 {start.isoformat()} ~ {end.isoformat()} 的清潔班表裡，找到 {len(results)} 筆未配班清單中的檸檬人佔用紀錄")
+    for e in results:
+        log(f"  - {e['date']}　{e['name']}（原始文字：{e['raw']}）")
+    return results
 
 
 def clear_unassigned_lemon_bookings(
