@@ -246,7 +246,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "lemon_candidate": None,
         "atm_result": None, "atm_match_result": None,
         "atm_list_rows": None, "atm_list_paste_result": None,
-        "clear_person_result": None,
+        "clear_person_result": None, "lemon_assign_result": None,
         "lemon_scan_entries": None, "lemon_clear_results": None,
         "co_calc_rows": [], "co_pending_rows": [],
         "co_phone_orders": [], "co_selected_order_no": "",
@@ -623,7 +623,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         </ol></div>""",
         "📅 排班管理": """
         <div class="info-strip"><b>可執行項目</b><ul>
-        <li>排班匯入</li><li>檸檬人空檔查詢</li><li>清空排班</li>
+        <li>排班匯入</li><li>檸檬人勾班</li><li>清空排班</li>
         </ul><b>下一步</b><ul><li>請選擇下方排班子功能</li></ul></div>""",
         "💰 財務對帳": """
         <div class="info-strip"><b>建議順序</b><ol>
@@ -658,14 +658,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("3", "選擇排班子功能")
         shift_sub_section = st.radio(
             "排班子功能",
-            ["📥 排班匯入", "🍋 檸檬人空檔查詢", "🧹 清空排班"],
+            ["📥 排班匯入", "🍋 檸檬人勾班", "🧹 清空排班"],
             horizontal=True,
             label_visibility="collapsed",
             key="shift_sub_section",
         )
         SHIFT_SUB_HELP = {
             "📥 排班匯入": '<div class="info-strip"><b>操作流程</b><ol><li>上傳 Excel / CSV</li><li>執行 Dry Run 預覽</li><li>確認合併結果</li><li>正式儲存</li></ol></div>',
-            "🍋 檸檬人空檔查詢": '<div class="info-strip"><b>操作流程</b><ol><li>選擇日期</li><li>選擇班別</li><li>搜尋空檔</li><li>確認勾班</li></ol></div>',
+            "🍋 檸檬人勾班": '<div class="info-strip"><b>操作流程</b><ol><li>輸入檸檬人名單</li><li>選擇起迄日期</li><li>選擇要勾的班別</li><li>批次勾班</li></ol></div>',
             "🧹 清空排班": '<div class="warn-strip"><b>危險操作</b><ul><li>會直接修改後台排班</li><li>沒有逐筆預覽機制</li><li>請確認人員與日期後再執行</li></ul></div>',
         }
         st.markdown(SHIFT_SUB_HELP.get(shift_sub_section, ""), unsafe_allow_html=True)
@@ -915,59 +915,114 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 ui_log(f"❌ 儲存失敗：{e}"); st.error(str(e))
 
     # ============================================================
-    # 功能三：檸檬人空檔
+    # 功能三：檸檬人勾班
     # ============================================================
 
-    def render_lemon_ren_section():
-        step("3", "設定要找空檔的日期與類型")
-        c1, c2, c3 = st.columns([1.3, 1.3, 1])
-        with c1: target_date = st.date_input("日期")
-        with c2: type_val = st.selectbox("類型", list(shift.TYPE_MAP.keys()))
-        with c3: max_count = st.number_input("檸檬人最大數量", min_value=1, max_value=50, value=shift.LEMON_REN_DEFAULT_COUNT)
+    def render_lemon_assign_section():
+        step("3", "設定檸檬人勾班條件")
+        st.markdown(
+            '<div class="warn-strip"><b>注意</b><ul>'
+            '<li>會直接修改後台排班</li>'
+            '<li>指定日期內原本已勾選的全日/上午/下午/晚上，會先清掉再套用本次選擇的班別</li>'
+            '<li>請確認檸檬人名單、日期區間與班別後再執行</li>'
+            '</ul></div>',
+            unsafe_allow_html=True,
+        )
 
-        find_btn = st.button("🔍 尋找空檔檸檬人", use_container_width=True, disabled=not st.session_state.credentials_ready)
+        c1, c2, c3 = st.columns([2, 1.3, 1.3])
+        with c1:
+            target_names_raw = st.text_input(
+                "檸檬人名單",
+                placeholder="例如：檸檬人1,檸檬人2,檸檬人10",
+                key="lemon_assign_names",
+            )
+        with c2:
+            assign_start = st.date_input("開始日期", key="lemon_assign_start")
+        with c3:
+            assign_end = st.date_input("結束日期", key="lemon_assign_end")
+
+        assign_types = st.multiselect(
+            "要勾選的班別",
+            [k for k in shift.TYPE_MAP.keys()],
+            default=["全8"],
+            key="lemon_assign_types",
+        )
+
+        target_names = [n.strip() for n in re.split(r"[,，]", target_names_raw) if n.strip()]
+        if target_names:
+            st.caption(f"將處理 {len(target_names)} 人：{'、'.join(target_names)}")
+        if assign_types:
+            st.caption(f"將勾選班別：{'、'.join(assign_types)}")
+
+        execute_btn = st.button(
+            "🚀 執行檸檬人勾班",
+            use_container_width=True,
+            disabled=not (st.session_state.credentials_ready and bool(target_names) and bool(assign_types)),
+            type="primary",
+        )
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
             log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
-        def lemon_ui_log(msg):
+        def assign_ui_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
-            except: pass
-
-        if find_btn:
             try:
-                st.session_state.logs = []; st.session_state.lemon_candidate = None
-                lemon_ui_log("===== 開始尋找空檔檸檬人 =====")
-                with st.spinner("查詢中，請稍候…"):
-                    session = get_session(ui_logger=lemon_ui_log)
-                    candidate = shift.find_available_lemon_ren(session=session, date_val=target_date.strftime("%Y-%m-%d"), type_val=type_val, max_count=int(max_count), log=lemon_ui_log)
-                st.session_state.lemon_candidate = candidate
-                lemon_ui_log("===== 查詢完成 =====")
-            except Exception as e:
-                lemon_ui_log(f"❌ 查詢失敗：{e}"); st.error(str(e))
+                log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            except Exception:
+                pass
 
-        candidate = st.session_state.lemon_candidate
-        if candidate:
-            st.markdown("---"); step("4", "查詢結果")
-            if candidate.get("found"):
-                checked_names = ", ".join(c["name"] for c in candidate.get("checked_candidates", [])) or "無，第一位就是空的"
-                date_part = candidate["slot_key"].rsplit("_", 1)[0]
-                st.markdown(f'<div class="preview-card preview-ok"><div class="preview-title">✅ 找到空檔：{candidate["name"]}</div><div class="preview-sub"><b>日期：</b>{date_part}<br><b>類型：</b>{type_val}（slot 值：{candidate["value"]}）<br><b>已檢查並跳過：</b>{checked_names}</div></div>', unsafe_allow_html=True)
-                if st.button(f"🚀 確認勾選「{candidate['name']}」並儲存", type="primary", use_container_width=True):
-                    try:
-                        ui_log(f"===== 確認勾選 {candidate['name']} =====")
-                        with st.spinner("儲存中，請稍候…"):
-                            session = get_session(ui_logger=ui_log)
-                            shift.confirm_lemon_ren_assignment(session, candidate, log=ui_log)
-                        st.success(f"✅ 已將「{candidate['name']}」勾選並儲存")
-                        st.session_state.lemon_candidate = None
-                    except Exception as e:
-                        ui_log(f"❌ 勾選失敗：{e}"); st.error(str(e))
-            else:
-                checked_names = ", ".join(c["name"] for c in candidate.get("checked_candidates", [])) or "無"
-                st.markdown(f'<div class="preview-card preview-ng"><div class="preview-title">❌ 沒有找到空檔</div><div class="preview-sub">檸檬人1 ~ 檸檬人{max_count} 在這個日期＋類型的時段全部被佔用，或是找不到對應帳號。<br><b>已檢查：</b>{checked_names}</div></div>', unsafe_allow_html=True)
+        if st.session_state.lemon_assign_result is not None:
+            results = st.session_state.lemon_assign_result
+            if isinstance(results, dict):
+                results = [results]
+            st.markdown("---")
+            step("4", "執行結果")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("處理人數", len(results))
+            c2.metric("勾班天數", sum(len(r.get("assigned_dates", [])) for r in results))
+            c3.metric("勾選筆數", sum(r.get("assigned_slot_count", 0) for r in results))
+            for r in results:
+                if r.get("errors"):
+                    with st.expander(f"⚠️ 「{r.get('name', '')}」錯誤明細（{len(r['errors'])} 筆）", expanded=True):
+                        for i, err in enumerate(r["errors"], 1):
+                            st.markdown(f"**{i}.** {err}")
+                else:
+                    st.success(
+                        f"✅ 已完成「{r.get('name', '')}」勾班："
+                        f"{len(r.get('assigned_dates', []))} 天，{r.get('assigned_slot_count', 0)} 筆。"
+                    )
+
+        if execute_btn:
+            try:
+                st.session_state.logs = []
+                st.session_state.lemon_assign_result = None
+                assign_ui_log(
+                    f"===== 開始檸檬人勾班：{len(target_names)} 人，"
+                    f"{assign_start.strftime('%Y-%m-%d')} ~ {assign_end.strftime('%Y-%m-%d')}，"
+                    f"班別：{'、'.join(assign_types)} ====="
+                )
+                results = []
+                with st.spinner("執行中，請稍候…"):
+                    session = get_session(ui_logger=assign_ui_log)
+                    for n in target_names:
+                        assign_ui_log(f"\n----- 勾班「{n}」-----")
+                        results.append(
+                            shift.assign_person_shift_range(
+                                session=session,
+                                name=n,
+                                date_start=assign_start.strftime("%Y-%m-%d"),
+                                date_end=assign_end.strftime("%Y-%m-%d"),
+                                type_values=assign_types,
+                                ui_logger=assign_ui_log,
+                            )
+                        )
+                assign_ui_log("===== 檸檬人勾班完成 =====")
+                st.session_state.lemon_assign_result = results
+                st.rerun()
+            except Exception as e:
+                assign_ui_log(f"❌ 執行錯誤：{e}")
+                st.error(str(e))
 
     # ============================================================
     # 功能四：ATM 對帳
@@ -1184,8 +1239,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     clear_ui_log(f"❌ 執行錯誤：{e}"); st.error(str(e))
 
         else:
-            step("3", "設定要掃描的週次")
-            scan_date = st.date_input("週次內任一天的日期", key="lemon_scan_date")
+            step("3", "設定要掃描的日期區間")
+            c1, c2 = st.columns(2)
+            with c1:
+                scan_start = st.date_input("開始日期", key="lemon_scan_start")
+            with c2:
+                scan_end = st.date_input("結束日期", key="lemon_scan_end")
             scan_btn = st.button("🔍 掃描未配班清單", use_container_width=True, disabled=not st.session_state.credentials_ready)
 
             with st.expander("執行 LOG", expanded=True):
@@ -1200,10 +1259,15 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             if scan_btn:
                 try:
                     st.session_state.logs = []; st.session_state.lemon_scan_entries = None; st.session_state.lemon_clear_results = None
-                    clear_ui_log("===== 開始掃描未配班清單中的檸檬人 =====")
+                    clear_ui_log(f"===== 開始掃描未配班清單中的檸檬人：{scan_start.strftime('%Y-%m-%d')} ~ {scan_end.strftime('%Y-%m-%d')} =====")
                     with st.spinner("掃描中，請稍候…"):
                         session = get_session(ui_logger=clear_ui_log)
-                        entries = shift.find_unassigned_lemon_bookings(session=session, query_date=scan_date.strftime("%Y-%m-%d"), ui_logger=clear_ui_log)
+                        entries = shift.find_unassigned_lemon_bookings_range(
+                            session=session,
+                            date_start=scan_start.strftime("%Y-%m-%d"),
+                            date_end=scan_end.strftime("%Y-%m-%d"),
+                            ui_logger=clear_ui_log,
+                        )
                     st.session_state.lemon_scan_entries = entries
                     clear_ui_log("===== 掃描完成 ====="); st.rerun()
                 except Exception as e:
@@ -1699,8 +1763,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     elif main_section == "📅 排班管理":
         if shift_sub_section == "📥 排班匯入":
             render_shift_import_section()
-        elif shift_sub_section == "🍋 檸檬人空檔查詢":
-            render_lemon_ren_section()
+        elif shift_sub_section == "🍋 檸檬人勾班":
+            render_lemon_assign_section()
         else:
             render_clear_shift_section()
 
