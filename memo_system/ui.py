@@ -222,7 +222,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     .preview-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
     .preview-sub   { color: #444; font-size: 14px; line-height: 1.7; }
 
-    [data-testid="stCode"] { border-radius: 12px !important; font-size: 13px !important; }
+    [data-testid="stCode"] { border-radius: 12px !important; font-size: 13px !important; background: white !important; color: #1C1C1E !important; min-height: auto !important; }
     .streamlit-expanderHeader { font-weight: 700 !important; font-size: 0.95rem !important; }
     .streamlit-expander { border-radius: var(--radius) !important; border: 1px solid var(--border) !important; }
     hr { border-color: #ececec !important; margin: 1.6rem 0 !important; }
@@ -324,7 +324,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     def ui_log(msg):
         st.session_state.logs.append(str(msg))
         try:
-            log_box.code("\n".join(st.session_state.logs[-3000:]))
+            log_box.text("\n".join(st.session_state.logs[-3000:]))
         except Exception:
             pass
 
@@ -347,7 +347,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         if clear_selection:
             clear_pick_states()
         try:
-            log_box.code("尚未執行")
+            log_box.text("尚未執行")
         except Exception:
             pass
 
@@ -355,7 +355,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         st.session_state.logs = []
         st.session_state.result = None
         try:
-            log_box.code("尚未執行")
+            log_box.text("尚未執行")
         except Exception:
             pass
 
@@ -748,7 +748,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         global log_box, result_container
         with st.expander("執行 LOG", expanded=True):
             log_box = st.empty()
-            log_box.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         result_container = st.container()
         if st.session_state.result is not None:
@@ -862,11 +862,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def shift_ui_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         if dry_run_btn and uploaded_file is not None:
@@ -896,7 +896,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     for i, err in enumerate(result["errors"], 1): st.markdown(f"**{i}.** {err}")
             for name, month, merged in result.get("dry_run_payloads", []):
                 with st.expander(f"{name} — {month}（合併後共 {len(merged)} 筆勾選）", expanded=False):
-                    if merged: st.code("\n".join(f"{k} = {v}" for k, v in sorted(merged.items())))
+                    if merged: st.text("\n".join(f"{k} = {v}" for k, v in sorted(merged.items())))
                     else: st.caption("這個月份合併後沒有任何勾選（可能是被「清」全部清空了）")
             st.caption("確認上面合併後的結果沒有問題，再按「正式儲存」送出。")
 
@@ -966,12 +966,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def lemon_assign_log(msg):
             st.session_state.logs.append(str(msg))
             try:
-                log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+                log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except Exception:
                 pass
 
@@ -1047,11 +1047,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def atm_list_ui_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         if search_btn:
@@ -1074,7 +1074,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.info("查無符合條件的待付款 ATM 訂單。")
             else:
                 st.metric("查到筆數", len(rows))
-                st.code("\n".join(f"{r['year_month']}　{r['order_no']}　{r['name']}　${r['net_amount']}" for r in rows))
+                st.text("\n".join(f"{r['year_month']}　{r['order_no']}　{r['name']}　${r['net_amount']}" for r in rows))
                 st.markdown(f'<div class="warn-strip">⚠️ 確認貼上後，會把以上 {len(rows)} 筆資料寫入「{region}」ATM 對帳工作表的 I~L 欄。</div>', unsafe_allow_html=True)
                 if st.button(f"🚀 貼上到「{region}」ATM 對帳工作表", type="primary", use_container_width=True):
                     try:
@@ -1112,11 +1112,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def atm_match_ui_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         result_container_local = st.container()
@@ -1151,11 +1151,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def atm_ui_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         atm_result_container = st.container()
@@ -1199,11 +1199,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
             with st.expander("執行 LOG", expanded=True):
                 log_box_local = st.empty()
-                log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+                log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
             def clear_ui_log(msg):
                 st.session_state.logs.append(str(msg))
-                try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+                try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
                 except: pass
 
             if st.session_state.clear_person_result is not None:
@@ -1242,21 +1242,23 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             c1, c2 = st.columns(2)
             with c1: scan_start = st.date_input("開始日期", key="lemon_scan_start")
             with c2: scan_end = st.date_input("結束日期", key="lemon_scan_end")
-            scan_btn = st.button("🔍 掃描未配班清單", use_container_width=True, disabled=not st.session_state.credentials_ready)
+            scan_btn = st.button("🔍 掃描未配班清單", use_container_width=True)
 
             with st.expander("執行 LOG", expanded=True):
                 log_box_local = st.empty()
-                log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+                log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
             def clear_ui_log(msg):
                 st.session_state.logs.append(str(msg))
-                try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+                try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
                 except: pass
 
             if scan_btn:
                 try:
                     st.session_state.logs = []; st.session_state.lemon_scan_entries = None; st.session_state.lemon_clear_results = None
                     clear_ui_log("===== 開始掃描未配班清單中的檸檬人 =====")
+                    if not st.session_state.credentials_ready:
+                        raise RuntimeError("請先在上方輸入後台帳號與密碼")
                     with st.spinner("掃描中，請稍候…"):
                         session = get_session(ui_logger=clear_ui_log)
                         entries = shift.find_unassigned_lemon_bookings_range(session=session, date_start=scan_start.strftime("%Y-%m-%d"), date_end=scan_end.strftime("%Y-%m-%d"), ui_logger=clear_ui_log)
@@ -1392,11 +1394,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def co_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         if search_btn:
@@ -1546,11 +1548,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         with st.expander("執行 LOG", expanded=True):
             log_box_local = st.empty()
-            log_box_local.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
+            log_box_local.text("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
 
         def co_log(msg):
             st.session_state.logs.append(str(msg))
-            try: log_box_local.code("\n".join(st.session_state.logs[-3000:]))
+            try: log_box_local.text("\n".join(st.session_state.logs[-3000:]))
             except: pass
 
         if scan_btn:
