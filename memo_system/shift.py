@@ -453,9 +453,8 @@ def process_import_file(rows: List[Dict], dry_run: bool = True, ui_logger=None, 
         "skipped": [], "errors": [], "dry_run_payloads": [],
     }
 
-    # 2026-07-08：
-    # 排班匯入不再排除「檸檬人」。
-    # 匯入檔若寫 檸檬人1、檸檬人2...，會和一般專員一樣直接依姓名找後台帳號並勾班。
+    # 2026-07-08：排班匯入不再排除「檸檬人」。
+    # 匯入檔若寫 檸檬人1、檸檬人2...，會和一般專員一樣依姓名找後台帳號並勾班。
     grouped = group_rows_by_name_and_month(rows)
     session = session or memo.login(ui_logger=ui_logger)
     build_cleaner_directory(session, force_refresh=True)
@@ -619,11 +618,7 @@ def assign_person_shift_range(
 ) -> Dict:
     """
     將指定人員在 date_start ~ date_end 期間勾選指定班別。
-
-    規則：
-    - 每個人、每個月份只送出一次。
-    - 指定日期範圍內會先清掉 all/1/2/3 舊勾選，再套用本次選擇的班別。
-    - 未指定日期的原本排班會保留。
+    指定日期範圍內會先清掉 all/1/2/3 舊勾選，再套用本次選擇的班別。
     """
     log = make_logger(ui_logger)
     clean_names = [str(n).strip() for n in names if str(n).strip()]
@@ -671,15 +666,12 @@ def assign_person_shift_range(
             try:
                 token, existing, hidden_fields = get_shift_page_state(session, cleaner_id, month)
                 new_entries: Dict[str, str] = {}
-
                 for d in month_dates:
                     for type_val in clean_types:
                         slot, value = TYPE_MAP[type_val]
                         new_entries[f"{d}_{slot}"] = value
 
-                # 指定範圍內先清掉舊勾選，再套用本次指定班別；範圍外保留。
                 merged = merge_shift_entries(existing, new_entries, clear_dates=month_dates)
-
                 warnings = check_merged_conflicts(merged)
                 for w in warnings:
                     log(w)
@@ -693,7 +685,7 @@ def assign_person_shift_range(
 
                 result["processed_months"] += 1
                 result["saved"] += 1
-                detail = {
+                result["details"].append({
                     "name": name,
                     "month": month,
                     "dates": sorted(month_dates),
@@ -701,13 +693,11 @@ def assign_person_shift_range(
                     "entry_count": len(new_entries),
                     "merged_count": len(merged),
                     "warnings": warnings,
-                }
-                result["details"].append(detail)
+                })
                 log(
                     f"✅ [{name} {month}] 已儲存："
                     f"{len(month_dates)} 天 × {len(clean_types)} 班別，共 {len(new_entries)} 筆指定勾選"
                 )
-
             except Exception as e:
                 msg = f"❌ [{name} {month}] 勾班失敗：{e}"
                 log(msg)
@@ -716,9 +706,6 @@ def assign_person_shift_range(
     return result
 
 
-# =============================================================================
-# 從未配班清單清除檸檬人：日期區間掃描
-# =============================================================================
 def find_unassigned_lemon_bookings_range(
     session: requests.Session,
     date_start: str,
@@ -726,8 +713,8 @@ def find_unassigned_lemon_bookings_range(
     ui_logger=None,
 ) -> List[Dict]:
     """
-    掃描 date_start ~ date_end 期間的清潔班表，找出未配班清單中的檸檬人。
-    後台 /schedule 一次通常顯示一週，因此這裡用每週一掃一次，再過濾回指定區間。
+    掃描 date_start ~ date_end 的清潔班表，找出未配班清單中的檸檬人。
+    後台 /schedule 一次顯示一週，因此以每週週一掃描一次，再過濾回指定區間。
     """
     log = make_logger(ui_logger)
     start = date.fromisoformat(date_start)
@@ -736,34 +723,36 @@ def find_unassigned_lemon_bookings_range(
         start, end = end, start
 
     query_dates = []
+    seen_weeks = set()
     cur = start
-    seen_mondays = set()
     while cur <= end:
-        monday = cur - timedelta(days=cur.weekday())
-        if monday not in seen_mondays:
-            seen_mondays.add(monday)
-            query_dates.append(monday)
+        week_start = cur - timedelta(days=cur.weekday())
+        if week_start not in seen_weeks:
+            seen_weeks.add(week_start)
+            query_dates.append(week_start)
         cur += timedelta(days=1)
 
-    all_entries = []
+    results = []
     seen = set()
     for q in query_dates:
         q_text = q.isoformat()
         log(f"===== 掃描週次：{q_text} =====")
-        entries = find_unassigned_lemon_bookings(session=session, query_date=q_text, ui_logger=ui_logger)
+        entries = find_unassigned_lemon_bookings(
+            session=session,
+            query_date=q_text,
+            ui_logger=ui_logger,
+        )
         for e in entries:
-            e_date = e.get("date")
-            if not e_date:
-                continue
+            e_date = str(e.get("date", ""))
             if date_start <= e_date <= date_end:
-                key = (e_date, e.get("name"))
+                key = (e_date, e.get("name"), e.get("raw"))
                 if key not in seen:
                     seen.add(key)
-                    all_entries.append(e)
+                    results.append(e)
 
-    all_entries.sort(key=lambda x: (x.get("date", ""), x.get("name", "")))
-    log(f"日期區間 {date_start} ~ {date_end} 共找到 {len(all_entries)} 筆未配班清單中的檸檬人佔用紀錄")
-    return all_entries
+    results.sort(key=lambda x: (x.get("date", ""), x.get("name", ""), x.get("raw", "")))
+    log(f"日期區間 {date_start} ~ {date_end} 共找到 {len(results)} 筆未配班清單中的檸檬人佔用紀錄")
+    return results
 
 
 # =============================================================================
