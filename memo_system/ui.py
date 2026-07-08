@@ -666,7 +666,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         SHIFT_SUB_HELP = {
             "📥 排班匯入": '<div class="info-strip"><b>操作流程</b><ol><li>上傳 Excel / CSV</li><li>執行 Dry Run 預覽</li><li>確認合併結果</li><li>正式儲存</li></ol></div>',
             "🍋 檸檬人勾班": '<div class="info-strip"><b>操作流程</b><ol><li>輸入檸檬人名單</li><li>選擇起迄日期</li><li>選擇要勾的班別</li><li>批次勾班</li></ol></div>',
-            "🧹 清空排班": '<div class="warn-strip"><b>危險操作</b><ul><li>會直接修改後台排班</li><li>沒有逐筆預覽機制</li><li>請確認人員與日期後再執行</li></ul></div>',
+            "🧹 清空排班": '<div class="warn-strip"><b>危險操作</b><ul><li>會直接修改後台排班</li><li>沒有逐筆預覽機制</li><li>請確認人員與日期後再執行</li><li>
+多人請用逗號分隔，例如：
+<code>檸檬人1,檸檬人2,檸檬人3,檸檬人4,檸檬人5,檸檬人6,檸檬人7,檸檬人8,檸檬人9,檸檬人10,檸檬人11,檸檬人12<</li>/code></ul></div>',
         }
         st.markdown(SHIFT_SUB_HELP.get(shift_sub_section, ""), unsafe_allow_html=True)
 
