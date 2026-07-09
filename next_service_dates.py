@@ -1,10 +1,17 @@
 # ============================================================
 # 檔名：next_service_dates.py
-# 版本：v1.0
+# 版本：v1.1
 # 模組：依電話+地址查後台最近3次服務日期，寫回 Google Sheet L-N 欄
 # 最後更新：2026-07-09
 #
 # Change Log
+# v1.1
+# - 修正登入方式：跟 orders.py / quick_order.py 裡其餘所有函式一致，一律
+#   使用 Step 1 畫面輸入的 backend_email / backend_password 登入，不再
+#   從 accounts.py 讀取區域專屬帳密（accounts.py 在 orders.py 裡只用於
+#   get_region_by_address 判斷地址所屬區域，從未被用來登入）。
+#   login_region() 因此改名為 login_backend()，只吃 env_name +
+#   backend_email + backend_password，跟其他 17 個功能的登入方式統一。
 # v1.0
 # - 新增功能：讀取「台北/台中-建議下次服務時間」等工作表的 B欄（地址）+
 #   E欄（電話），逐列查後台該電話底下所有訂單，比對地址後取最近3次服務
@@ -18,8 +25,6 @@
 # - 地址比對用「核心片段」比對（路/街/巷/弄/號之後的部分），可以正確
 #   辨識「大安區台北市文山區福興路62號8樓之四」跟「台北市文山區福興路
 #   62號8樓之四」是同一地址，不受行政區前綴順序或有無影響。
-# - 登入帳密直接沿用 accounts.py 裡對應區域（台北/台中）的既有帳密，
-#   不用另外輸入。
 # ============================================================
 # -*- coding: utf-8 -*-
 import re
@@ -35,7 +40,6 @@ from orders import (
     build_gsheet_client,
 )
 from quick_order import _extract_address_line, _parse_service_date_time_loose
-from accounts import ACCOUNTS
 from env import BASE_URL_DEV, BASE_URL_PROD
 
 
@@ -144,18 +148,16 @@ def get_recent_service_dates(session, phone, address, n=3):
 
 
 # =========================
-# 登入：每個區域只登入一次，回傳可重複使用的 session
+# 登入：跟其他功能一致，用 Step 1 畫面輸入的帳密登入一次，回傳可重複
+# 使用的 session（台北/台中訂單都在同一個後台網域下查得到，不需要
+# 依區域切換帳密）
 # =========================
-def login_region(env_name, region):
+def login_backend(env_name, backend_email, backend_password):
     _configure_env_globals(env_name)
 
-    config = ACCOUNTS.get(region)
-    if not config:
-        raise Exception(f"找不到區域設定：{region}")
-
     session = requests.Session()
-    if not login(session, config["email"], config["password"]):
-        raise Exception(f"{region} 後台登入失敗，請確認 accounts.py 帳密")
+    if not login(session, backend_email, backend_password):
+        raise Exception("後台登入失敗，請確認帳號密碼")
 
     return session
 
@@ -171,8 +173,8 @@ def update_next_service_dates_sheet(
     """
     讀取指定試算表（依 gid 指定分頁）B欄（地址）+ E欄（電話），
     查最近3次服務日期，寫入 L/M/N 欄（L=最近一次，N=最遠一次）。
-    session 需先呼叫 login_region() 取得（同一區域的多份工作表可共用
-    同一個 session，不用每份工作表都重新登入一次）。
+    session 需先呼叫 login_backend() 取得（全部工作表共用同一個 session，
+    不用每份工作表都重新登入一次）。
     """
     gc = build_gsheet_client()
     sh = gc.open_by_key(spreadsheet_id)
@@ -226,36 +228,30 @@ SHEETS = [
 ]
 
 
-def run_all(env_name="prod", logger=print):
+def run_all(env_name, backend_email, backend_password, logger=print):
     """
-    依區域分組執行：登入台北 → 處理台北全部工作表 → 登入台中 → 處理台中
-    全部工作表，同區域內的多份工作表共用同一個登入 session，不重複登入。
+    用 Step 1 輸入的帳密登入一次，依序處理全部 4 份工作表（共用同一個 session）。
     """
+    logger("▶ 登入後台…")
+    session = login_backend(env_name, backend_email, backend_password)
+
     total_updated = 0
-    sheets_by_region = {}
-    for region, spreadsheet_id, gid in SHEETS:
-        sheets_by_region.setdefault(region, []).append((spreadsheet_id, gid))
-
-    for region, sheet_list in sheets_by_region.items():
-        logger(f"▶ 登入 {region}…")
+    for _region, spreadsheet_id, gid in SHEETS:
+        logger(f"▶ 開始處理：{_region}｜gid={gid}")
         try:
-            session = login_region(env_name, region)
+            total_updated += update_next_service_dates_sheet(
+                session, spreadsheet_id, gid, logger=logger,
+            )
         except Exception as e:
-            logger(f"❌ {region} 登入失敗：{e}")
-            continue
-
-        logger(f"▶ 開始處理 {region}（共 {len(sheet_list)} 份工作表）…")
-        for spreadsheet_id, gid in sheet_list:
-            try:
-                total_updated += update_next_service_dates_sheet(
-                    session, spreadsheet_id, gid, logger=logger,
-                )
-            except Exception as e:
-                logger(f"❌ {region} gid={gid} 執行失敗：{e}")
+            logger(f"❌ {_region} gid={gid} 執行失敗：{e}")
 
     logger(f"✅ 全部完成，共更新 {total_updated} 列。")
     return total_updated
 
 
 if __name__ == "__main__":
-    run_all()
+    import sys
+    if len(sys.argv) != 3:
+        print("用法：python next_service_dates.py <後台帳號> <後台密碼>")
+        sys.exit(1)
+    run_all("prod", sys.argv[1], sys.argv[2])
