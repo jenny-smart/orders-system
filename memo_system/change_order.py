@@ -1,11 +1,23 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.2
+# 版本：v2.4
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-11
 #
 # Change Log
+# v2.4
+# - 補上 TAIWAN_PUBLIC_HOLIDAYS 漏掉的 2026 年補假日（依行政院人事行政
+#   總處正式公告 115 年辦公日曆表）：2/27（和平紀念日補假）、4/3（兒童節
+#   補假）、4/6（清明節補假）、9/28（教師節/孔子誕辰紀念日）、10/9（國慶
+#   日補假）、10/26（台灣光復節補假）。這幾天都是星期一到五的工作日，
+#   漏掉會導致 _count_workdays_before 多算工作天數，異動費可能算錯級距。
+# v2.3
+# - fetch_upcoming_paid_orders_by_phone 補上除錯資訊：目前環境/實際連線
+#   網址、HTTP 狀態碼、最終網址是否像登入頁、原始訂單卡片數與編號、每筆
+#   解析出的付款狀態/服務日期。v2.2 換上「純文字切段」解法後若還是查無
+#   資料，這樣才能直接從執行 LOG 判斷是解析邏輯的問題，還是 session 根本
+#   沒登入到正確環境/帳號（回應像登入頁、或原始卡片數就是 0）。
 # v2.2
 # - 修正電話查詢異動訂單「查無資料」的根因：_parse_order_row 原本用寫死的
 #   CSS 結構解析 /purchase 列表頁（table tbody tr、td label、tds[2]/tds[3]
@@ -129,13 +141,20 @@ TAIWAN_PUBLIC_HOLIDAYS = {
     date(2026, 2, 18),
     date(2026, 2, 19),
     date(2026, 2, 20),
+    date(2026, 2, 27),  # 和平紀念日2/28（六）補假
     date(2026, 2, 28),
+    date(2026, 4, 3),   # 兒童節4/4（六）補假
     date(2026, 4, 4),
     date(2026, 4, 5),
+    date(2026, 4, 6),   # 清明節4/5（日）補假
     date(2026, 5, 1),
     date(2026, 6, 19),
     date(2026, 9, 25),
+    date(2026, 9, 28),  # 教師節/孔子誕辰紀念日
+    date(2026, 10, 9),  # 國慶日10/10（六）補假
     date(2026, 10, 10),
+    date(2026, 10, 25),
+    date(2026, 10, 26), # 台灣光復節10/25（日）補假
     date(2026, 12, 25),
 }
 
@@ -680,17 +699,26 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
             ui_logger(msg)
 
     log(f"查詢電話：{phone}")
+    log(f"🔧 除錯：目前環境={CURRENT_ENV}，實際連線={BASE_URL}")
 
     resp = session.get(f"{BASE_URL}/purchase", params={"phone": phone}, timeout=20)
     resp.raise_for_status()
 
+    _looks_login_page = "login" in resp.url.lower() or "password" in resp.text.lower()[:3000]
+    log(f"🔧 除錯：HTTP {resp.status_code}，最終網址={resp.url}，看起來像登入頁={_looks_login_page}")
+
     blocks, soup = _extract_order_blocks_from_html(resp.text)
+    log(f"🔧 除錯：原始訂單卡片數={len(blocks)}" + (f"（{[b['order_no'] for b in blocks[:10]]}）" if blocks else ""))
     if not blocks:
+        log(f"🔧 除錯：回應內容片段（前300字）：{resp.text[:300].strip()}")
         log("⚠️ 查無資料")
         return []
 
     parsed = [_parse_order_block(b, soup) for b in blocks]
     parsed = [p for p in parsed if p]
+    log(f"🔧 除錯：付款狀態判斷 → " + "；".join(
+        f"{p['order_no']}(已付款={p['is_paid']}, 服務日={p['service_date']})" for p in parsed[:10]
+    ))
 
     result = _select_change_order_candidates(parsed)
     if not result:
