@@ -1,11 +1,26 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.1
+# 版本：v2.2
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-07-08
+# 最後更新：2026-07-11
 #
 # Change Log
+# v2.2
+# - 修正電話查詢異動訂單「查無資料」的根因：_parse_order_row 原本用寫死的
+#   CSS 結構解析 /purchase 列表頁（table tbody tr、td label、tds[2]/tds[3]
+#   固定欄位索引），但這頁實際的 HTML 結構跟這個假設不符（orders.py 裡經過
+#   實戰驗證能穩定查到訂單的 extract_order_cards_from_purchase_html，完全
+#   不依賴表格結構，是把整頁轉純文字、用「LC/TT/KK開頭的訂單編號那一行」
+#   當分界點切段）。這代表 change_order.py 這支函式從一開始就沒有拿真實
+#   頁面驗證過，每一列都解析成 None，最後永遠回傳空清單，即使電話底下
+#   明明有已付款訂單也會顯示「查無資料」。
+#   改成跟 orders.py 一致、已證實可行的「純文字＋正規表達式」解法：
+#   新增 _extract_order_blocks_from_html 依訂單編號切段，_parse_order_block
+#   從純文字段落解析所有欄位（保留原本 _parse_order_row 對外的欄位格式與
+#   語意，呼叫端 fetch_order_basic / fetch_upcoming_paid_orders_by_phone
+#   完全不用改）。舊的 _parse_order_row（依 tr）保留但不再被使用，避免
+#   萬一有其他地方引用到。
 # v2.1
 # - B 欄為「已退款」時，已全額／已部份退款改依「退款金額」與「總金額－車馬費」判斷：
 #   退款金額大於等於總金額扣車馬費時回填已全額退款，低於則回填已部份退款。
@@ -366,8 +381,177 @@ def _extract_service_date(date_cell_text: str):
         return None
 
 
+# v2.2：訂單編號目前已知前綴有 LC（一般訂單）、TT（測試站/儲值金折抵消費訂單）、
+# KK（儲值金購買訂單），跟 orders.py 的 ORDER_NO_REGEX 保持一致。
+ORDER_NO_REGEX = r"(LC|TT|KK)\d+"
+
+
+def _extract_order_blocks_from_html(html_text: str):
+    """
+    v2.2 新增：跟 orders.py 的 extract_order_cards_from_purchase_html 邏輯
+    完全一致——不依賴任何表格結構，把整頁轉成純文字，用「訂單編號
+    （LC/TT/KK開頭）這一行」當分界點切段。這是實際在 orders.py／quick_order.py
+    裡經過大量真實訂單驗證能穩定運作的解法，change_order.py 舊版用
+    table/tr/td 選擇器解析的做法跟真實頁面結構不符，才會一直查不到資料。
+    回傳 (blocks, soup)，blocks 是 [{"order_no":..., "lines":[...]}]。
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    blocks = []
+    current = None
+    for line in lines:
+        if re.fullmatch(ORDER_NO_REGEX, line):
+            if current:
+                blocks.append(current)
+            current = {"order_no": line, "lines": [line]}
+        elif current:
+            current["lines"].append(line)
+    if current:
+        blocks.append(current)
+
+    return blocks, soup
+
+
+def _find_tr_for_order_no(soup: BeautifulSoup, order_no: str):
+    """找出包含這個訂單編號的 <tr>，用來抓 LINE 連結（href 在純文字轉換時會遺失）。"""
+    for tr in soup.find_all("tr"):
+        if order_no in tr.get_text():
+            return tr
+    return None
+
+
+def _parse_order_block(block: dict, soup: BeautifulSoup) -> dict:
+    """
+    v2.2 新增：從 _extract_order_blocks_from_html 切出來的純文字段落，解析出
+    跟舊版 _parse_order_row 完全相同語意/欄位的 dict，讓呼叫端不用改。
+    """
+    order_no = block["order_no"]
+    lines = block["lines"]
+    joined = "\n".join(lines)
+
+    # purchase_id：後台編輯連結 /purchase/edit/{id}，同一張卡片附近應該找得到；
+    # 找不到則退而用訂單編號去掉英文字母後的數字部分（跟 quick_order.py /
+    # orders.py 的 _purchase_edit_id_from_order_no fallback 邏輯一致）。
+    purchase_id = ""
+    tr = _find_tr_for_order_no(soup, order_no)
+    search_scope_html = str(tr) if tr else ""
+    m_edit = re.search(r"/purchase/edit/(\d+)", search_scope_html)
+    if not m_edit:
+        # 有些頁面版本可能不是包在 tr 裡，退回整頁搜尋，抓「離這個訂單編號最近」的那個
+        for mm in re.finditer(r"/purchase/edit/(\d+)", html_of(soup)):
+            purchase_id = mm.group(1)
+            break
+    else:
+        purchase_id = m_edit.group(1)
+    if not purchase_id:
+        digits = re.sub(r"\D", "", order_no)
+        purchase_id = str(int(digits)) if digits else ""
+
+    # 客戶姓名：優先抓 /member?keyword= 連結文字（跟後台實際渲染方式一致）
+    customer_name = ""
+    if tr:
+        name_a = tr.find("a", href=re.compile(r"/member\?keyword="))
+        if name_a:
+            customer_name = name_a.get_text(strip=True)
+    if not customer_name:
+        # 找不到連結時，退而找電話那一行的前一行當姓名（跟 quick_order.py 的
+        # _extract_staff_line/電話解析慣用手法一致：姓名通常緊接在電話前）
+        for idx, ln in enumerate(lines):
+            if re.fullmatch(r"09\d{8}", ln) and idx > 0:
+                customer_name = lines[idx - 1]
+                break
+
+    # LINE 聊天連結
+    line_url = ""
+    if tr:
+        line_a = tr.find("a", href=re.compile(r"chat\.line\.biz"))
+        if line_a:
+            line_url = str(line_a.get("href", "")).strip()
+
+    # 服務日期＋時段：找「YYYY-MM-DD (星期)」這種格式，緊接著的 HH:MM-HH:MM 當時段
+    service_date_obj = None
+    period_text = ""
+    date_m = re.search(r"(\d{4}-\d{2}-\d{2})\s*[（(][一二三四五六日][）)]", joined)
+    if not date_m:
+        date_m = re.search(r"(\d{4}-\d{2}-\d{2})", joined)
+    if date_m:
+        try:
+            y, mo, d = [int(x) for x in date_m.group(1).split("-")]
+            service_date_obj = date(y, mo, d)
+        except Exception:
+            service_date_obj = None
+        tail = joined[date_m.end():date_m.end() + 200]
+        time_m = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", tail)
+        if time_m:
+            period_text = f"{time_m.group(1)} - {time_m.group(2)}"
+
+    # 服務人員人數：訂單卡片上專員名字慣用格式「姓名(數字)」，用 X 相連；
+    # 用這個 pattern 數出現次數當人數（含檸檬人）。
+    staff_tokens = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+[（(]\d+[）)]", joined)
+    cleaner_count = len(staff_tokens)
+
+    total_m = re.search(r"總金額[：:]\s*([\d,]+)", joined)
+    total = int(total_m.group(1).replace(",", "")) if total_m else 0
+
+    travel_fee_m = re.search(r"車馬費[：:]\s*([\d,]+)", joined)
+    travel_fee = int(travel_fee_m.group(1).replace(",", "")) if travel_fee_m else 0
+
+    if "儲值金" in joined:
+        payway = "儲值金"
+    elif "藍新ATM" in joined or "ATM" in joined:
+        payway = "ATM"
+    elif "信用卡" in joined or "刷卡" in joined:
+        payway = "信用卡"
+    else:
+        payway = "非儲值金"
+
+    invoice_m = re.search(r"發票[：:]\s*([A-Z0-9]+)", joined)
+    invoice_no = invoice_m.group(1) if invoice_m else ""
+
+    carrier_type = "三聯式" if ("統編" in joined or "三聯" in joined) else "二聯式"
+
+    # 付款狀態：後台卡片上會有「付款狀態：已付款」這種明確標示；
+    # 保守判斷，避免「未付款」「待付款」被誤判為已付款。
+    is_paid = bool(re.search(r"付款狀態[：:]\s*已付款", joined)) or (
+        "已付款" in joined and "未付款" not in joined and "待付款" not in joined
+    )
+
+    return {
+        "purchase_id": purchase_id,
+        "order_no": order_no,
+        "customer_name": customer_name,
+        "line_url": line_url,
+        "period_text": period_text,
+        "service_hours": _parse_period_hours(period_text),
+        "cleaner_count": cleaner_count,
+        "total": total,
+        "travel_fee": travel_fee,
+        "service_amount": max(total - travel_fee, 0),
+        "payway": payway,           # 儲值金 / 非儲值金
+        "invoice_no": invoice_no,
+        "carrier_type": carrier_type,  # 二聯式 / 三聯式
+        "raw_date_cell": joined,
+        "service_date": service_date_obj,
+        "is_paid": is_paid,
+        "pay_status_text": joined,
+    }
+
+
+def html_of(soup: BeautifulSoup) -> str:
+    try:
+        return str(soup)
+    except Exception:
+        return ""
+
+
 def _parse_order_row(row) -> dict:
-    """ 解析 /purchase 查詢結果頁裡的單一筆 <tr>，回傳訂單基本資料 dict（找不到訂單編號則回傳 None） """
+    """
+    舊版（依 <table><tr> 結構）解析函式，v2.2 起不再被本檔案內部使用
+    （改用 _extract_order_blocks_from_html + _parse_order_block，跟
+    orders.py 一致的純文字解析法），保留是避免萬一有其他地方還在引用。
+    """
     checkbox = row.select_one('input[name="purchase_id[]"]')
     purchase_id = checkbox["value"] if checkbox else None
     order_no_label = row.select_one("td label")
@@ -378,10 +562,6 @@ def _parse_order_row(row) -> dict:
     name_tag = row.select_one('a[href*="/member?keyword"]')
     customer_name = name_tag.get_text(strip=True) if name_tag else ""
 
-    # v1.7 新增：客戶 LINE 聊天連結網址。跟 customer_name 分開存放——
-    # customer_name 之後會被原封不動寫進清潔異動工作表 H 欄，不能塞
-    # markdown/超連結語法進去，line_url 只給 UI 端顯示用（例如把姓名顯示
-    # 成可點擊連結），不會被寫進 Sheet。
     line_tag = row.select_one('a[href*="chat.line.biz"]')
     line_url = line_tag.get("href", "").strip() if line_tag else ""
 
@@ -454,14 +634,13 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
 
     resp = session.get(f"{BASE_URL}/purchase", params=params, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
 
-    row = soup.select_one("table tbody tr")
-    if not row:
+    blocks, soup = _extract_order_blocks_from_html(resp.text)
+    if not blocks:
         log("⚠️ 查無資料")
         return None
 
-    result = _parse_order_row(row)
+    result = _parse_order_block(blocks[0], soup)
     if not result:
         log("⚠️ 查無資料")
         return None
@@ -504,18 +683,14 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
 
     resp = session.get(f"{BASE_URL}/purchase", params={"phone": phone}, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
 
-    rows = soup.select("table tbody tr")
-    if not rows:
+    blocks, soup = _extract_order_blocks_from_html(resp.text)
+    if not blocks:
         log("⚠️ 查無資料")
         return []
 
-    parsed = []
-    for row in rows:
-        info = _parse_order_row(row)
-        if info:
-            parsed.append(info)
+    parsed = [_parse_order_block(b, soup) for b in blocks]
+    parsed = [p for p in parsed if p]
 
     result = _select_change_order_candidates(parsed)
     if not result:
