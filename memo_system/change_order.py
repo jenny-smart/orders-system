@@ -1,11 +1,16 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.1
+# 版本：v2.2
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-07-08
+# 最後更新：2026-07-11
 #
 # Change Log
+# v2.2
+# - 清潔異動 Google Sheet B 欄加收類狀態改回財務用語「待收款／已收款」；
+#   回填後台時仍相容並寫入後台加收欄位（待加收／已加收）。
+# - dev/prod 環境由 UI 同步呼叫 change_order.set_env()，查詢與回填會跟上方
+#   環境選單一致。
 # v2.1
 # - B 欄為「已退款」時，已全額／已部份退款改依「退款金額」與「總金額－車馬費」判斷：
 #   退款金額大於等於總金額扣車馬費時回填已全額退款，低於則回填已部份退款。
@@ -285,12 +290,12 @@ COL = {
     "AC_退款時間": "AC",
 }
 
-STATUS_PENDING_CHARGE = "待加收"
+STATUS_PENDING_CHARGE = "待收款"
 STATUS_PENDING_REFUND = "待退款"
-STATUS_DONE_CHARGE = "已加收"
+STATUS_DONE_CHARGE = "已收款"
 STATUS_DONE_REFUND = "已退款"
-STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待收款"}
-STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已收款"}
+STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待加收"}
+STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已加收"}
 STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND}
 STATUS_DONE_REFUND_ALIASES = {STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款"}
 SYNC_STATUSES = {
@@ -706,7 +711,7 @@ def build_fare_row(order: dict, service_date: date = None, today: date = None) -
 def build_charge_row(order: dict, change_fee_info: dict, service_note: str,
                       customer_type: str = "一般", service_date: date = None,
                       today: date = None) -> dict:
-    """不退服務 → 異動服務收款（待加收）"""
+    """不退服務 → 異動服務收款（Sheet 狀態：待收款；後台欄位：待加收）"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     j_value = _format_change_fee_j(order, change_fee_info)
     return {
@@ -809,7 +814,7 @@ def _refund_payway(order: dict) -> str:
 def build_addtime_row(order: dict, time_fee_info: dict, service_note: str,
                        customer_type: str = "一般", service_date: date = None,
                        today: date = None) -> dict:
-    """加時 → 異動服務收款（待加收），其餘欄位結構同異動待加收"""
+    """加時 → 異動服務收款（Sheet 狀態：待收款；後台欄位：待加收）"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     timing = _time_change_timing_label(service_date, today=today)
     j_value = _format_people_hours_fee_j(f"{timing}加時", "待收", time_fee_info)
@@ -853,7 +858,7 @@ def build_reducetime_row(order: dict, time_fee_info: dict, service_note: str,
 def build_weekday_to_weekend_row(order: dict, time_fee_info: dict, service_note: str,
                                   customer_type: str = "一般", service_date: date = None,
                                   today: date = None) -> dict:
-    """異動平日轉週末 → 待加收，每人時差額 $100。"""
+    """異動平日轉週末 → Sheet 狀態待收款，每人時差額 $100。"""
     i_value = _format_service_datetime(service_date, order.get("period_text", ""))
     j_value = _format_people_hours_fee_j("異動平日轉週末", "待收", time_fee_info)
     return {
@@ -1297,7 +1302,7 @@ def _parse_sheet_row_spec(row_spec: str) -> set[int]:
 def get_pending_rows(region: str, row_spec: str = None, ui_logger=None):
     """
     讀取清潔異動工作表，篩出需要回填後台的列。
-    支援 B 欄狀態：待加收、待退款、已加收、已退款；且對應金額欄需有值。
+    支援 B 欄狀態：待收款、待退款、已收款、已退款；並相容舊值待加收、已加收。
     回傳 list of dict，含 sheet_row（原始列號，回寫用）。
     """
     def log(msg):
