@@ -1,50 +1,11 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.5
+# 版本：v2.1
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-07-11
+# 最後更新：2026-07-08
 #
 # Change Log
-# v2.5
-# - 確認查無資料的真正根因不是解析邏輯，是呼叫端沒有把畫面選的環境
-#   （dev/prod）傳進來：change_order.py 早就有 set_env(env) 可以切換
-#   CURRENT_ENV/BASE_URL，但除錯訊息顯示目前環境一直停在預設值 prod，
-#   即使畫面選 dev，查詢還是打去正式機（backend.lemonclean.com.tw），
-#   打去的環境帳密不符，被導回登入頁，查詢當然是 0 筆——這不是「查無
-#   資料」，是查錯環境／沒登入成功。這個開關本身要在呼叫端（memo_system/
-#   ui.py 之類）按下查詢時呼叫 set_env(env) 才會生效，change_order.py
-#   這邊先加防呆：fetch_order_basic／fetch_upcoming_paid_orders_by_phone
-#   偵測到回應像被導回登入頁時，直接丟明確的 RuntimeError（說明是環境/
-#   登入問題），不再默默回傳空清單、被上層誤顯示成「查無資料」，避免
-#   下次又要花時間排查誤導成「這支電話真的沒有訂單」。
-# v2.4
-# - 補上 TAIWAN_PUBLIC_HOLIDAYS 漏掉的 2026 年補假日（依行政院人事行政
-#   總處正式公告 115 年辦公日曆表）：2/27（和平紀念日補假）、4/3（兒童節
-#   補假）、4/6（清明節補假）、9/28（教師節/孔子誕辰紀念日）、10/9（國慶
-#   日補假）、10/26（台灣光復節補假）。這幾天都是星期一到五的工作日，
-#   漏掉會導致 _count_workdays_before 多算工作天數，異動費可能算錯級距。
-# v2.3
-# - fetch_upcoming_paid_orders_by_phone 補上除錯資訊：目前環境/實際連線
-#   網址、HTTP 狀態碼、最終網址是否像登入頁、原始訂單卡片數與編號、每筆
-#   解析出的付款狀態/服務日期。v2.2 換上「純文字切段」解法後若還是查無
-#   資料，這樣才能直接從執行 LOG 判斷是解析邏輯的問題，還是 session 根本
-#   沒登入到正確環境/帳號（回應像登入頁、或原始卡片數就是 0）。
-# v2.2
-# - 修正電話查詢異動訂單「查無資料」的根因：_parse_order_row 原本用寫死的
-#   CSS 結構解析 /purchase 列表頁（table tbody tr、td label、tds[2]/tds[3]
-#   固定欄位索引），但這頁實際的 HTML 結構跟這個假設不符（orders.py 裡經過
-#   實戰驗證能穩定查到訂單的 extract_order_cards_from_purchase_html，完全
-#   不依賴表格結構，是把整頁轉純文字、用「LC/TT/KK開頭的訂單編號那一行」
-#   當分界點切段）。這代表 change_order.py 這支函式從一開始就沒有拿真實
-#   頁面驗證過，每一列都解析成 None，最後永遠回傳空清單，即使電話底下
-#   明明有已付款訂單也會顯示「查無資料」。
-#   改成跟 orders.py 一致、已證實可行的「純文字＋正規表達式」解法：
-#   新增 _extract_order_blocks_from_html 依訂單編號切段，_parse_order_block
-#   從純文字段落解析所有欄位（保留原本 _parse_order_row 對外的欄位格式與
-#   語意，呼叫端 fetch_order_basic / fetch_upcoming_paid_orders_by_phone
-#   完全不用改）。舊的 _parse_order_row（依 tr）保留但不再被使用，避免
-#   萬一有其他地方引用到。
 # v2.1
 # - B 欄為「已退款」時，已全額／已部份退款改依「退款金額」與「總金額－車馬費」判斷：
 #   退款金額大於等於總金額扣車馬費時回填已全額退款，低於則回填已部份退款。
@@ -153,20 +114,13 @@ TAIWAN_PUBLIC_HOLIDAYS = {
     date(2026, 2, 18),
     date(2026, 2, 19),
     date(2026, 2, 20),
-    date(2026, 2, 27),  # 和平紀念日2/28（六）補假
     date(2026, 2, 28),
-    date(2026, 4, 3),   # 兒童節4/4（六）補假
     date(2026, 4, 4),
     date(2026, 4, 5),
-    date(2026, 4, 6),   # 清明節4/5（日）補假
     date(2026, 5, 1),
     date(2026, 6, 19),
     date(2026, 9, 25),
-    date(2026, 9, 28),  # 教師節/孔子誕辰紀念日
-    date(2026, 10, 9),  # 國慶日10/10（六）補假
     date(2026, 10, 10),
-    date(2026, 10, 25),
-    date(2026, 10, 26), # 台灣光復節10/25（日）補假
     date(2026, 12, 25),
 }
 
@@ -412,177 +366,8 @@ def _extract_service_date(date_cell_text: str):
         return None
 
 
-# v2.2：訂單編號目前已知前綴有 LC（一般訂單）、TT（測試站/儲值金折抵消費訂單）、
-# KK（儲值金購買訂單），跟 orders.py 的 ORDER_NO_REGEX 保持一致。
-ORDER_NO_REGEX = r"(LC|TT|KK)\d+"
-
-
-def _extract_order_blocks_from_html(html_text: str):
-    """
-    v2.2 新增：跟 orders.py 的 extract_order_cards_from_purchase_html 邏輯
-    完全一致——不依賴任何表格結構，把整頁轉成純文字，用「訂單編號
-    （LC/TT/KK開頭）這一行」當分界點切段。這是實際在 orders.py／quick_order.py
-    裡經過大量真實訂單驗證能穩定運作的解法，change_order.py 舊版用
-    table/tr/td 選擇器解析的做法跟真實頁面結構不符，才會一直查不到資料。
-    回傳 (blocks, soup)，blocks 是 [{"order_no":..., "lines":[...]}]。
-    """
-    soup = BeautifulSoup(html_text, "html.parser")
-    text = soup.get_text("\n", strip=True)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-    blocks = []
-    current = None
-    for line in lines:
-        if re.fullmatch(ORDER_NO_REGEX, line):
-            if current:
-                blocks.append(current)
-            current = {"order_no": line, "lines": [line]}
-        elif current:
-            current["lines"].append(line)
-    if current:
-        blocks.append(current)
-
-    return blocks, soup
-
-
-def _find_tr_for_order_no(soup: BeautifulSoup, order_no: str):
-    """找出包含這個訂單編號的 <tr>，用來抓 LINE 連結（href 在純文字轉換時會遺失）。"""
-    for tr in soup.find_all("tr"):
-        if order_no in tr.get_text():
-            return tr
-    return None
-
-
-def _parse_order_block(block: dict, soup: BeautifulSoup) -> dict:
-    """
-    v2.2 新增：從 _extract_order_blocks_from_html 切出來的純文字段落，解析出
-    跟舊版 _parse_order_row 完全相同語意/欄位的 dict，讓呼叫端不用改。
-    """
-    order_no = block["order_no"]
-    lines = block["lines"]
-    joined = "\n".join(lines)
-
-    # purchase_id：後台編輯連結 /purchase/edit/{id}，同一張卡片附近應該找得到；
-    # 找不到則退而用訂單編號去掉英文字母後的數字部分（跟 quick_order.py /
-    # orders.py 的 _purchase_edit_id_from_order_no fallback 邏輯一致）。
-    purchase_id = ""
-    tr = _find_tr_for_order_no(soup, order_no)
-    search_scope_html = str(tr) if tr else ""
-    m_edit = re.search(r"/purchase/edit/(\d+)", search_scope_html)
-    if not m_edit:
-        # 有些頁面版本可能不是包在 tr 裡，退回整頁搜尋，抓「離這個訂單編號最近」的那個
-        for mm in re.finditer(r"/purchase/edit/(\d+)", html_of(soup)):
-            purchase_id = mm.group(1)
-            break
-    else:
-        purchase_id = m_edit.group(1)
-    if not purchase_id:
-        digits = re.sub(r"\D", "", order_no)
-        purchase_id = str(int(digits)) if digits else ""
-
-    # 客戶姓名：優先抓 /member?keyword= 連結文字（跟後台實際渲染方式一致）
-    customer_name = ""
-    if tr:
-        name_a = tr.find("a", href=re.compile(r"/member\?keyword="))
-        if name_a:
-            customer_name = name_a.get_text(strip=True)
-    if not customer_name:
-        # 找不到連結時，退而找電話那一行的前一行當姓名（跟 quick_order.py 的
-        # _extract_staff_line/電話解析慣用手法一致：姓名通常緊接在電話前）
-        for idx, ln in enumerate(lines):
-            if re.fullmatch(r"09\d{8}", ln) and idx > 0:
-                customer_name = lines[idx - 1]
-                break
-
-    # LINE 聊天連結
-    line_url = ""
-    if tr:
-        line_a = tr.find("a", href=re.compile(r"chat\.line\.biz"))
-        if line_a:
-            line_url = str(line_a.get("href", "")).strip()
-
-    # 服務日期＋時段：找「YYYY-MM-DD (星期)」這種格式，緊接著的 HH:MM-HH:MM 當時段
-    service_date_obj = None
-    period_text = ""
-    date_m = re.search(r"(\d{4}-\d{2}-\d{2})\s*[（(][一二三四五六日][）)]", joined)
-    if not date_m:
-        date_m = re.search(r"(\d{4}-\d{2}-\d{2})", joined)
-    if date_m:
-        try:
-            y, mo, d = [int(x) for x in date_m.group(1).split("-")]
-            service_date_obj = date(y, mo, d)
-        except Exception:
-            service_date_obj = None
-        tail = joined[date_m.end():date_m.end() + 200]
-        time_m = re.search(r"(\d{1,2}:\d{2})\s*[-~～]\s*(\d{1,2}:\d{2})", tail)
-        if time_m:
-            period_text = f"{time_m.group(1)} - {time_m.group(2)}"
-
-    # 服務人員人數：訂單卡片上專員名字慣用格式「姓名(數字)」，用 X 相連；
-    # 用這個 pattern 數出現次數當人數（含檸檬人）。
-    staff_tokens = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+[（(]\d+[）)]", joined)
-    cleaner_count = len(staff_tokens)
-
-    total_m = re.search(r"總金額[：:]\s*([\d,]+)", joined)
-    total = int(total_m.group(1).replace(",", "")) if total_m else 0
-
-    travel_fee_m = re.search(r"車馬費[：:]\s*([\d,]+)", joined)
-    travel_fee = int(travel_fee_m.group(1).replace(",", "")) if travel_fee_m else 0
-
-    if "儲值金" in joined:
-        payway = "儲值金"
-    elif "藍新ATM" in joined or "ATM" in joined:
-        payway = "ATM"
-    elif "信用卡" in joined or "刷卡" in joined:
-        payway = "信用卡"
-    else:
-        payway = "非儲值金"
-
-    invoice_m = re.search(r"發票[：:]\s*([A-Z0-9]+)", joined)
-    invoice_no = invoice_m.group(1) if invoice_m else ""
-
-    carrier_type = "三聯式" if ("統編" in joined or "三聯" in joined) else "二聯式"
-
-    # 付款狀態：後台卡片上會有「付款狀態：已付款」這種明確標示；
-    # 保守判斷，避免「未付款」「待付款」被誤判為已付款。
-    is_paid = bool(re.search(r"付款狀態[：:]\s*已付款", joined)) or (
-        "已付款" in joined and "未付款" not in joined and "待付款" not in joined
-    )
-
-    return {
-        "purchase_id": purchase_id,
-        "order_no": order_no,
-        "customer_name": customer_name,
-        "line_url": line_url,
-        "period_text": period_text,
-        "service_hours": _parse_period_hours(period_text),
-        "cleaner_count": cleaner_count,
-        "total": total,
-        "travel_fee": travel_fee,
-        "service_amount": max(total - travel_fee, 0),
-        "payway": payway,           # 儲值金 / 非儲值金
-        "invoice_no": invoice_no,
-        "carrier_type": carrier_type,  # 二聯式 / 三聯式
-        "raw_date_cell": joined,
-        "service_date": service_date_obj,
-        "is_paid": is_paid,
-        "pay_status_text": joined,
-    }
-
-
-def html_of(soup: BeautifulSoup) -> str:
-    try:
-        return str(soup)
-    except Exception:
-        return ""
-
-
 def _parse_order_row(row) -> dict:
-    """
-    舊版（依 <table><tr> 結構）解析函式，v2.2 起不再被本檔案內部使用
-    （改用 _extract_order_blocks_from_html + _parse_order_block，跟
-    orders.py 一致的純文字解析法），保留是避免萬一有其他地方還在引用。
-    """
+    """ 解析 /purchase 查詢結果頁裡的單一筆 <tr>，回傳訂單基本資料 dict（找不到訂單編號則回傳 None） """
     checkbox = row.select_one('input[name="purchase_id[]"]')
     purchase_id = checkbox["value"] if checkbox else None
     order_no_label = row.select_one("td label")
@@ -593,6 +378,10 @@ def _parse_order_row(row) -> dict:
     name_tag = row.select_one('a[href*="/member?keyword"]')
     customer_name = name_tag.get_text(strip=True) if name_tag else ""
 
+    # v1.7 新增：客戶 LINE 聊天連結網址。跟 customer_name 分開存放——
+    # customer_name 之後會被原封不動寫進清潔異動工作表 H 欄，不能塞
+    # markdown/超連結語法進去，line_url 只給 UI 端顯示用（例如把姓名顯示
+    # 成可點擊連結），不會被寫進 Sheet。
     line_tag = row.select_one('a[href*="chat.line.biz"]')
     line_url = line_tag.get("href", "").strip() if line_tag else ""
 
@@ -665,24 +454,14 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
 
     resp = session.get(f"{BASE_URL}/purchase", params=params, timeout=20)
     resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    _looks_login_page = "login" in resp.url.lower() or "password" in resp.text.lower()[:3000]
-    if _looks_login_page:
-        # v2.4：不要再默默回傳「查無資料」，這種情況根本不是「沒有訂單」，
-        # 是這個 session 沒有登入成功（或環境切錯，帶著錯的帳密/環境去查
-        # 另一個後台），直接丟明確錯誤，避免誤導成「這支電話沒有訂單」。
-        raise RuntimeError(
-            f"查詢訂單失敗：回應像是被導回登入頁（{resp.url}），代表這個 session 尚未成功登入"
-            f"目前設定的環境（{CURRENT_ENV}：{BASE_URL}），請確認環境（dev/prod）跟帳號密碼是否一致，"
-            "而不是「查無資料」。"
-        )
-
-    blocks, soup = _extract_order_blocks_from_html(resp.text)
-    if not blocks:
+    row = soup.select_one("table tbody tr")
+    if not row:
         log("⚠️ 查無資料")
         return None
 
-    result = _parse_order_block(blocks[0], soup)
+    result = _parse_order_row(row)
     if not result:
         log("⚠️ 查無資料")
         return None
@@ -722,34 +501,21 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
             ui_logger(msg)
 
     log(f"查詢電話：{phone}")
-    log(f"🔧 除錯：目前環境={CURRENT_ENV}，實際連線={BASE_URL}")
 
     resp = session.get(f"{BASE_URL}/purchase", params={"phone": phone}, timeout=20)
     resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    _looks_login_page = "login" in resp.url.lower() or "password" in resp.text.lower()[:3000]
-    log(f"🔧 除錯：HTTP {resp.status_code}，最終網址={resp.url}，看起來像登入頁={_looks_login_page}")
-    if _looks_login_page:
-        # v2.4：同 fetch_order_basic，不要再默默回傳空清單然後被上層顯示成
-        # 「查無資料」，這是登入/環境設定的問題，直接丟明確錯誤。
-        raise RuntimeError(
-            f"查詢電話失敗：回應像是被導回登入頁（{resp.url}），代表這個 session 尚未成功登入"
-            f"目前設定的環境（{CURRENT_ENV}：{BASE_URL}），請確認畫面選的環境（dev/prod）有沒有"
-            "真的傳進來（呼叫端是否有呼叫 change_order.set_env(env)），以及帳號密碼是否對應該環境。"
-        )
-
-    blocks, soup = _extract_order_blocks_from_html(resp.text)
-    log(f"🔧 除錯：原始訂單卡片數={len(blocks)}" + (f"（{[b['order_no'] for b in blocks[:10]]}）" if blocks else ""))
-    if not blocks:
-        log(f"🔧 除錯：回應內容片段（前300字）：{resp.text[:300].strip()}")
+    rows = soup.select("table tbody tr")
+    if not rows:
         log("⚠️ 查無資料")
         return []
 
-    parsed = [_parse_order_block(b, soup) for b in blocks]
-    parsed = [p for p in parsed if p]
-    log(f"🔧 除錯：付款狀態判斷 → " + "；".join(
-        f"{p['order_no']}(已付款={p['is_paid']}, 服務日={p['service_date']})" for p in parsed[:10]
-    ))
+    parsed = []
+    for row in rows:
+        info = _parse_order_row(row)
+        if info:
+            parsed.append(info)
 
     result = _select_change_order_candidates(parsed)
     if not result:
