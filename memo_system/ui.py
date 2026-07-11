@@ -3,17 +3,6 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
-# 2026-07-11
-# - render_memo_system 兩個登入設定分支都新增呼叫 change_order.set_env(
-#   env_option)：change_order.py 是獨立模組，自己有一份 CURRENT_ENV/
-#   BASE_URL，跟 memo.py 的環境設定完全不相通。原本只呼叫了
-#   memo.set_env(env_option)，change_order.py 永遠停在寫死的預設值
-#   "prod"。get_session() 用 memo.login() 登入，拿到的 session cookie
-#   只在 memo.py 那份環境設定對應的網域有效（例如選 dev 就是登入
-#   backend-dev.lemonclean.com.tw）；但「異動管理」查詢時是拿這個 session
-#   去打 change_order.BASE_URL（因為沒人呼叫過它的 set_env，永遠是
-#   prod 的 backend.lemonclean.com.tw）——網域對不上，cookie 沒用，後台
-#   直接導回登入頁，查詢永遠 0 筆，卻被誤判成「查無資料」。
 # 2026-07-08
 # - ATM 待付款清單的預設訂購日期迄改用 atm.default_date_until_tw()，避免
 #   Streamlit Cloud UTC 日期造成前一天判斷錯誤。
@@ -540,12 +529,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         # 由整合頁面（pages/訂單系統.py）統一提供帳密/環境，這裡不再重複顯示登入欄位。
         email, password, env_option = shared_backend_email, shared_backend_password, shared_env
         memo.set_env(env_option)
-        # v2026.07.11：change_order.py 是獨立模組，自己有一份 CURRENT_ENV/
-        # BASE_URL，跟 memo.py 的環境設定完全不相通，之前這裡漏了呼叫，
-        # 導致「異動管理」查詢一律固定打去 change_order.py 寫死的預設值
-        # prod，跟這裡選的 dev/prod 完全無關，session cookie 網域對不上，
-        # 查詢一律被導回登入頁，誤判成「查無資料」。
-        change_order.set_env(env_option)
         memo.set_runtime_credentials(email, password)
         st.session_state.credentials_ready = bool((email or "").strip()) and bool((password or "").strip())
 
@@ -571,9 +554,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 env_option = st.selectbox("環境", ["prod", "dev"], index=0, key="login_env")
 
             memo.set_env(env_option)
-            # v2026.07.11：同上，這個獨立登入分支（沒有整合頁面共用帳密時）
-            # 也漏了同步 change_order.py 的環境設定，一併補上。
-            change_order.set_env(env_option)
             memo.set_runtime_credentials(email, password)
             st.session_state.credentials_ready = bool(email.strip()) and bool(password.strip())
 
