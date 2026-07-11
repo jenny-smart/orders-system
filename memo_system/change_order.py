@@ -1,11 +1,23 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.4
+# 版本：v2.5
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-11
 #
 # Change Log
+# v2.5
+# - 確認查無資料的真正根因不是解析邏輯，是呼叫端沒有把畫面選的環境
+#   （dev/prod）傳進來：change_order.py 早就有 set_env(env) 可以切換
+#   CURRENT_ENV/BASE_URL，但除錯訊息顯示目前環境一直停在預設值 prod，
+#   即使畫面選 dev，查詢還是打去正式機（backend.lemonclean.com.tw），
+#   打去的環境帳密不符，被導回登入頁，查詢當然是 0 筆——這不是「查無
+#   資料」，是查錯環境／沒登入成功。這個開關本身要在呼叫端（memo_system/
+#   ui.py 之類）按下查詢時呼叫 set_env(env) 才會生效，change_order.py
+#   這邊先加防呆：fetch_order_basic／fetch_upcoming_paid_orders_by_phone
+#   偵測到回應像被導回登入頁時，直接丟明確的 RuntimeError（說明是環境/
+#   登入問題），不再默默回傳空清單、被上層誤顯示成「查無資料」，避免
+#   下次又要花時間排查誤導成「這支電話真的沒有訂單」。
 # v2.4
 # - 補上 TAIWAN_PUBLIC_HOLIDAYS 漏掉的 2026 年補假日（依行政院人事行政
 #   總處正式公告 115 年辦公日曆表）：2/27（和平紀念日補假）、4/3（兒童節
@@ -654,6 +666,17 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
     resp = session.get(f"{BASE_URL}/purchase", params=params, timeout=20)
     resp.raise_for_status()
 
+    _looks_login_page = "login" in resp.url.lower() or "password" in resp.text.lower()[:3000]
+    if _looks_login_page:
+        # v2.4：不要再默默回傳「查無資料」，這種情況根本不是「沒有訂單」，
+        # 是這個 session 沒有登入成功（或環境切錯，帶著錯的帳密/環境去查
+        # 另一個後台），直接丟明確錯誤，避免誤導成「這支電話沒有訂單」。
+        raise RuntimeError(
+            f"查詢訂單失敗：回應像是被導回登入頁（{resp.url}），代表這個 session 尚未成功登入"
+            f"目前設定的環境（{CURRENT_ENV}：{BASE_URL}），請確認環境（dev/prod）跟帳號密碼是否一致，"
+            "而不是「查無資料」。"
+        )
+
     blocks, soup = _extract_order_blocks_from_html(resp.text)
     if not blocks:
         log("⚠️ 查無資料")
@@ -706,6 +729,14 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
 
     _looks_login_page = "login" in resp.url.lower() or "password" in resp.text.lower()[:3000]
     log(f"🔧 除錯：HTTP {resp.status_code}，最終網址={resp.url}，看起來像登入頁={_looks_login_page}")
+    if _looks_login_page:
+        # v2.4：同 fetch_order_basic，不要再默默回傳空清單然後被上層顯示成
+        # 「查無資料」，這是登入/環境設定的問題，直接丟明確錯誤。
+        raise RuntimeError(
+            f"查詢電話失敗：回應像是被導回登入頁（{resp.url}），代表這個 session 尚未成功登入"
+            f"目前設定的環境（{CURRENT_ENV}：{BASE_URL}），請確認畫面選的環境（dev/prod）有沒有"
+            "真的傳進來（呼叫端是否有呼叫 change_order.set_env(env)），以及帳號密碼是否對應該環境。"
+        )
 
     blocks, soup = _extract_order_blocks_from_html(resp.text)
     log(f"🔧 除錯：原始訂單卡片數={len(blocks)}" + (f"（{[b['order_no'] for b in blocks[:10]]}）" if blocks else ""))
