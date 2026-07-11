@@ -529,6 +529,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         # 由整合頁面（pages/訂單系統.py）統一提供帳密/環境，這裡不再重複顯示登入欄位。
         email, password, env_option = shared_backend_email, shared_backend_password, shared_env
         memo.set_env(env_option)
+        change_order.set_env(env_option)
         memo.set_runtime_credentials(email, password)
         st.session_state.credentials_ready = bool((email or "").strip()) and bool((password or "").strip())
 
@@ -554,6 +555,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 env_option = st.selectbox("環境", ["prod", "dev"], index=0, key="login_env")
 
             memo.set_env(env_option)
+            change_order.set_env(env_option)
             memo.set_runtime_credentials(email, password)
             st.session_state.credentials_ready = bool(email.strip()) and bool(password.strip())
 
@@ -1298,9 +1300,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # ============================================================
 
     SCENARIO_OPTIONS = [
-        "僅開車馬費發票", "異動費(待加收)", "異動費(待退款)",
-        "異動平日轉週末(待加收)", "異動週末轉平日(待退款)",
-        "加時(待加收)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
+        "僅開車馬費發票", "異動費(待收款)", "異動費(待退款)",
+        "異動平日轉週末(待收款)", "異動週末轉平日(待退款)",
+        "加時(待收款)", "減時(待退款)", "客訴(待退款)", "物損(待退款)",
     ]
 
     def _order_money(order, key, default=0):
@@ -1317,7 +1319,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         return 30
 
     def apply_time_change_label(row, scenario, timing):
-        prefix = f"{timing}加時" if scenario == "加時(待加收)" else f"{timing}減時"
+        prefix = f"{timing}加時" if scenario == "加時(待收款)" else f"{timing}減時"
         j = str(row.get("J", ""))
         for old in ("服務前加時", "當天加時", "服務後加時", "專員回報加時", "服務前減時", "當天減時", "服務後減時", "專員回報減時"):
             j = j.replace(old, prefix)
@@ -1431,7 +1433,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         c1, c2 = st.columns([1, 1.5])
         with c1:
             scenario = st.radio("情境", SCENARIO_OPTIONS, key="co_scenario")
-            is_time_change = scenario in ("加時(待加收)", "減時(待退款)")
+            is_time_change = scenario in ("加時(待收款)", "減時(待退款)")
             is_manual_refund = scenario in ("客訴(待退款)", "物損(待退款)")
             time_change_timing = "服務前"; change_hours = None; change_person = None
             if is_time_change:
@@ -1464,7 +1466,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 for order in selected_orders:
                     if scenario == "僅開車馬費發票":
                         calc_rows.append(change_order.build_fare_row(order, service_date=service_date_input)); continue
-                    if scenario == "加時(待加收)":
+                    if scenario == "加時(待收款)":
                         time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
                         row = change_order.build_addtime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
@@ -1472,7 +1474,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
                         row = change_order.build_reducetime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
-                    if scenario == "異動平日轉週末(待加收)":
+                    if scenario == "異動平日轉週末(待收款)":
                         time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.TIME_RATE_DAY_TYPE_DIFF, label="平日轉週末每人時差額")
                         calc_rows.append(change_order.build_weekday_to_weekend_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "異動週末轉平日(待退款)":
@@ -1483,7 +1485,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                     if scenario == "物損(待退款)":
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_DAMAGE_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     fee_info = change_order.calc_change_fee(order, service_date=service_date_input)
-                    if scenario == "異動費(待加收)":
+                    if scenario == "異動費(待收款)":
                         calc_rows.append(change_order.build_charge_row(order, fee_info, service_note, customer_type=customer_type, service_date=service_date_input))
                     else:
                         fee_info = apply_refund_fee_on_service_amount(order, fee_info)
@@ -1535,7 +1537,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_change_order_stage_b():
         step("3", "讀取清潔異動工作表待處理列")
-        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待加收、待退款、已加收、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依狀態寫回後台</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款欄位</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
         c_region, c_rows = st.columns([1, 3])
         with c_region:
             region = st.selectbox("地區", ["台北", "台中"], key="co_region_b")
@@ -1568,7 +1570,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.markdown("---"); step("4", "待處理清單（請勾選要回填的項目）")
             selected = []
             for item in pending:
-                status = item.get("status") or ("待加收" if item["kind"] == "charge" else "待退款")
+                status = item.get("status") or ("待收款" if item["kind"] == "charge" else "待退款")
                 checked = st.checkbox(f"{item['order_no']}（{status}，Sheet 第 {item['sheet_row']} 列）", value=True, key=f"co_pick_{item['sheet_row']}")
                 detail = f"H 欄姓名：{item.get('customer_name','')}　｜　J 欄：{item.get('j_note','')}"
                 if item.get("kind") == "refund": detail += f"　｜　Y 欄：{item.get('refund_invoice_type','')}"
