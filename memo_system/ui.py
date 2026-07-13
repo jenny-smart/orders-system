@@ -3,6 +3,9 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-07-13
+# - ATM 對帳地區預設改由登入帳號判斷；jenny.tc 等台中帳號預設台中，
+#   避免台中登入卻查詢/貼到台北工作表。
 # 2026-07-08
 # - ATM 待付款清單的預設訂購日期迄改用 atm.default_date_until_tw()，避免
 #   Streamlit Cloud UTC 日期造成前一天判斷錯誤。
@@ -21,6 +24,22 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     from . import atm
     atm = importlib.reload(atm)
     from . import change_order
+
+    def default_region_from_email(email_value):
+        text = str(email_value or "").strip().lower()
+        if ".tc@" in text or "+tc@" in text or text.startswith("jenny.tc@"):
+            return "台中"
+        return "台北"
+
+    def region_selectbox(label, key, email_value=None):
+        options = ["台北", "台中"]
+        default_region = default_region_from_email(email_value)
+        marker_key = f"{key}_default_email"
+        current_email = str(email_value or "").strip().lower()
+        if st.session_state.get(marker_key) != current_email:
+            st.session_state[key] = default_region
+            st.session_state[marker_key] = current_email
+        return st.selectbox(label, options, index=options.index(default_region), key=key)
 
     st.markdown("""
     <style>
@@ -251,7 +270,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         "co_calc_rows": [], "co_pending_rows": [],
         "co_phone_orders": [], "co_selected_order_no": "",
         "co_selected_order_detail": None,
-        "auth_session": None, "auth_env": "", "credentials_ready": False,
+        "auth_session": None, "auth_env": "", "auth_email": "", "credentials_ready": False,
         "assess_v1": "", "assess_v2": "",
     }
 
@@ -367,6 +386,13 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.session_state.last_mode = current_mode
 
     def get_session(ui_logger=None):
+        desired_email = str(email or "").strip()
+        desired_env = str(env_option or "prod").strip()
+        if (st.session_state.auth_session is not None
+                and (st.session_state.get("auth_email") != desired_email
+                     or st.session_state.get("auth_env") != desired_env)):
+            st.session_state.auth_session = None
+            st.session_state.is_logged_in = False
         if st.session_state.auth_session is not None:
             return st.session_state.auth_session
         if not st.session_state.get("credentials_ready"):
@@ -374,8 +400,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         session = memo.login(ui_logger=ui_logger)
         st.session_state.auth_session = session
         st.session_state.is_logged_in = True
-        st.session_state.login_identity = st.session_state.get("login_email", "")
-        st.session_state.auth_env = st.session_state.get("login_env", "prod")
+        st.session_state.login_identity = desired_email
+        st.session_state.auth_email = desired_email
+        st.session_state.auth_env = desired_env
         return session
 
     # ============================================================
@@ -534,8 +561,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         st.session_state.credentials_ready = bool((email or "").strip()) and bool((password or "").strip())
 
         if (st.session_state.is_logged_in
-                and st.session_state.auth_env
-                and st.session_state.auth_env != env_option):
+                and ((st.session_state.auth_env and st.session_state.auth_env != env_option)
+                     or (st.session_state.auth_email and st.session_state.auth_email != (email or "").strip()))):
             st.session_state.auth_session = None
             st.session_state.is_logged_in = False
     else:
@@ -568,11 +595,11 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 st.rerun()
 
             if (st.session_state.is_logged_in
-                    and st.session_state.auth_env
-                    and st.session_state.auth_env != env_option):
+                    and ((st.session_state.auth_env and st.session_state.auth_env != env_option)
+                         or (st.session_state.auth_email and st.session_state.auth_email != email.strip()))):
                 st.session_state.auth_session = None
                 st.session_state.is_logged_in = False
-                st.warning("環境已切換，下次執行功能時會自動重新登入。")
+                st.warning("帳號或環境已切換，下次執行功能時會自動重新登入。")
 
         if not st.session_state.credentials_ready:
             st.markdown(
@@ -1038,7 +1065,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     def render_atm_list_mode():
         step("3", "待付款清單查詢")
         c1, c2 = st.columns([1, 2])
-        with c1: region = st.selectbox("要貼到哪個地區的工作表", ["台北", "台中"], key="atm_list_region")
+        with c1: region = region_selectbox("要貼到哪個地區的工作表", "atm_list_region", email)
         with c2: date_until = st.date_input("訂購日期-迄（預設為前一天）", value=date.fromisoformat(atm.default_date_until_tw()), key="atm_list_date_until")
 
         search_btn = st.button("🔍 查詢待付款 ATM 名單", use_container_width=True, disabled=not st.session_state.credentials_ready)
@@ -1098,7 +1125,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
         row_spec = st.text_input("指定銀行列號", placeholder="例如：762-764,767-771")
         c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        with c1: region = st.selectbox("地區", ["台北", "台中"], key="atm_match_region")
+        with c1: region = region_selectbox("地區", "atm_match_region", email)
         with c2: default_service_type = st.text_input("預設服務類別", value="清潔", key="atm_match_service_type")
         with c3: default_fee_type = st.text_input("預設費用類別", value="服務費用", key="atm_match_fee_type")
         with c4:
@@ -1139,7 +1166,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         step("5", "更新系統對帳")
         st.markdown('<div class="warn-strip"><b>注意</b><ul><li>執行後會立即更新系統</li><li>發確認信會直接寄出</li><li>請確認列號正確後再執行</li></ul></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([1, 3])
-        with c1: region = st.selectbox("地區", ["台北", "台中"], key="atm_reconcile_region")
+        with c1: region = region_selectbox("地區", "atm_reconcile_region", email)
         with c2: row_spec = st.text_input("列號", placeholder="支援：單列 2、逗號分隔 2,3,5、區間 2,3,5-7")
         c3, c4, c5 = st.columns(3)
         with c3: do_mark_paid = st.checkbox("按已付款", value=True)
