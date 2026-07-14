@@ -1,11 +1,17 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.3
+# 版本：v2.5
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-15
 #
 # Change Log
+# v2.5
+# - AD 欄系統回填時間改用 Asia/Taipei 台北時區，避免部署環境使用 UTC 或
+#   其他時區造成時間偏差。
+# v2.4
+# - 清潔異動工作表 AE 欄新增處理狀態：階段 A 寫入工作表時標記「建立異動」；
+#   階段 B 成功回填後，AD 欄保留系統回填時間，AE 欄改標記「更新系統」。
 # v2.3
 # - 已收款回填後台時，加收備註改為保留 Sheet 備註並加上「MM/DD已收」；
 #   若 O 欄發票號碼不是「儲值金」，再加註「開立發票XXXXXXXXXX」。
@@ -985,6 +991,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             for col in col_letters:
                 if col in row and row[col] != "":
                     ws.update_acell(f"{col}{target_row}", row[col])
+            ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
         except Exception as e:
@@ -1561,8 +1568,9 @@ def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
             ui_logger(msg)
 
     ws = get_worksheet(region)
-    ws.update_acell(f"AD{sheet_row}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間（B 欄狀態不變）")
+    ws.update_acell(f"AD{sheet_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
+    ws.update_acell(f"AE{sheet_row}", "更新系統")
+    log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
 # ============================================================
