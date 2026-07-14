@@ -3,6 +3,9 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-07-15（二）
+# - 清潔異動階段 B 掃描說明補上專員服務時間異動、車馬費發票、VIP券與儲值金
+#   扣返等特殊 B 欄狀態。
 # 2026-07-15
 # - 清潔異動階段 A/B 地區下拉新增桃園／新竹／高雄，對應 change_order.py
 #   v2.3 新增的清潔異動 Google Sheet。
@@ -1567,7 +1570,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_change_order_stage_b():
         step("3", "讀取清潔異動工作表待處理列")
-        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款欄位</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款，或專員服務時間異動、車馬費發票、VIP待退券/VIP已退券、待扣/已扣/待返/已返儲值金</li><li>收退款列需有對應金額；備註型列需有 K 欄備註</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款/備註欄位</li><li>AD 欄寫入系統回填時間，AE 欄寫入更新狀態</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
         c_region, c_rows = st.columns([1, 3])
         with c_region:
             region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="co_region_b")

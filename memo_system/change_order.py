@@ -1,11 +1,16 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.5
+# 版本：v2.6
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-15
 #
 # Change Log
+# v2.6
+# - B 欄新增特殊狀態支援：「專員服務時間異動」只把 K 欄寫入加收備註；
+#   「車馬費發票」只把 K 欄插入財務備註最上方。
+# - VIP待退券／VIP已退券 視為待退款／已退款；待扣儲值金／已扣儲值金 視為
+#   待收款／已收款；待返儲值金／已返儲值金 視為待退款／已退款。
 # v2.5
 # - AD 欄系統回填時間改用 Asia/Taipei 台北時區，避免部署環境使用 UTC 或
 #   其他時區造成時間偏差。
@@ -315,15 +320,22 @@ STATUS_PENDING_CHARGE = "待收款"
 STATUS_PENDING_REFUND = "待退款"
 STATUS_DONE_CHARGE = "已收款"
 STATUS_DONE_REFUND = "已退款"
-STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待加收"}
-STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已加收"}
-STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND}
-STATUS_DONE_REFUND_ALIASES = {STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款"}
+STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待加收", "待扣儲值金"}
+STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已加收", "已扣儲值金"}
+STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND, "VIP待退券", "待返儲值金"}
+STATUS_DONE_REFUND_ALIASES = {
+    STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款",
+    "VIP已退券", "已返儲值金",
+}
+STATUS_STAFF_TIME_CHANGE = {"專員服務時間異動"}
+STATUS_FARE_INVOICE_ONLY = {"車馬費發票"}
 SYNC_STATUSES = {
     *STATUS_PENDING_CHARGE_ALIASES,
     *STATUS_PENDING_REFUND_ALIASES,
     *STATUS_DONE_CHARGE_ALIASES,
     *STATUS_DONE_REFUND_ALIASES,
+    *STATUS_STAFF_TIME_CHANGE,
+    *STATUS_FARE_INVOICE_ONLY,
 }
 
 TYPE_FARE = "車馬費發票"
@@ -1317,6 +1329,10 @@ def _prepend_field(form_data: dict, controls: dict, names: list, note: str,
 
 
 def _row_kind(status: str) -> str:
+    if status in STATUS_STAFF_TIME_CHANGE:
+        return "charge_note"
+    if status in STATUS_FARE_INVOICE_ONLY:
+        return "finance_note"
     if status in STATUS_PENDING_CHARGE_ALIASES or status in STATUS_DONE_CHARGE_ALIASES:
         return "charge"
     if status in STATUS_PENDING_REFUND_ALIASES or status in STATUS_DONE_REFUND_ALIASES:
@@ -1329,6 +1345,8 @@ def _row_amount(row: list, status: str) -> str:
         return _sheet_cell(row, "N")
     if _row_kind(status) == "refund":
         return _sheet_cell(row, "S")
+    if _row_kind(status) in {"charge_note", "finance_note"}:
+        return _sheet_cell(row, "K")
     return ""
 
 
@@ -1360,7 +1378,7 @@ def _parse_sheet_row_spec(row_spec: str) -> set[int]:
 def get_pending_rows(region: str, row_spec: str = None, ui_logger=None):
     """
     讀取清潔異動工作表，篩出需要回填後台的列。
-    支援 B 欄狀態：待收款、待退款、已收款、已退款；並相容舊值待加收、已加收。
+    支援 B 欄狀態：待收款、待退款、已收款、已退款；並相容舊值與特殊備註狀態。
     回傳 list of dict，含 sheet_row（原始列號，回寫用）。
     """
     def log(msg):
@@ -1417,6 +1435,17 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
     charge_invoice_date = _normalize_date_value(_sheet_cell(raw, "AA"))
     charge_invoice = _sheet_cell(raw, "O").strip()
     refund_date = _normalize_date_value(_sheet_cell(raw, "AC"))
+
+    if status in STATUS_STAFF_TIME_CHANGE:
+        _set_field(form_data, controls, FIELD_CHARGE_NOTE, backend_note,
+                   keywords=["加收備註", "收款備註"], fallback_name="chargeNote", ui_logger=ui_logger)
+        return
+
+    if status in STATUS_FARE_INVOICE_ONLY:
+        if backend_note:
+            _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, backend_note,
+                           keywords=["財務備註"], ui_logger=ui_logger)
+        return
 
     if status in STATUS_PENDING_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "1", ui_logger=ui_logger)
