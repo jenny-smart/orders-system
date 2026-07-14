@@ -1,11 +1,20 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.2
+# 版本：v2.3
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-07-11
+# 最後更新：2026-07-15
 #
 # Change Log
+# v2.3
+# - 已收款回填後台時，加收備註改為保留 Sheet 備註並加上「MM/DD已收」；
+#   若 O 欄發票號碼不是「儲值金」，再加註「開立發票XXXXXXXXXX」。
+# - 已退款／已部份退款／已全額退款回填後台時，待退備註改為保留 Sheet 備註
+#   並加上「MM/DD已退」。
+# - 加收備註與待退備註會同步插入財務備註最上方，不覆蓋原本內容。
+# - 依後台 edit HTML 確認財務備註欄位 name 為 memoFinance，將其列為精準
+#   欄位第一順位，避免關鍵字搜尋誤寫到 LINE 網址等其他欄位。
+# - 清潔異動工作表新增桃園／新竹／高雄 Sheet ID 與 gid。
 # v2.2
 # - 清潔異動 Google Sheet B 欄加收類狀態改回財務用語「待收款／已收款」；
 #   回填後台時仍相容並寫入後台加收欄位（待加收／已加收）。
@@ -165,12 +174,18 @@ def get_service_amount(order: dict) -> int:
 SHEET_IDS = {
     "台北": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44",
     "台中": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM",
+    "桃園": "1zOabMqafD7zrhtgw3Rvrj_8jDOT2LehvU_a6q9e8dtY",
+    "新竹": "1ktyuPsuvIeCEz__qL797eZ7btr_VCiMCO5jv_GzxOK4",
+    "高雄": "1-MI1tlm48f0PuB-tUYwFgy_6tZrrR5Zyfl0sQcJG1N8",
 }
 
 # 對應網址列上的 gid，用來精準定位分頁（比用分頁名稱比對更穩，不怕改名）
 SHEET_GIDS = {
     "台北": 759897417,
     "台中": 759897417,
+    "桃園": 1980832480,
+    "新竹": 919576131,
+    "高雄": 0,
 }
 
 _SCOPES = [
@@ -1013,7 +1028,7 @@ FIELD_REFUND_FLOW = [
 ]
 FIELD_REFUND_NOTE = ["refundNote", "refund_note"]
 FIELD_FINANCE_NOTE = [
-    "financeNote", "finance_note", "financialNote", "financial_note",
+    "memoFinance", "financeNote", "finance_note", "financialNote", "financial_note",
     "accountingNote", "accounting_note", "paymentNote", "payment_note",
     "moneyNote", "money_note", "financeMemo", "finance_memo",
 ]
@@ -1046,6 +1061,42 @@ def _normalize_date_value(value: str) -> str:
         return text
     y, mo, d = map(int, m.groups())
     return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+def _format_mmdd_date(value: str) -> str:
+    text = _normalize_date_value(value)
+    m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text or "")
+    if not m:
+        return ""
+    return f"{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+
+
+def _append_note_parts_once(base: str, parts: list[str]) -> str:
+    text = str(base or "").strip()
+    for part in parts:
+        part = str(part or "").strip(" ，,")
+        if not part or part in text:
+            continue
+        text = f"{text}，{part}" if text else part
+    return text
+
+
+def _build_charge_note(base_note: str, charge_date: str, charge_invoice: str,
+                       include_paid_date: bool) -> str:
+    parts = []
+    if include_paid_date:
+        mmdd = _format_mmdd_date(charge_date)
+        if mmdd:
+            parts.append(f"{mmdd}已收")
+    invoice_text = str(charge_invoice or "").strip()
+    if invoice_text and invoice_text != "儲值金":
+        parts.append(f"開立發票{invoice_text}")
+    return _append_note_parts_once(base_note, parts)
+
+
+def _build_refund_note(base_note: str, refund_date: str) -> str:
+    mmdd = _format_mmdd_date(refund_date)
+    return _append_note_parts_once(base_note, [f"{mmdd}已退" if mmdd else ""])
 
 
 def _sheet_refund_payway(raw: list) -> str:
@@ -1374,10 +1425,10 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
                    keywords=["加收發票", "收款發票"], fallback_name="chargeInvoice", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_INVOICE_DATE, charge_invoice_date,
                    keywords=["加收發票日期", "開立發票日期", "發票日期"], fallback_name="chargeInvoiceDate", ui_logger=ui_logger)
-        charge_note = _append_suffix_once(backend_note, f"，開立發票{charge_invoice}" if charge_invoice else "")
+        charge_note = _build_charge_note(backend_note, charge_date, charge_invoice, include_paid_date=False)
         _set_field(form_data, controls, FIELD_CHARGE_NOTE, charge_note,
                    keywords=["加收備註", "收款備註"], fallback_name="chargeNote", ui_logger=ui_logger)
-        finance_line = _first_line_for_finance(charge_note)
+        finance_line = charge_note
         if finance_line:
             _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, finance_line,
                            keywords=["財務備註"], ui_logger=ui_logger)
@@ -1395,10 +1446,10 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
                    keywords=["折讓單號碼", "退款編號"], fallback_name="refundNumber", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_FLOW, _sheet_refund_payway(raw),
                    keywords=["退款金流"], ui_logger=ui_logger)
-        refund_note = _append_suffix_once(backend_note, f"，{refund_date}已退款" if refund_date else "")
+        refund_note = _build_refund_note(backend_note, refund_date)
         _set_field(form_data, controls, FIELD_REFUND_NOTE, refund_note,
                    keywords=["待退備註", "退款備註"], fallback_name="refundNote", ui_logger=ui_logger)
-        finance_line = _first_line_for_finance(refund_note)
+        finance_line = refund_note
         if finance_line:
             _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, finance_line,
                            keywords=["財務備註"], ui_logger=ui_logger)
@@ -1418,10 +1469,10 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
                    keywords=["加收發票", "收款發票"], fallback_name="chargeInvoice", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_INVOICE_DATE, charge_invoice_date,
                    keywords=["加收發票日期", "開立發票日期", "發票日期"], fallback_name="chargeInvoiceDate", ui_logger=ui_logger)
-        charge_note = _append_suffix_once(backend_note, f"，開立發票{charge_invoice}" if charge_invoice else "")
+        charge_note = _build_charge_note(backend_note, charge_date, charge_invoice, include_paid_date=True)
         _set_field(form_data, controls, FIELD_CHARGE_NOTE, charge_note,
                    keywords=["加收備註", "收款備註"], fallback_name="chargeNote", ui_logger=ui_logger)
-        finance_line = _first_line_for_finance(charge_note)
+        finance_line = charge_note
         if finance_line:
             _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, finance_line,
                            keywords=["財務備註"], ui_logger=ui_logger)
@@ -1455,10 +1506,10 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
                    keywords=["折讓單號碼", "退款編號"], fallback_name="refundNumber", ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_FLOW, _sheet_refund_payway(raw),
                    keywords=["退款金流"], ui_logger=ui_logger)
-        refund_note = _append_suffix_once(backend_note, f"，{refund_date}已退款" if refund_date else "")
+        refund_note = _build_refund_note(backend_note, refund_date)
         _set_field(form_data, controls, FIELD_REFUND_NOTE, refund_note,
                    keywords=["待退備註", "退款備註"], fallback_name="refundNote", ui_logger=ui_logger)
-        finance_line = _first_line_for_finance(refund_note)
+        finance_line = refund_note
         if finance_line:
             _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, finance_line,
                            keywords=["財務備註"], ui_logger=ui_logger)

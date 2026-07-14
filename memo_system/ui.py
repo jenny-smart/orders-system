@@ -3,6 +3,9 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-07-15
+# - 清潔異動階段 A/B 地區下拉新增桃園／新竹／高雄，對應 change_order.py
+#   v2.3 新增的清潔異動 Google Sheet。
 # 2026-07-13
 # - ATM 對帳地區預設改由登入帳號判斷；jenny.tc 等台中帳號預設台中，
 #   避免台中登入卻查詢/貼到台北工作表。
@@ -1409,7 +1412,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     def render_change_order_stage_a():
         step("4", "查詢訂單")
         q1, q2 = st.columns([1, 1.5])
-        with q1: region = st.selectbox("地區", ["台北", "台中"], key="co_region_a")
+        with q1: region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="co_region_a")
         with q2: query_by = st.radio("查詢方式", ["電話", "訂單編號"], horizontal=True, key="co_query_by")
         if query_by == "電話":
             keyword_input = st.text_input("電話", placeholder="例：0912345678", key="co_phone_keyword")
@@ -1567,7 +1570,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         st.markdown('<div class="info-strip"><b>掃描條件</b><ul><li>B 欄為待收款、待退款、已收款、已退款</li><li>金額欄位已填寫</li></ul><b>列號篩選（選填）</b><ul><li>不填 → 掃描整個工作表全部符合條件的列</li><li>填寫 → 只掃描指定列號，例如 <code>19</code>、<code>19,21</code>、<code>19-22</code></li></ul><b>回填結果</b><ul><li>依 Sheet 狀態寫回後台加收/退款欄位</li><li>AD 欄寫入系統回填時間</li><li>不會自動修改 B 欄狀態</li></ul></div>', unsafe_allow_html=True)
         c_region, c_rows = st.columns([1, 3])
         with c_region:
-            region = st.selectbox("地區", ["台北", "台中"], key="co_region_b")
+            region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="co_region_b")
         with c_rows:
             row_spec = st.text_input("列號篩選（選填，不填掃全部）", placeholder="例如：19 或 19,21 或 19-22，留白則掃描全部", key="co_stage_b_row_spec")
         scan_btn = st.button("🔍 掃描待處理清單", use_container_width=True, disabled=not st.session_state.credentials_ready)
