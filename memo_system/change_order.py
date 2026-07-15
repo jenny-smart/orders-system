@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.6
+# 版本：v2.7
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-15
 #
 # Change Log
+# v2.7
+# - 階段 A 建立異動寫入 Google Sheet 時，AD 欄同步記錄建立時間（台北時區），
+#   AE 欄維持標記「建立異動」。
 # v2.6
 # - B 欄新增特殊狀態支援：「專員服務時間異動」只把 K 欄寫入加收備註；
 #   「車馬費發票」只把 K 欄插入財務備註最上方。
@@ -1003,6 +1006,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             for col in col_letters:
                 if col in row and row[col] != "":
                     ws.update_acell(f"{col}{target_row}", row[col])
+            ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
             ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
