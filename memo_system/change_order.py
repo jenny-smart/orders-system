@@ -96,6 +96,7 @@
 
 import re
 import math
+import os
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -185,21 +186,12 @@ def get_service_amount(order: dict) -> int:
 # ============================================================
 
 # 兩個地區各自的清潔異動工作表（Sheet ID 取自您提供的網址）
-SHEET_IDS = {
-    "台北": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44",
-    "台中": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM",
-    "桃園": "1zOabMqafD7zrhtgw3Rvrj_8jDOT2LehvU_a6q9e8dtY",
-    "新竹": "1ktyuPsuvIeCEz__qL797eZ7btr_VCiMCO5jv_GzxOK4",
-    "高雄": "1-MI1tlm48f0PuB-tUYwFgy_6tZrrR5Zyfl0sQcJG1N8",
-}
-
-# 對應網址列上的 gid，用來精準定位分頁（比用分頁名稱比對更穩，不怕改名）
-SHEET_GIDS = {
-    "台北": 759897417,
-    "台中": 759897417,
-    "桃園": 1980832480,
-    "新竹": 919576131,
-    "高雄": 0,
+REGION_SECRET_PREFIX = {
+    "台北": "TAIPEI",
+    "台中": "TAICHUNG",
+    "桃園": "TAOYUAN",
+    "新竹": "HSINCHU",
+    "高雄": "KAOHSIUNG",
 }
 
 _SCOPES = [
@@ -211,12 +203,30 @@ _gspread_client = None
 
 
 def _secret_value(key, default=""):
-    if st is None:
-        return default
+    if st is not None:
+        try:
+            value = st.secrets.get(key, "")
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        except Exception:
+            pass
+    return str(os.getenv(key, default) or default).strip()
+
+
+def _sheet_config(region: str) -> dict:
+    if region not in REGION_SECRET_PREFIX:
+        raise ValueError(f"不支援的地區：{region}（目前支援：{list(REGION_SECRET_PREFIX.keys())}）")
+    prefix = REGION_SECRET_PREFIX[region]
+    spreadsheet_id = _secret_value(f"CHANGE_ORDER_{prefix}_SPREADSHEET_ID")
+    gid_text = _secret_value(f"CHANGE_ORDER_{prefix}_GID")
+    worksheet_title = _secret_value(f"CHANGE_ORDER_{prefix}_WORKSHEET_TITLE", "清潔異動")
+    if not spreadsheet_id:
+        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID")
     try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
+        gid = int(gid_text) if gid_text else None
+    except ValueError as exc:
+        raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
+    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 
 def _get_gspread_client():
@@ -271,20 +281,18 @@ def get_worksheet(region: str, tab_name: str = "清潔異動"):
     優先用 gid（SHEET_GIDS）精準定位分頁；若該地區沒有設定 gid，
     退而用 tab_name 嘗試找同名分頁，最後 fallback 用該試算表第一個分頁。
     """
-    if region not in SHEET_IDS:
-        raise ValueError(f"不支援的地區：{region}（目前支援：{list(SHEET_IDS.keys())}）")
-
+    config = _sheet_config(region)
     client = _get_gspread_client()
-    sh = client.open_by_key(SHEET_IDS[region])
+    sh = client.open_by_key(config["spreadsheet_id"])
 
-    gid = SHEET_GIDS.get(region)
+    gid = config["gid"]
     if gid is not None:
         for ws in sh.worksheets():
             if ws.id == gid:
                 return ws
 
     try:
-        return sh.worksheet(tab_name)
+        return sh.worksheet(config["worksheet_title"] or tab_name)
     except gspread.exceptions.WorksheetNotFound:
         return sh.get_worksheet(0)
 

@@ -57,9 +57,12 @@ from . import memo
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
-ATM_SHEET_IDS = {
-    "台北": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44",
-    "台中": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM",
+REGION_SECRET_PREFIX = {
+    "台北": "TAIPEI",
+    "台中": "TAICHUNG",
+    "桃園": "TAOYUAN",
+    "新竹": "HSINCHU",
+    "高雄": "KAOHSIUNG",
 }
 
 ATM_WORKSHEET_TITLE = "ATM"
@@ -230,11 +233,42 @@ def get_atm_spreadsheet(sheet_id: str):
     return gc.open_by_key(sheet_id)
 
 
+def _secret_text(key: str) -> str:
+    try:
+        import streamlit as st
+        value = st.secrets.get(key, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    except Exception:
+        pass
+    return str(os.getenv(key, "") or "").strip()
+
+
+def _atm_sheet_config(region: str) -> Dict:
+    if region not in REGION_SECRET_PREFIX:
+        raise ValueError(f"未知地區「{region}」，目前支援：{list(REGION_SECRET_PREFIX.keys())}")
+    prefix = REGION_SECRET_PREFIX[region]
+    spreadsheet_id = _secret_text(f"ATM_{prefix}_SPREADSHEET_ID")
+    gid_text = _secret_text(f"ATM_{prefix}_GID")
+    worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE") or ATM_WORKSHEET_TITLE
+    if not spreadsheet_id:
+        raise ValueError(f"Secrets 尚未設定「{region}」ATM 試算表 ID")
+    try:
+        gid = int(gid_text) if gid_text else None
+    except ValueError as exc:
+        raise ValueError(f"Secrets 的「{region}」ATM GID 必須是整數") from exc
+    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+
+
 def get_atm_worksheet(region: str):
-    if region not in ATM_SHEET_IDS:
-        raise ValueError(f"未知地區「{region}」，目前支援：{list(ATM_SHEET_IDS.keys())}")
-    sh = get_atm_spreadsheet(ATM_SHEET_IDS[region])
-    return sh.worksheet(ATM_WORKSHEET_TITLE)
+    config = _atm_sheet_config(region)
+    sh = get_atm_spreadsheet(config["spreadsheet_id"])
+    if config["gid"] is not None:
+        worksheet = sh.get_worksheet_by_id(config["gid"])
+        if worksheet is None:
+            raise ValueError(f"找不到「{region}」ATM 分頁 gid={config['gid']}")
+        return worksheet
+    return sh.worksheet(config["worksheet_title"])
 
 
 # -----------------------------------------------------------------------------

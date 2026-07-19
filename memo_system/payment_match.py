@@ -13,11 +13,12 @@ from google.oauth2.service_account import Credentials
 from . import memo
 
 
-SHEET_CONFIG = {
-    "台北": {"spreadsheet_id": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44", "gid": None},
-    "台中": {"spreadsheet_id": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM", "gid": None},
-    "桃園": {"spreadsheet_id": "17zoadIr9T-yi_x25GEdgPDwtAeYlx5nMhJpons2mTCw", "gid": 1513521428},
-    "新竹": {"spreadsheet_id": "1DkWXPW4MgAg1l4bzB2gD22VEqAe65jds_9zIHtY7Fog", "gid": 19948259},
+REGION_SECRET_PREFIX = {
+    "台北": "TAIPEI",
+    "台中": "TAICHUNG",
+    "桃園": "TAOYUAN",
+    "新竹": "HSINCHU",
+    "高雄": "KAOHSIUNG",
 }
 WORKSHEET_TITLE = "ATM"
 STAR_CLINIC = "星和診所"
@@ -53,17 +54,47 @@ def _client():
     return gspread.authorize(Credentials.from_service_account_file(memo.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=scopes))
 
 
-def get_worksheet(region: str):
-    if region not in SHEET_CONFIG:
+def _secret_text(key: str) -> str:
+    try:
+        import streamlit as st
+        value = st.secrets.get(key, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    except Exception:
+        pass
+    return str(os.getenv(key, "") or "").strip()
+
+
+def _sheet_config(region: str) -> Dict:
+    if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"不支援的地區：{region}")
-    config = SHEET_CONFIG[region]
+    prefix = REGION_SECRET_PREFIX[region]
+    spreadsheet_id = _secret_text(f"ATM_{prefix}_SPREADSHEET_ID")
+    gid_text = _secret_text(f"ATM_{prefix}_GID")
+    worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE")
+    if not spreadsheet_id:
+        raise ValueError(f"Secrets 尚未設定「{region}」付款比對試算表 ID")
+    try:
+        gid = int(gid_text) if gid_text else None
+    except ValueError as exc:
+        raise ValueError(f"Secrets 的「{region}」GID 必須是整數") from exc
+    if gid is None and not worksheet_title:
+        if region in {"台北", "台中"}:
+            worksheet_title = WORKSHEET_TITLE
+        else:
+            raise ValueError(f"Secrets 尚未設定「{region}」付款比對分頁 GID 或名稱")
+    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+
+
+def get_worksheet(region: str):
+    config = _sheet_config(region)
     spreadsheet = _client().open_by_key(config["spreadsheet_id"])
     if config["gid"] is not None:
         worksheet = spreadsheet.get_worksheet_by_id(int(config["gid"]))
         if worksheet is None:
             raise ValueError(f"找不到「{region}」指定分頁 gid={config['gid']}")
         return worksheet
-    return spreadsheet.worksheet(WORKSHEET_TITLE)
+    return spreadsheet.worksheet(config["worksheet_title"])
 
 
 def extract_purchase_list(html: str) -> Optional[Dict]:

@@ -40,7 +40,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         return "台北"
 
     def region_selectbox(label, key, email_value=None):
-        options = ["台北", "台中"]
+        options = ["台北", "台中", "桃園", "新竹", "高雄"]
         default_region = default_region_from_email(email_value)
         marker_key = f"{key}_default_email"
         current_email = str(email_value or "").strip().lower()
@@ -1082,7 +1082,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         st.caption("固定付款方式 ATM；查詢結果寫入 K:S，不使用原 ATM 待付款清單。")
         today = date.today()
         c1, c2, c3, c4 = st.columns(4)
-        with c1: region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹"], key="payment_match_region")
+        with c1: region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹", "高雄"], key="payment_match_region")
         with c2: paid_start = st.date_input("付款日期-起", value=today.replace(day=1), key="payment_match_start")
         with c3: paid_end = st.date_input("付款日期-迄", value=today, key="payment_match_end")
         with c4: status_label = st.selectbox("付款狀態", ["已付款", "待付款"], key="payment_match_status")
