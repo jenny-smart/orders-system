@@ -137,7 +137,7 @@ def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
         "paid_at_s": paid_start, "paid_at_e": paid_end,
         "payway": "2", "purchase_status": payment_status, "p_board": "on",
     }
-    output, seen = [], set()
+    output, seen, skipped_zero = [], set(), 0
     page = 1
     while True:
         params["page"] = page
@@ -150,6 +150,9 @@ def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
             break
         for item in payload.get("data", []):
             row = _row(item)
+            if row["net_amount"] == 0:
+                skipped_zero += 1
+                continue
             if row["order_no"] and row["order_no"] not in seen:
                 seen.add(row["order_no"])
                 output.append(row)
@@ -159,6 +162,8 @@ def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
             break
         page += 1
     output.sort(key=lambda row: (row["paid_at"], row["order_no"]))
+    if skipped_zero:
+        log(f"略過 {skipped_zero} 筆總金額扣車馬費為 0 的訂單")
     log(f"共取得 {len(output)} 筆；其中星和診所 {sum(r['name'] == STAR_CLINIC for r in output)} 筆")
     return output
 
@@ -173,7 +178,9 @@ def _values(row: Dict) -> List:
 def paste_orders(region: str, rows: List[Dict], ui_logger=None) -> Dict:
     """從銀行 B 欄最後資料列下方 5 列開始，獨立貼至 K:S。"""
     log = _logger(ui_logger)
+    rows = [row for row in rows if _money(row.get("net_amount")) != 0]
     if not rows:
+        log("沒有非零淨額的資料可以貼入 K:S")
         return {"pasted": 0, "start_row": None}
     ws = get_worksheet(region)
     values = memo.with_retry(ws.get_all_values)
