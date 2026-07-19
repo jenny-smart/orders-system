@@ -13,9 +13,11 @@ from google.oauth2.service_account import Credentials
 from . import memo
 
 
-SHEET_IDS = {
-    "台北": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44",
-    "台中": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM",
+SHEET_CONFIG = {
+    "台北": {"spreadsheet_id": "1bNcJuFuP--jdpNo2zJKOpvuq-5rSHW3LgGE8HEepf44", "gid": None},
+    "台中": {"spreadsheet_id": "1AlsgBL7uAooiU8hb0v-02J2MdBgDVJtGHgvD3U84hCM", "gid": None},
+    "桃園": {"spreadsheet_id": "17zoadIr9T-yi_x25GEdgPDwtAeYlx5nMhJpons2mTCw", "gid": 1513521428},
+    "新竹": {"spreadsheet_id": "1DkWXPW4MgAg1l4bzB2gD22VEqAe65jds_9zIHtY7Fog", "gid": 19948259},
 }
 WORKSHEET_TITLE = "ATM"
 STAR_CLINIC = "星和診所"
@@ -52,9 +54,16 @@ def _client():
 
 
 def get_worksheet(region: str):
-    if region not in SHEET_IDS:
+    if region not in SHEET_CONFIG:
         raise ValueError(f"不支援的地區：{region}")
-    return _client().open_by_key(SHEET_IDS[region]).worksheet(WORKSHEET_TITLE)
+    config = SHEET_CONFIG[region]
+    spreadsheet = _client().open_by_key(config["spreadsheet_id"])
+    if config["gid"] is not None:
+        worksheet = spreadsheet.get_worksheet_by_id(int(config["gid"]))
+        if worksheet is None:
+            raise ValueError(f"找不到「{region}」指定分頁 gid={config['gid']}")
+        return worksheet
+    return spreadsheet.worksheet(WORKSHEET_TITLE)
 
 
 def extract_purchase_list(html: str) -> Optional[Dict]:
