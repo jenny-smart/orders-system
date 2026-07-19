@@ -644,6 +644,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                 "📋 客服作業",
                 "📅 排班管理",
                 "💰 財務對帳",
+                "💳 付款後5碼及星和診所比對",
                 "🔄 服務異動",
                 "📐 評估文字工具",
             ],
@@ -668,6 +669,12 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         </ol><b>用途</b><ul>
         <li>每日 ATM 對帳</li><li>補款確認</li><li>發票與確認信處理</li>
         </ul></div>""",
+        "💳 付款後5碼及星和診所比對": """
+        <div class="info-strip"><b>獨立對帳功能</b><ul>
+        <li>依付款日期、付款狀態搜尋 ATM 訂單</li>
+        <li>訂單資料寫入 K～S；比對銀行 B～H</li>
+        <li>支援一筆匯款對多筆訂單及星和診所</li>
+        </ul><b>安全範圍</b><ul><li>不會更新後台付款狀態、發票或寄信</li></ul></div>""",
         "🔄 服務異動": """
         <div class="info-strip"><b>支援項目</b><ul>
         <li>車馬費、異動費</li><li>服務前加時、服務前減時</li>
@@ -1061,10 +1068,6 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     # ============================================================
 
     def render_atm_section():
-        finance_mode = st.radio("財務功能", ["ATM 對帳", "付款後5碼及星和診所比對"], horizontal=True, key="finance_mode")
-        if finance_mode == "付款後5碼及星和診所比對":
-            render_payment_match_mode()
-            return
         step("3", "選擇 ATM 對帳步驟")
         atm_mode = st.radio("", ["① 待付款清單查詢", "② 配對銀行明細", "③ 更新系統對帳"], horizontal=True, label_visibility="collapsed", key="atm_mode")
         if "待付款" in atm_mode:
@@ -1079,7 +1082,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
         st.caption("固定付款方式 ATM；查詢結果寫入 K:S，不使用原 ATM 待付款清單。")
         today = date.today()
         c1, c2, c3, c4 = st.columns(4)
-        with c1: region = region_selectbox("地區", "payment_match_region", email)
+        with c1: region = st.selectbox("地區", ["台北", "台中", "桃園", "新竹"], key="payment_match_region")
         with c2: paid_start = st.date_input("付款日期-起", value=today.replace(day=1), key="payment_match_start")
         with c3: paid_end = st.date_input("付款日期-迄", value=today, key="payment_match_end")
         with c4: status_label = st.selectbox("付款狀態", ["已付款", "待付款"], key="payment_match_status")
@@ -1851,6 +1854,9 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     elif main_section == "💰 財務對帳":
         render_atm_section()
+
+    elif main_section == "💳 付款後5碼及星和診所比對":
+        render_payment_match_mode()
 
     elif main_section == "🔄 服務異動":
         render_change_order_section()
