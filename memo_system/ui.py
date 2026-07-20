@@ -1624,7 +1624,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
                         for key in [k for k in st.session_state.keys() if str(k).startswith("co_j_edit_")]:
                             del st.session_state[key]
                 except Exception as e:
-                    co_log(f"❌ 寫入失敗：{e}"); st.error(str(e))
+                    error_message = str(e).strip() or f"{type(e).__name__}: {e!r}"
+                    co_log(f"❌ 寫入失敗：{error_message}"); st.error(error_message)
 
     def render_change_order_stage_b():
         step("3", "讀取清潔異動工作表待處理列")

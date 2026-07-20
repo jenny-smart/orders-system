@@ -208,6 +208,10 @@ def _secret_value(key, default=""):
             value = st.secrets.get(key, "")
             if value is not None and str(value).strip():
                 return str(value).strip()
+            section = st.secrets.get("sheet_settings", {})
+            value = section.get(key, "") if section else ""
+            if value is not None and str(value).strip():
+                return str(value).strip()
         except Exception:
             pass
     return str(os.getenv(key, default) or default).strip()
@@ -246,7 +250,8 @@ def _get_gspread_client():
     sa_info = None
 
     # 依序嘗試這幾個 key（實際命名以 memo.py 為準：GOOGLE_SERVICE_ACCOUNT 是 TOML 區塊）
-    for key in ("GOOGLE_SERVICE_ACCOUNT", "gcp_service_account"):
+    # 與 memo.py 保持一致，避免同時存在兩組憑證時選到未被分享 Sheet 的帳號。
+    for key in ("gcp_service_account", "GOOGLE_SERVICE_ACCOUNT"):
         try:
             block = st.secrets.get(key, None)
         except Exception:
@@ -283,7 +288,12 @@ def get_worksheet(region: str, tab_name: str = "清潔異動"):
     """
     config = _sheet_config(region)
     client = _get_gspread_client()
-    sh = client.open_by_key(config["spreadsheet_id"])
+    try:
+        sh = client.open_by_key(config["spreadsheet_id"])
+    except gspread.exceptions.SpreadsheetNotFound as exc:
+        raise RuntimeError(
+            f"無法開啟「{region}」清潔異動試算表。請確認試算表 ID 正確，且已分享給目前的 Google 服務帳號（編輯者權限）。"
+        ) from exc
 
     gid = config["gid"]
     if gid is not None:
