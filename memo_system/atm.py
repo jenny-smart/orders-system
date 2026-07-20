@@ -39,6 +39,11 @@ ATM 對帳自動化模組
 修正（2026-07-08）：
 - ATM 對帳②「配對銀行明細」配合 H 欄 LINE 連結：候選資料移動與清空範圍
   從 I:O 改為 H:O，避免配對上移時漏搬或殘留 H 欄。
+
+修正（2026-07-21）：
+- 支援一筆銀行收入由 2～5 筆訂單加總組成。只有金額總和相等、每筆都有
+  末碼或姓名證據、且符合的組合唯一時才自動配對；多組可能或續列不足時
+  保留人工確認，避免只靠金額誤配。
 """
 import json
 import os
@@ -237,6 +242,10 @@ def _secret_text(key: str) -> str:
     try:
         import streamlit as st
         value = st.secrets.get(key, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        section = st.secrets.get("sheet_settings", {})
+        value = section.get(key, "") if section else ""
         if value is not None and str(value).strip():
             return str(value).strip()
     except Exception:
@@ -587,6 +596,55 @@ def _is_split_payment_candidate(income: int, candidate: Dict, note: str) -> bool
     return False
 
 
+def _candidate_has_bank_evidence(candidate: Dict, note: str) -> bool:
+    """多訂單加總配對不可只靠金額；每筆至少要有末碼或姓名證據。"""
+    return bool(
+        (candidate.get("last_code") and _bank_note_has_code(note, candidate.get("last_code")))
+        or _note_matches_name(note, candidate.get("name"))
+        or _similar_text(note, candidate.get("name"))
+    )
+
+
+def _find_sum_combinations(
+    income: int,
+    candidates: List[Dict],
+    note: str,
+    max_orders: int = 5,
+    max_results: int = 2,
+) -> List[List[Dict]]:
+    """找 2～max_orders 筆、加總等於收入的組合；找到兩組即可判定有歧義。"""
+    eligible = [
+        c for c in candidates
+        if c.get("amount") is not None
+        and 0 < int(c["amount"]) < int(income)
+        and _candidate_has_bank_evidence(c, note)
+    ]
+    eligible.sort(key=lambda c: (int(c.get("amount") or 0), int(c.get("row") or 0)), reverse=True)
+    results: List[List[Dict]] = []
+
+    def search(start: int, chosen: List[Dict], total: int):
+        if len(results) >= max_results:
+            return
+        if total == income:
+            if len(chosen) >= 2:
+                results.append(list(chosen))
+            return
+        if total > income or len(chosen) >= max_orders:
+            return
+        for pos in range(start, len(eligible)):
+            amount = int(eligible[pos]["amount"])
+            if total + amount > income:
+                continue
+            chosen.append(eligible[pos])
+            search(pos + 1, chosen, total + amount)
+            chosen.pop()
+            if len(results) >= max_results:
+                return
+
+    search(0, [], 0)
+    return results
+
+
 def _format_match_text(year_month: str, service_type: str, fee_type: str, order_no: str, name: str) -> str:
     service_type = service_type or "清潔"
     fee_type = fee_type or "服務費用"
@@ -706,6 +764,79 @@ def auto_match_bank_rows(
             amount_candidates = [c for c in candidates if c["amount"] == income]
             if not overwrite_existing:
                 amount_candidates = [c for c in amount_candidates if (not c["order_no"]) or c["order_no"] not in used_order_nos or c["order_no"] == current_order_no]
+
+            available_candidates = candidates
+            if not overwrite_existing:
+                available_candidates = [
+                    c for c in candidates
+                    if (not c["order_no"]) or c["order_no"] not in used_order_nos or c["order_no"] == current_order_no
+                ]
+
+            # 單筆等額找不到時，再嘗試 2～5 筆訂單加總。每筆都必須有末碼或
+            # 姓名證據，而且只能有唯一組合，否則一律交由人工確認。
+            sum_combinations = [] if amount_candidates else _find_sum_combinations(
+                income, available_candidates, note, max_orders=5, max_results=2
+            )
+            if len(sum_combinations) > 1:
+                text = "多筆加總有多組可能，請人工確認"
+                result["ambiguous"] += 1
+                result["failed"] += 1
+                result["errors"].append(f"第{idx}列：{text}")
+                log(f"⚠️ 第{idx}列：{text}")
+                continue
+
+            if len(sum_combinations) == 1:
+                combo = sum_combinations[0]
+                target_rows = [idx]
+                # 第二筆起寫入緊接在下方、銀行時間與備註相同的空白續列。
+                for next_idx in range(idx + 1, min(last_b_row, len(rows)) + 1):
+                    next_row = rows[next_idx - 1]
+                    if _to_int_amount(memo.safe_cell(next_row, COL_INCOME)) is not None:
+                        break
+                    if not _datetime_equals(memo.safe_cell(next_row, COL_BANK_TIME), bank_time):
+                        break
+                    if _compact_text(memo.safe_cell(next_row, COL_NOTE)) != _compact_text(note):
+                        break
+                    if memo.safe_cell(next_row, COL_MATCH_ORDER_NO) and not overwrite_existing:
+                        break
+                    target_rows.append(next_idx)
+                    if len(target_rows) >= len(combo):
+                        break
+
+                if len(target_rows) < len(combo):
+                    text = f"找到唯一的 {len(combo)} 筆加總組合，但相同時間/備註的空白續列不足"
+                    result["confirm_required"] += 1
+                    result["failed"] += 1
+                    result["errors"].append(f"第{idx}列：{text}")
+                    log(f"⚠️ 第{idx}列：{text}")
+                    continue
+
+                for target_row, c in zip(target_rows, combo):
+                    values = [[
+                        c.get("extra", ""), c["year_month"], c["order_no"], c["name"],
+                        c["amount"], c["last_code"], c["service_type"], c["fee_type"],
+                    ]]
+                    source_row = int(c.get("row") or 0)
+                    _copy_data_validation(ws, source_row, target_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
+                    memo.with_retry(ws.update, f"H{target_row}:O{target_row}", values, value_input_option="RAW")
+                    _clear_data_validation(ws, target_row, COL_RECONCILED_AT, COL_RECONCILED_AT)
+                    _clear_data_validation(ws, target_row, COL_RECON_STATUS, COL_RECON_STATUS)
+                    memo.with_retry(ws.update_cell, target_row, COL_RECONCILED_AT, _now_text())
+                    memo.with_retry(ws.update_cell, target_row, COL_RECON_STATUS, "已配對（多訂單加總）")
+
+                    if source_row and source_row != target_row:
+                        _copy_data_validation(ws, target_row, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
+                        memo.with_retry(ws.update, f"H{source_row}:O{source_row}", [["", "", "", "", "", "", "", ""]], value_input_option="RAW")
+                        _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
+                        memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
+
+                    if c["order_no"]:
+                        used_order_nos.add(c["order_no"])
+                    log(f"✅ 第{target_row}列：多訂單加總 → {c['order_no']} {c['name']} ${c['amount']}")
+
+                result["success"] += len(combo)
+                result["updated_orders"] += len(combo)
+                continue
 
             split_candidates = [c for c in candidates if _is_split_payment_candidate(income, c, note)]
             code_matches = [c for c in amount_candidates if c["last_code"] and _bank_note_has_code(note, c["last_code"])]

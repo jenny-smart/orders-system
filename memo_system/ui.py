@@ -1184,7 +1184,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
 
     def render_atm_auto_match_mode():
         step("4", "配對銀行明細")
-        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 備註或時間</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-strip"><b>配對依據</b><ul><li>金額 + 末碼</li><li>金額 + 姓名</li><li>金額 + 備註或時間</li><li>一筆收入可配對 2～5 筆訂單加總；須有末碼/姓名依據且組合唯一</li></ul></div>', unsafe_allow_html=True)
         st.markdown('<div class="warn-strip"><b>配對限制</b><ul><li>只靠金額不會自動配對</li><li>必須有末碼、姓名、備註或時間依據</li></ul></div>', unsafe_allow_html=True)
 
         row_spec = st.text_input("指定銀行列號", placeholder="例如：762-764,767-771")
