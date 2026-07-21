@@ -1095,14 +1095,20 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             try: log_box_local.text("\n".join(st.session_state.logs[-2000:]))
             except Exception: pass
 
+        current_context = (region, str(email or "").strip().lower())
+        if st.session_state.get("payment_match_context") != current_context:
+            st.session_state.payment_match_rows = None
+
         if search_btn:
             try:
                 st.session_state.logs = []
                 session = get_session(ui_logger=payment_log)
                 st.session_state.payment_match_rows = payment_match.search_orders(
                     session, paid_start.strftime("%Y-%m-%d"), paid_end.strftime("%Y-%m-%d"),
-                    "1" if status_label == "已付款" else "0", ui_logger=payment_log,
+                    "1" if status_label == "已付款" else "0",
+                    region=region, login_email=email, ui_logger=payment_log,
                 )
+                st.session_state.payment_match_context = current_context
             except Exception as exc:
                 payment_log(f"❌ 查詢失敗：{exc}")
                 st.error(str(exc))

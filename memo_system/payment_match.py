@@ -22,6 +22,17 @@ REGION_SECRET_PREFIX = {
 }
 WORKSHEET_TITLE = "ATM"
 STAR_CLINIC = "星和診所"
+REGIONAL_FILTER_EMAIL = "jenny.hc@lemonclean.com.tw"
+SOUTH_ADDRESS_PREFIXES = ("高雄", "台南", "臺南")
+HSINCHU_ADDRESS_PREFIXES = ("新竹",)
+PURCHASE_FILTER_DEFAULTS = {
+    "keyword": "", "name": "", "phone": "", "orderNo": "",
+    "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
+    "paid_at_s": "", "paid_at_e": "", "refundDateS": "", "refundDateE": "",
+    "buy": "", "area_id": "", "isCharge": "", "isRefund": "",
+    "payway": "", "purchase_status": "", "progress_status": "",
+    "invoiceStatus": "", "otherFee": "", "orderBy": "",
+}
 
 
 def _logger(callback: Optional[Callable[[str], None]] = None):
@@ -58,6 +69,10 @@ def _secret_text(key: str) -> str:
     try:
         import streamlit as st
         value = st.secrets.get(key, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        section = st.secrets.get("sheet_settings", {})
+        value = section.get(key, "") if section else ""
         if value is not None and str(value).strip():
             return str(value).strip()
     except Exception:
@@ -158,8 +173,93 @@ def _row(item: Dict) -> Dict:
     }
 
 
+def _starts_with(address, prefixes) -> bool:
+    text = re.sub(r"\s+", "", str(address or ""))
+    return any(text.startswith(prefix) for prefix in prefixes)
+
+
+def _stored_value_purchase_region(item: Dict) -> str:
+    """辨識「儲值金-新竹(儲值金...)」這類儲值金購買訂單。"""
+    text = json.dumps(item, ensure_ascii=False, default=str)
+    match = re.search(r"儲值金[-－]?\s*(台北|台中|桃園|新竹|高雄|台南|臺南)\s*[（(]", text)
+    if match:
+        return "台南" if match.group(1) == "臺南" else match.group(1)
+    if (str(item.get("clean_type_id")) == "0"
+            and _money(item.get("stored_value")) > 0
+            and not str(item.get("address") or "").strip()):
+        return "儲值金"
+    return ""
+
+
+def _fetch_purchase_items(session, params: Dict, log=None, label="") -> List[Dict]:
+    """讀取後台訂單搜尋的所有分頁；不與 atm.py 共用任何流程。"""
+    query = dict(PURCHASE_FILTER_DEFAULTS)
+    query.update(params)
+    items = []
+    page = 1
+    while True:
+        query["page"] = page
+        response = memo.session_get(session, f"{memo.BASE_URL}/purchase", params=query)
+        response.raise_for_status()
+        payload = extract_purchase_list(response.text)
+        if not payload:
+            break
+        items.extend(item for item in payload.get("data", []) if isinstance(item, dict))
+        last_page = int(payload.get("last_page") or 1)
+        if log and label:
+            log(f"{label}：讀取第 {page}/{last_page} 頁")
+        if page >= last_page:
+            break
+        page += 1
+    return items
+
+
+def _service_history_addresses(session, item: Dict, cache: Dict[str, List[str]]) -> List[str]:
+    """依電話查既有服務訂單地址，供沒有地址的儲值金購買訂單判斷地區。"""
+    phone = re.sub(r"\D+", "", str(item.get("phone") or ""))
+    cache_key = phone or f"member:{item.get('member_id') or ''}"
+    if cache_key in cache:
+        return cache[cache_key]
+    if not phone:
+        cache[cache_key] = []
+        return []
+    history = _fetch_purchase_items(session, {
+        "phone": phone,
+        "p_board": "on",
+    })
+    addresses = []
+    for old_item in history:
+        address = str(old_item.get("address") or "").strip()
+        if address and str(old_item.get("date_clean") or "").strip() and address not in addresses:
+            addresses.append(address)
+    cache[cache_key] = addresses
+    return addresses
+
+
+def _include_for_jenny_region(session, item: Dict, region: str,
+                              history_cache: Dict[str, List[str]]) -> bool:
+    """Jenny 專用分流：高雄含台南；新竹不得混入高雄／台南。"""
+    if region not in {"高雄", "新竹"}:
+        return True
+
+    address = str(item.get("address") or "").strip()
+    stored_region = _stored_value_purchase_region(item)
+    if not stored_region:
+        is_south = _starts_with(address, SOUTH_ADDRESS_PREFIXES)
+        return is_south if region == "高雄" else not is_south
+
+    addresses = _service_history_addresses(session, item, history_cache)
+    has_south = any(_starts_with(value, SOUTH_ADDRESS_PREFIXES) for value in addresses)
+    has_hsinchu = any(_starts_with(value, HSINCHU_ADDRESS_PREFIXES) for value in addresses)
+
+    # 曾有高雄／台南服務地址即歸高雄；新竹只收沒有南部地址的純新竹會員。
+    belongs_to_south = has_south
+    belongs_to_hsinchu = has_hsinchu and not has_south
+    return belongs_to_south if region == "高雄" else belongs_to_hsinchu
+
+
 def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
-                  ui_logger=None) -> List[Dict]:
+                  region: str = "", login_email: str = "", ui_logger=None) -> List[Dict]:
     """依付款日期、付款狀態與 ATM 搜尋所有分頁，星和診所亦全數保留。"""
     if payment_status not in {"0", "1"}:
         raise ValueError("付款狀態必須是待付款或已付款")
@@ -168,33 +268,29 @@ def search_orders(session, paid_start: str, paid_end: str, payment_status: str,
         "paid_at_s": paid_start, "paid_at_e": paid_end,
         "payway": "2", "purchase_status": payment_status, "p_board": "on",
     }
-    output, seen, skipped_zero = [], set(), 0
-    page = 1
-    while True:
-        params["page"] = page
-        response = memo.session_get(session, f"{memo.BASE_URL}/purchase", params=params)
-        response.raise_for_status()
-        payload = extract_purchase_list(response.text)
-        if not payload:
-            if page == 1:
-                log("查無訂單，或後台頁面格式已變更")
-            break
-        for item in payload.get("data", []):
-            row = _row(item)
-            if row["net_amount"] == 0:
-                skipped_zero += 1
-                continue
-            if row["order_no"] and row["order_no"] not in seen:
-                seen.add(row["order_no"])
-                output.append(row)
-        last_page = int(payload.get("last_page") or 1)
-        log(f"讀取第 {page}/{last_page} 頁")
-        if page >= last_page:
-            break
-        page += 1
+    items = _fetch_purchase_items(session, params, log=log, label="付款訂單")
+    if not items:
+        log("查無訂單，或後台頁面格式已變更")
+
+    output, seen, skipped_zero, skipped_region = [], set(), 0, 0
+    history_cache: Dict[str, List[str]] = {}
+    use_jenny_filter = str(login_email or "").strip().lower() == REGIONAL_FILTER_EMAIL
+    for item in items:
+        if use_jenny_filter and not _include_for_jenny_region(session, item, region, history_cache):
+            skipped_region += 1
+            continue
+        row = _row(item)
+        if row["net_amount"] == 0:
+            skipped_zero += 1
+            continue
+        if row["order_no"] and row["order_no"] not in seen:
+            seen.add(row["order_no"])
+            output.append(row)
     output.sort(key=lambda row: (row["paid_at"], row["order_no"]))
     if skipped_zero:
         log(f"略過 {skipped_zero} 筆總金額扣車馬費為 0 的訂單")
+    if use_jenny_filter and region in {"高雄", "新竹"}:
+        log(f"{region}地區篩選完成，排除 {skipped_region} 筆其他地區訂單")
     log(f"共取得 {len(output)} 筆；其中星和診所 {sum(r['name'] == STAR_CLINIC for r in output)} 筆")
     return output
 
