@@ -1043,6 +1043,13 @@ elif mode == "週末服務 LINE 提醒":
     try:
         wr_api_url = st.secrets.get("LINE_REMINDER_API_URL", "")
         wr_api_key = st.secrets.get("LINE_REMINDER_API_KEY", "")
+        # 容錯：若使用者把設定誤放在 [gcp_service_account] 後方，
+        # TOML 會將它解析成該區段的子欄位。
+        _gcp_secrets = st.secrets.get("gcp_service_account", {})
+        if not wr_api_url and hasattr(_gcp_secrets, "get"):
+            wr_api_url = _gcp_secrets.get("LINE_REMINDER_API_URL", "")
+        if not wr_api_key and hasattr(_gcp_secrets, "get"):
+            wr_api_key = _gcp_secrets.get("LINE_REMINDER_API_KEY", "")
     except Exception:
         wr_api_url = wr_api_key = ""
     if not wr_api_url or not wr_api_key:
@@ -1072,6 +1079,7 @@ elif mode == "週末服務 LINE 提醒":
                     _orders, _tracking, scheduled_at=wr_scheduled_at,
                 )
                 st.session_state.wr_debug = _debug
+                st.session_state.pop("wr_editor", None)
             except Exception as e:
                 st.error(f"查詢失敗：{e}")
 
@@ -1084,9 +1092,17 @@ elif mode == "週末服務 LINE 提醒":
         if not wr_rows:
             st.success("此服務日期區間沒有已付款訂單。")
         else:
+            wr_select_all = st.checkbox(
+                "全選可排程名單（取消勾選可全部取消）",
+                value=True,
+                key="wr_select_all",
+            )
+            if st.session_state.get("wr_select_all_previous") != wr_select_all:
+                st.session_state.wr_select_all_previous = wr_select_all
+                st.session_state.pop("wr_editor", None)
             _editable = [
                 {
-                    "選取": row.get("通知狀態") in ("待通知", "發送失敗"),
+                    "選取": wr_select_all and row.get("通知狀態") in ("待通知", "發送失敗"),
                     **{k: v for k, v in row.items() if k != "LINE訊息"},
                 }
                 for row in wr_rows
