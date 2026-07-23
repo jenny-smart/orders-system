@@ -11,11 +11,15 @@ import orders
 
 
 TRACKING_SHEET_TITLE = "週末服務提醒"
-TRACKING_HEADERS = [
+LEGACY_TRACKING_HEADERS = [
     "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE",
     "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註", "最後更新",
 ]
-NOTICE_STATUSES = ["待通知", "已通知"]
+TRACKING_HEADERS = [
+    "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE",
+    "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註", "最後更新",
+]
+NOTICE_STATUSES = ["待通知", "已排程", "已通知"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 
 
@@ -177,6 +181,14 @@ def _tracking_worksheet():
     current_headers = worksheet.row_values(1)
     if not current_headers:
         worksheet.update(range_name="A1", values=[TRACKING_HEADERS])
+    elif current_headers == LEGACY_TRACKING_HEADERS:
+        # 舊版追蹤表沒有「預約發送時間」欄；保留原資料並安全插入新欄。
+        old_values = worksheet.get_all_values()
+        migrated = [TRACKING_HEADERS]
+        for values in old_values[1:]:
+            old = dict(zip(LEGACY_TRACKING_HEADERS, values + [""] * (len(LEGACY_TRACKING_HEADERS) - len(values))))
+            migrated.append([old.get(header, "") for header in TRACKING_HEADERS])
+        worksheet.update(range_name="A1", values=migrated)
     elif current_headers != TRACKING_HEADERS:
         raise RuntimeError(f"Google Sheet「{TRACKING_SHEET_TITLE}」欄位格式不符，為避免覆蓋既有資料，已停止寫入")
     return worksheet
@@ -188,7 +200,7 @@ def load_tracking_rows():
     return [dict(zip(TRACKING_HEADERS, row + [""] * (len(TRACKING_HEADERS) - len(row)))) for row in values[1:] if row and row[0]]
 
 
-def merge_tracking_rows(order_rows, existing_rows):
+def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     existing = {row.get("訂單編號", ""): dict(row) for row in existing_rows}
     merged = []
     for item in order_rows:
@@ -197,7 +209,9 @@ def merge_tracking_rows(order_rows, existing_rows):
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
             "服務時間": item.get("service_time", ""), "姓名": item.get("name", ""),
             "電話": item.get("phone", ""), "地址": item.get("address", ""),
-            "LINE": item.get("line_url", ""), "通知狀態": old.get("通知狀態") or "待通知",
+            "LINE": item.get("line_url", ""),
+            "預約發送時間": old.get("預約發送時間") or scheduled_at,
+            "通知狀態": old.get("通知狀態") or "待通知",
             "通知時間": old.get("通知時間", ""), "回覆狀態": old.get("回覆狀態") or "未回覆",
             "回覆時間": old.get("回覆時間", ""), "回覆備註": old.get("回覆備註", ""),
             "最後更新": old.get("最後更新", ""), "LINE訊息": item.get("message", ""),
@@ -230,5 +244,5 @@ def save_tracking_rows(rows):
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
     if old_row_count > len(matrix):
-        worksheet.batch_clear([f"A{len(matrix) + 1}:M{old_row_count}"])
+        worksheet.batch_clear([f"A{len(matrix) + 1}:N{old_row_count}"])
     return len(incoming)

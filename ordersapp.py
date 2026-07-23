@@ -1,10 +1,13 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.70
+# 版本：v8.71
 # 模組：服務訂單系統主畫面
 # 最後更新：2026-07-19
 #
 # Change Log
+# v8.71
+# - 週末服務 LINE 提醒新增預約發送日期／時間，並保存到追蹤表。
+# - 通知狀態新增「已排程」，舊版追蹤表會自動安全新增排程欄。
 # v8.70
 # - 新增「週末服務 LINE 提醒」：篩選週末已付款訂單、產生提醒訊息，
 #   並用 Google Sheet 記錄通知與客人回覆狀態。
@@ -353,7 +356,7 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.70"
+__version__ = "8.71"
 
 import html
 import re
@@ -1019,6 +1022,19 @@ elif mode == "週末服務 LINE 提醒":
         _holidays = set()
     _suggested_run_day = previous_workday(_default_sat, _holidays)
     st.info(f"建議執行日：{_suggested_run_day.strftime('%Y-%m-%d')}；預設服務區間：{_default_sat}～{_default_sun}")
+    st.markdown("**LINE 預約發送時間**")
+    wr_send_c1, wr_send_c2 = st.columns(2)
+    with wr_send_c1:
+        wr_send_date = st.date_input("預約發送日期", value=_suggested_run_day, key="wr_send_date")
+    with wr_send_c2:
+        wr_send_time = st.time_input(
+            "預約發送時間", value=datetime.strptime("09:00", "%H:%M").time(),
+            step=600, key="wr_send_time",
+        )
+    wr_scheduled_at = f"{wr_send_date.strftime('%Y-%m-%d')} {wr_send_time.strftime('%H:%M')}"
+    st.caption("此欄位會保存排程時間；開啟 LINE 後仍需將訊息貼入並完成 LINE 的「設定傳送時間」。")
+
+    st.markdown("**服務日期區間**")
     wr_c1, wr_c2 = st.columns(2)
     with wr_c1:
         wr_date_s = st.date_input("服務日期-起", value=_default_sat, key="wr_date_s")
@@ -1038,7 +1054,9 @@ elif mode == "週末服務 LINE 提醒":
                         wr_date_s.strftime("%Y-%m-%d"), wr_date_e.strftime("%Y-%m-%d"),
                     )
                     _tracking = load_tracking_rows()
-                st.session_state.wr_rows = merge_tracking_rows(_orders, _tracking)
+                st.session_state.wr_rows = merge_tracking_rows(
+                    _orders, _tracking, scheduled_at=wr_scheduled_at,
+                )
                 st.session_state.wr_debug = _debug
             except Exception as e:
                 st.error(f"查詢失敗：{e}")
@@ -1058,24 +1076,32 @@ elif mode == "週末服務 LINE 提醒":
                 disabled=["訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE", "通知時間", "回覆時間", "最後更新"],
                 column_config={
                     "LINE": st.column_config.LinkColumn("LINE", display_text="開啟聊天"),
+                    "預約發送時間": st.column_config.TextColumn(
+                        "預約發送時間", help="格式：YYYY-MM-DD HH:MM",
+                        validate=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", required=True,
+                    ),
                     "通知狀態": st.column_config.SelectboxColumn("通知狀態", options=NOTICE_STATUSES, required=True),
                     "回覆狀態": st.column_config.SelectboxColumn("回覆狀態", options=REPLY_STATUSES, required=True),
                 },
             )
+            _edited_records = _edited.to_dict("records") if hasattr(_edited, "to_dict") else _edited
+            _edited_by_order = {row["訂單編號"]: row for row in _edited_records}
             if st.button("💾 儲存通知／回覆狀態", use_container_width=True, key="wr_save"):
                 try:
-                    count = save_tracking_rows(_edited)
+                    count = save_tracking_rows(_edited_records)
                     st.success(f"已保存 {count} 筆追蹤狀態。")
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
 
             st.markdown("#### LINE 提醒訊息")
             for _idx, _row in enumerate(wr_rows):
+                _edited_row = _edited_by_order.get(_row["訂單編號"], _row)
                 with st.expander(f"{_row['服務日期']} {_row['服務時間']}｜{_row['姓名']}｜{_row['訂單編號']}"):
+                    st.info(f"預約發送時間：{_edited_row.get('預約發送時間') or wr_scheduled_at}")
                     st.text_area("訊息", _row["LINE訊息"], height=220, key=f"wr_msg_{_row['訂單編號']}")
                     copy_button("複製訊息", _row["LINE訊息"], f"wr_copy_{_idx}")
                     if _row.get("LINE"):
-                        st.link_button("開啟 LINE 聊天", _row["LINE"])
+                        st.link_button("開啟 LINE 聊天並依上述時間排程", _row["LINE"])
                     else:
                         st.warning("此訂單沒有 LINE 聊天連結，請改用電話聯絡。")
 
