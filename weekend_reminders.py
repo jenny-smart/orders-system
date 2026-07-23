@@ -142,6 +142,13 @@ def fetch_line_reminder_statuses(rows, api_url, api_key):
     return _reminder_api(api_url, api_key, "/api/reminders/status", {"keys": keys}).get("reminders", [])
 
 
+def fetch_line_recipients(query, api_url, api_key):
+    """依客人最近傳入的文字或 LINE 名稱，取得 Webhook 真正的 userId。"""
+    return _reminder_api(
+        api_url, api_key, "/api/reminders/recipients", {"query": str(query or "").strip()}
+    ).get("recipients", [])
+
+
 def _display_taipei(iso_value):
     if not iso_value:
         return ""
