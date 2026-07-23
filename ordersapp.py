@@ -1029,7 +1029,7 @@ elif mode == "週末服務 LINE 提醒":
     with wr_send_c2:
         wr_send_time = st.time_input(
             "預約發送時間", value=datetime.strptime("09:00", "%H:%M").time(),
-            step=600, key="wr_send_time",
+            step=60, key="wr_send_time",
         )
     wr_scheduled_at = f"{wr_send_date.strftime('%Y-%m-%d')} {wr_send_time.strftime('%H:%M')}"
     st.caption("此欄位會保存排程時間；開啟 LINE 後仍需將訊息貼入並完成 LINE 的「設定傳送時間」。")
