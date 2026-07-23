@@ -1055,6 +1055,133 @@ elif mode == "週末服務 LINE 提醒":
     if not wr_api_url or not wr_api_key:
         st.warning("尚未設定 LINE_REMINDER_API_URL／LINE_REMINDER_API_KEY，目前只能查詢與複製，不能建立 Quick Reply 排程。")
 
+    with st.expander("🧪 Quick Reply 測試（測試帳號）"):
+        st.caption("測試訊息由 LINE Messaging API 發送；「已收到」按鈕會顯示在收件人的 LINE App。")
+        _test_now = datetime.now()
+        _test_default_at = (_test_now + timedelta(minutes=10)).replace(second=0, microsecond=0)
+        if "wr_test_id" not in st.session_state:
+            st.session_state.wr_test_id = f"TEST-{_test_now.strftime('%Y%m%d-%H%M%S')}"
+        wr_test_line_url = st.text_input(
+            "測試 LINE 聊天連結",
+            placeholder="https://chat.line.biz/.../chat/U...",
+            key="wr_test_line_url",
+        )
+        wr_test_c1, wr_test_c2 = st.columns(2)
+        with wr_test_c1:
+            wr_test_send_date = st.date_input(
+                "測試發送日期",
+                value=_test_default_at.date(),
+                key="wr_test_send_date",
+            )
+        with wr_test_c2:
+            wr_test_send_time = st.time_input(
+                "測試發送時間",
+                value=_test_default_at.time(),
+                step=60,
+                key="wr_test_send_time",
+            )
+        wr_test_service_date = st.date_input(
+            "測試服務日期（用於追蹤識別）",
+            value=_default_sat,
+            key="wr_test_service_date",
+        )
+        wr_test_message = st.text_area(
+            "測試訊息",
+            height=220,
+            key="wr_test_message",
+            placeholder="輸入要測試的 LINE 提醒訊息",
+        )
+        wr_test_confirm = st.checkbox(
+            "我確認這是測試帳號，並同意建立測試排程",
+            key="wr_test_confirm",
+        )
+        wr_test_create_c1, wr_test_create_c2 = st.columns(2)
+        with wr_test_create_c1:
+            if st.button(
+                "📅 建立測試 Quick Reply 排程",
+                use_container_width=True,
+                type="primary",
+                key="wr_test_schedule",
+                disabled=not (wr_api_url and wr_api_key),
+            ):
+                if not wr_test_confirm:
+                    st.warning("請先勾選測試確認。")
+                elif not line_id_from_chat_url(wr_test_line_url):
+                    st.warning("測試 LINE 聊天連結格式不正確。")
+                elif not wr_test_message.strip():
+                    st.warning("請輸入測試訊息。")
+                else:
+                    _test_scheduled_at = (
+                        f"{wr_test_send_date.strftime('%Y-%m-%d')} "
+                        f"{wr_test_send_time.strftime('%H:%M')}"
+                    )
+                    _test_row = {
+                        "訂單編號": st.session_state.wr_test_id,
+                        "服務日期": wr_test_service_date.strftime("%Y-%m-%d"),
+                        "服務時間": "",
+                        "姓名": "Quick Reply 測試",
+                        "電話": "",
+                        "地址": "",
+                        "LINE": wr_test_line_url.strip(),
+                        "LINE ID": line_id_from_chat_url(wr_test_line_url),
+                        "預約發送時間": _test_scheduled_at,
+                        "通知狀態": "待通知",
+                        "通知時間": "",
+                        "回覆狀態": "未回覆",
+                        "回覆時間": "",
+                        "回覆備註": "測試排程",
+                        "發送錯誤": "",
+                        "最後更新": "",
+                        "LINE訊息": wr_test_message.strip(),
+                    }
+                    try:
+                        _test_saved, _test_skipped = schedule_line_reminders(
+                            [_test_row], wr_api_url, wr_api_key,
+                        )
+                        if _test_saved:
+                            _test_row["通知狀態"] = "已排程"
+                            save_tracking_rows([_test_row])
+                            st.session_state.wr_test_row = _test_row
+                            st.success(
+                                f"測試排程已建立：{_test_scheduled_at}；"
+                                "請在收件人的 LINE App 查看「已收到」按鈕。"
+                            )
+                        else:
+                            _reason = _test_skipped[0]["原因"] if _test_skipped else "未知原因"
+                            st.warning(f"未建立測試排程：{_reason}")
+                    except Exception as e:
+                        st.error(f"建立測試排程失敗：{e}")
+        with wr_test_create_c2:
+            if st.button(
+                "🔄 同步測試回覆",
+                use_container_width=True,
+                key="wr_test_sync",
+                disabled=not (
+                    wr_api_url and wr_api_key and st.session_state.get("wr_test_row")
+                ),
+            ):
+                try:
+                    _test_current = st.session_state.wr_test_row
+                    _test_remote = fetch_line_reminder_statuses(
+                        [_test_current], wr_api_url, wr_api_key,
+                    )
+                    _test_synced = apply_line_reminder_statuses(
+                        [_test_current], _test_remote,
+                    )[0]
+                    save_tracking_rows([_test_synced])
+                    st.session_state.wr_test_row = _test_synced
+                    st.success("測試狀態已同步並保存。")
+                except Exception as e:
+                    st.error(f"同步測試狀態失敗：{e}")
+        if st.session_state.get("wr_test_row"):
+            _test_status = st.session_state.wr_test_row
+            st.info(
+                f"通知狀態：{_test_status.get('通知狀態', '')}｜"
+                f"實際發送：{_test_status.get('通知時間') or '尚未發送'}｜"
+                f"回覆狀態：{_test_status.get('回覆狀態', '')}｜"
+                f"回覆時間：{_test_status.get('回覆時間') or '尚未回覆'}"
+            )
+
     st.markdown("**服務日期區間**")
     wr_c1, wr_c2 = st.columns(2)
     with wr_c1:
