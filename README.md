@@ -24,6 +24,17 @@
 並提供 LINE 聊天連結。通知與回覆狀態會保存於既有 Google 試算表的
 `週末服務提醒` 分頁；首次使用時由系統自動建立。
 
+設定 `LINE_REMINDER_API_URL` 與 `LINE_REMINDER_API_KEY` 後，可直接建立任意分鐘的
+LINE Quick Reply 排程。客人按「已收到」後，畫面可同步 LINE ID、通知時間與回覆時間；
+不需要用手機號碼配對。追蹤紀錄也能一鍵複製成 Tab 分隔格式貼到 Google Sheets。
+
+Streamlit Secrets：
+
+```toml
+LINE_REMINDER_API_URL = "https://你的-line-worker.workers.dev"
+LINE_REMINDER_API_KEY = "與 Cloudflare Worker 相同的高強度隨機值"
+```
+
 ---
 
 # 建議介面調整
