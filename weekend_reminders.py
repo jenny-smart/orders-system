@@ -80,7 +80,7 @@ def _address(lines):
 
 
 def _service_date_time(lines):
-    created_at, service_date, _ = orders._extract_order_dates_from_block_lines(lines)
+    _, service_date, _ = orders._extract_order_dates_from_block_lines(lines)
     service_time = ""
     if service_date:
         for idx, line in enumerate(lines):
@@ -139,7 +139,6 @@ def find_paid_weekend_orders(env_name, backend_email, backend_password, clean_da
         for block in blocks:
             lines = block.get("lines", [])
             joined = "\n".join(lines)
-            # 後台已套 purchase_status=1；仍在本地再驗一次，避免後台篩選失準。
             if not re.search(r"付款狀態[：:]\s*已付款", joined):
                 continue
             service_date, service_time = _service_date_time(lines)
@@ -230,7 +229,6 @@ def save_tracking_rows(rows):
     matrix = [TRACKING_HEADERS] + [[row.get(header, "") for header in TRACKING_HEADERS] for row in all_rows]
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
-    # 先寫入完整新資料，成功後才清除舊資料多出的尾列，避免先 clear 造成資料遺失。
     if old_row_count > len(matrix):
         worksheet.batch_clear([f"A{len(matrix) + 1}:M{old_row_count}"])
     return len(incoming)
