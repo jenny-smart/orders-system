@@ -1109,6 +1109,13 @@ elif mode == "週末服務 LINE 提醒":
             ]
             _edited = st.data_editor(
                 _editable, use_container_width=True, hide_index=True, key="wr_editor",
+                column_order=[
+                    "選取", "訂單編號", "服務日期", "姓名",
+                    "預約發送時間", "通知狀態", "通知時間",
+                    "回覆狀態", "回覆時間", "LINE",
+                    "服務時間", "電話", "地址", "LINE ID",
+                    "回覆備註", "發送錯誤", "最後更新",
+                ],
                 disabled=[
                     "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址",
                     "LINE", "LINE ID", "通知時間", "回覆時間", "發送錯誤", "最後更新",
@@ -1122,6 +1129,10 @@ elif mode == "週末服務 LINE 提醒":
                         validate=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", required=True,
                     ),
                     "通知狀態": st.column_config.SelectboxColumn("通知狀態", options=NOTICE_STATUSES, required=True),
+                    "通知時間": st.column_config.TextColumn(
+                        "實際發送時間",
+                        help="LINE Messaging API 實際成功發送的時間；按「同步發送／回覆狀態」後自動帶入並保存。",
+                    ),
                     "回覆狀態": st.column_config.SelectboxColumn("回覆狀態", options=REPLY_STATUSES, required=True),
                 },
             )
@@ -1167,6 +1178,11 @@ elif mode == "週末服務 LINE 提醒":
                                     for row in _edited_records
                                 ]
                                 st.success(f"已建立 {len(_saved)} 筆排程；略過 {len(_skipped)} 筆。")
+                                if _saved:
+                                    st.info(
+                                        f"排程已建立，預計於 {wr_scheduled_at} 發送；"
+                                        "發送後按「同步發送／回覆狀態」，表單會自動記錄實際發送時間。"
+                                    )
                                 for _item in _skipped:
                                     st.warning(f"{_item['訂單編號']}：{_item['原因']}")
                             except Exception as e:
