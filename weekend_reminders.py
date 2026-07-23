@@ -6,16 +6,26 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
+import requests
 
 import orders
 
 
 TRACKING_SHEET_TITLE = "週末服務提醒"
-TRACKING_HEADERS = [
+LEGACY_TRACKING_HEADERS = [
     "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE",
     "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註", "最後更新",
 ]
-NOTICE_STATUSES = ["待通知", "已通知"]
+SCHEDULED_TRACKING_HEADERS = [
+    "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE",
+    "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註", "最後更新",
+]
+TRACKING_HEADERS = [
+    "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE", "LINE ID",
+    "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註",
+    "發送錯誤", "最後更新",
+]
+NOTICE_STATUSES = ["待通知", "已排程", "已通知", "發送失敗"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 
 
@@ -62,6 +72,119 @@ def _line_urls_from_html(raw_html):
     return result
 
 
+def line_id_from_chat_url(line_url):
+    """從 LINE Official Account Manager 聊天網址取出客人的 LINE user ID。"""
+    match = re.search(r"/chat/(U[0-9A-Za-z_-]+)(?:[/?#]|$)", str(line_url or ""))
+    return match.group(1) if match else ""
+
+
+def reminder_key(row):
+    return f"{str(row.get('訂單編號', '')).strip()}|{str(row.get('服務日期', '')).strip()}"
+
+
+def _taipei_schedule_iso(value):
+    parsed = datetime.strptime(str(value).strip(), "%Y-%m-%d %H:%M")
+    return parsed.replace(tzinfo=ZoneInfo("Asia/Taipei")).isoformat()
+
+
+def _reminder_api(api_url, api_key, path, payload):
+    if not str(api_url or "").strip() or not str(api_key or "").strip():
+        raise RuntimeError("尚未設定 LINE_REMINDER_API_URL／LINE_REMINDER_API_KEY")
+    response = requests.post(
+        f"{str(api_url).rstrip('/')}{path}",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=20,
+    )
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    if not response.ok:
+        raise RuntimeError(data.get("error") or f"LINE 提醒服務回傳 HTTP {response.status_code}")
+    return data
+
+
+def schedule_line_reminders(rows, api_url, api_key):
+    payload = []
+    skipped = []
+    for row in rows:
+        line_id = str(row.get("LINE ID") or "").strip() or line_id_from_chat_url(row.get("LINE"))
+        if not line_id:
+            skipped.append({"訂單編號": row.get("訂單編號", ""), "原因": "LINE 聊天網址沒有 LINE ID"})
+            continue
+        try:
+            scheduled_at = _taipei_schedule_iso(row.get("預約發送時間"))
+        except (TypeError, ValueError):
+            skipped.append({"訂單編號": row.get("訂單編號", ""), "原因": "預約發送時間格式錯誤"})
+            continue
+        message = str(row.get("LINE訊息") or "").strip()
+        if not message:
+            skipped.append({"訂單編號": row.get("訂單編號", ""), "原因": "提醒訊息空白"})
+            continue
+        payload.append({
+            "order_no": row.get("訂單編號", ""),
+            "service_date": row.get("服務日期", ""),
+            "line_user_id": line_id,
+            "message_text": message,
+            "scheduled_at": scheduled_at,
+        })
+    saved = []
+    if payload:
+        saved = _reminder_api(api_url, api_key, "/api/reminders/schedule", {"reminders": payload}).get("reminders", [])
+    return saved, skipped
+
+
+def fetch_line_reminder_statuses(rows, api_url, api_key):
+    keys = [reminder_key(row) for row in rows if row.get("訂單編號") and row.get("服務日期")]
+    if not keys:
+        return []
+    return _reminder_api(api_url, api_key, "/api/reminders/status", {"keys": keys}).get("reminders", [])
+
+
+def _display_taipei(iso_value):
+    if not iso_value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+        return parsed.astimezone(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(iso_value)
+
+
+def apply_line_reminder_statuses(rows, statuses):
+    status_map = {str(item.get("reminder_key", "")): item for item in statuses}
+    merged = []
+    for raw in rows:
+        row = dict(raw)
+        remote = status_map.get(reminder_key(row))
+        if remote:
+            remote_status = remote.get("status")
+            row["LINE ID"] = remote.get("line_user_id") or row.get("LINE ID", "")
+            row["預約發送時間"] = _display_taipei(remote.get("scheduled_at")) or row.get("預約發送時間", "")
+            row["通知時間"] = _display_taipei(remote.get("sent_at")) or row.get("通知時間", "")
+            row["回覆時間"] = _display_taipei(remote.get("replied_at")) or row.get("回覆時間", "")
+            row["發送錯誤"] = remote.get("last_error") or ""
+            if remote_status == "scheduled":
+                row["通知狀態"] = "已排程"
+            elif remote_status in ("sent", "replied"):
+                row["通知狀態"] = "已通知"
+            elif remote_status == "failed":
+                row["通知狀態"] = "發送失敗"
+            if remote_status == "replied":
+                row["回覆狀態"] = "已回覆"
+        merged.append(row)
+    return merged
+
+
+def tracking_rows_tsv(rows):
+    headers = TRACKING_HEADERS
+    lines = ["\t".join(headers)]
+    for row in rows:
+        lines.append("\t".join(str(row.get(header, "") or "").replace("\t", " ").replace("\n", " ") for header in headers))
+    return "\n".join(lines)
+
+
 def _name_phone(lines):
     for idx, line in enumerate(lines):
         if re.fullmatch(r"09\d{8}", str(line).strip()):
@@ -105,7 +228,7 @@ def build_reminder_message(row):
     return (
         f"您好，提醒您本週末的清潔服務：\n\n"
         f"服務時間：{when}{address_line}\n\n"
-        "為確認您已收到提醒，請回覆「收到」，謝謝您。"
+        "為確認您已收到提醒，請點選下方「已收到」，謝謝您。"
     )
 
 
@@ -175,8 +298,17 @@ def _tracking_worksheet():
     except orders.gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=TRACKING_SHEET_TITLE, rows=1000, cols=len(TRACKING_HEADERS))
     current_headers = worksheet.row_values(1)
+    if worksheet.col_count < len(TRACKING_HEADERS):
+        worksheet.resize(cols=len(TRACKING_HEADERS))
     if not current_headers:
         worksheet.update(range_name="A1", values=[TRACKING_HEADERS])
+    elif current_headers in (LEGACY_TRACKING_HEADERS, SCHEDULED_TRACKING_HEADERS):
+        old_values = worksheet.get_all_values()
+        migrated = [TRACKING_HEADERS]
+        for values in old_values[1:]:
+            old = dict(zip(current_headers, values + [""] * (len(current_headers) - len(values))))
+            migrated.append([old.get(header, "") for header in TRACKING_HEADERS])
+        worksheet.update(range_name="A1", values=migrated)
     elif current_headers != TRACKING_HEADERS:
         raise RuntimeError(f"Google Sheet「{TRACKING_SHEET_TITLE}」欄位格式不符，為避免覆蓋既有資料，已停止寫入")
     return worksheet
@@ -188,7 +320,7 @@ def load_tracking_rows():
     return [dict(zip(TRACKING_HEADERS, row + [""] * (len(TRACKING_HEADERS) - len(row)))) for row in values[1:] if row and row[0]]
 
 
-def merge_tracking_rows(order_rows, existing_rows):
+def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     existing = {row.get("訂單編號", ""): dict(row) for row in existing_rows}
     merged = []
     for item in order_rows:
@@ -197,9 +329,12 @@ def merge_tracking_rows(order_rows, existing_rows):
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
             "服務時間": item.get("service_time", ""), "姓名": item.get("name", ""),
             "電話": item.get("phone", ""), "地址": item.get("address", ""),
-            "LINE": item.get("line_url", ""), "通知狀態": old.get("通知狀態") or "待通知",
+            "LINE": item.get("line_url", ""), "LINE ID": old.get("LINE ID", ""),
+            "預約發送時間": old.get("預約發送時間") or scheduled_at,
+            "通知狀態": old.get("通知狀態") or "待通知",
             "通知時間": old.get("通知時間", ""), "回覆狀態": old.get("回覆狀態") or "未回覆",
             "回覆時間": old.get("回覆時間", ""), "回覆備註": old.get("回覆備註", ""),
+            "發送錯誤": old.get("發送錯誤", ""),
             "最後更新": old.get("最後更新", ""), "LINE訊息": item.get("message", ""),
         })
     return merged
@@ -221,6 +356,8 @@ def save_tracking_rows(rows):
             row["通知時間"] = old.get("通知時間") or now
         if row["回覆狀態"] == "已回覆" and not row["回覆時間"]:
             row["回覆時間"] = old.get("回覆時間") or now
+        if not row["LINE ID"]:
+            row["LINE ID"] = line_id_from_chat_url(row["LINE"]) or old.get("LINE ID", "")
         row["最後更新"] = now
         incoming[row["訂單編號"]] = row
     existing.update(incoming)
@@ -230,5 +367,5 @@ def save_tracking_rows(rows):
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
     if old_row_count > len(matrix):
-        worksheet.batch_clear([f"A{len(matrix) + 1}:M{old_row_count}"])
+        worksheet.batch_clear([f"A{len(matrix) + 1}:P{old_row_count}"])
     return len(incoming)
