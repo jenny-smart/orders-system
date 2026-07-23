@@ -36,6 +36,8 @@ class WeekendReminderTests(unittest.TestCase):
             "address": "台北市中山區測試路1號",
         })
         self.assertIn("7/25（六） 09:00-12:00", message)
+        self.assertIn("專員會在服務前5-10分鐘", message)
+        self.assertIn("煩請留意聯繫訊息", message)
         self.assertIn("請點選下方「已收到」", message)
 
     def test_backend_card_and_line_id_parsing(self):
