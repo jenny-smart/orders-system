@@ -3,6 +3,7 @@ from datetime import date
 from unittest.mock import Mock, patch
 
 from weekend_reminders import (
+    TRACKING_HEADERS,
     _line_urls_from_html,
     _listed_service_date_time,
     _sms_service_date_time,
@@ -19,6 +20,14 @@ from weekend_reminders import (
 
 
 class WeekendReminderTests(unittest.TestCase):
+    def test_tracking_headers_accept_safe_older_subset(self):
+        older = [
+            "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE",
+            "LINE ID", "預約發送時間", "通知狀態", "通知時間",
+            "回覆狀態", "回覆時間", "回覆備註", "最後更新",
+        ]
+        self.assertTrue(set(older).issubset(set(TRACKING_HEADERS)))
+
     def test_upcoming_weekend_from_weekday(self):
         self.assertEqual(
             upcoming_weekend(date(2026, 7, 23)),
