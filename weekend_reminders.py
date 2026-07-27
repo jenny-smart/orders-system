@@ -368,10 +368,23 @@ def _tracking_worksheet():
             current_headers
             and current_headers[0] == "訂單編號"
             and len(current_headers) == len(set(current_headers))
-            and set(current_headers).issubset(set(TRACKING_HEADERS))
         )
     ):
         old_values = worksheet.get_all_values()
+        unknown_headers = [header for header in current_headers if header not in TRACKING_HEADERS]
+        if unknown_headers:
+            backup_title = (
+                f"{TRACKING_SHEET_TITLE}_備份_"
+                f"{datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y%m%d_%H%M%S_%f')}"
+            )
+            backup_cols = max((len(row) for row in old_values), default=1)
+            backup = spreadsheet.add_worksheet(
+                title=backup_title,
+                rows=max(len(old_values), 1),
+                cols=max(backup_cols, 1),
+            )
+            if old_values:
+                backup.update(range_name="A1", values=old_values)
         migrated = [TRACKING_HEADERS]
         for values in old_values[1:]:
             old = dict(zip(current_headers, values + [""] * (len(current_headers) - len(values))))
