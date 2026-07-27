@@ -116,25 +116,40 @@ def extract_cleaner_line(raw_html):
     return str(field.get("value") or "").strip() if field else ""
 
 
-def build_cleaner_message(name, service_date, jobs, reference_date=None):
-    day = datetime.strptime(service_date, "%Y-%m-%d").date()
+def build_cleaner_message(
+    name, service_date_s, jobs, service_date_e=None, reference_date=None
+):
+    start_day = datetime.strptime(service_date_s, "%Y-%m-%d").date()
+    end_day = datetime.strptime(
+        service_date_e or service_date_s, "%Y-%m-%d"
+    ).date()
     weekdays = "一二三四五六日"
-    day_text = f"{day.month}/{day.day}（{weekdays[day.weekday()]}）"
+    start_text = (
+        f"{start_day.month}/{start_day.day}（{weekdays[start_day.weekday()]}）"
+    )
+    end_text = f"{end_day.month}/{end_day.day}（{weekdays[end_day.weekday()]}）"
     reference_date = reference_date or datetime.now(ZoneInfo("Asia/Taipei")).date()
-    opening = "提醒您明日有排班" if day == reference_date + timedelta(days=1) else f"提醒您 {day_text} 有排班"
+    if start_day == end_day == reference_date + timedelta(days=1):
+        opening = "提醒您明日有排班"
+    elif start_day == end_day:
+        opening = f"提醒您 {start_text} 有排班"
+    else:
+        opening = f"提醒您 {start_text}～{end_text} 有排班"
     lines = [f"{name}專員您好，{opening}："]
     sorted_jobs = sorted(
         jobs,
         key=lambda item: (
-            item.get("service_date") or service_date,
+            item.get("service_date") or service_date_s,
             item.get("service_time") or "",
             item.get("order_no") or "",
         ),
     )
+    jobs_by_day = defaultdict(int)
     for idx, job in enumerate(sorted_jobs, 1):
         job_day = datetime.strptime(
-            job.get("service_date") or service_date, "%Y-%m-%d"
+            job.get("service_date") or service_date_s, "%Y-%m-%d"
         ).date()
+        jobs_by_day[job_day] += 1
         job_day_text = (
             f"{job_day.month}/{job_day.day}（{weekdays[job_day.weekday()]}）"
         )
@@ -144,8 +159,15 @@ def build_cleaner_message(name, service_date, jobs, reference_date=None):
             f"地址：{job.get('address') or '請至後台確認'}",
             f"訂單：{job.get('order_no') or ''}",
         ])
-    if len(sorted_jobs) > 1:
-        lines.extend(["", "⚠️ 當日有多筆工作，請務必確認 final 時間。"])
+    crowded_days = [
+        f"{day.month}/{day.day}" for day, count in sorted(jobs_by_day.items())
+        if count > 1
+    ]
+    if crowded_days:
+        lines.extend([
+            "",
+            f"⚠️ {'、'.join(crowded_days)} 當日有多筆工作，請務必確認 final 時間。",
+        ])
     lines.extend(["", "請確認明日行程，收到後請回覆「收到」，謝謝。"])
     return "\n".join(lines)
 
@@ -185,9 +207,11 @@ def _resolve_cleaner_lines(session, base_url, names):
 
 
 def find_paid_cleaner_reminders(
-    env_name, backend_email, backend_password, service_date, max_pages=20
+    env_name, backend_email, backend_password,
+    service_date_s, service_date_e=None, max_pages=20
 ):
-    """查詢指定服務日的已付款訂單，依專員彙整並補上專員 LINE 連結。"""
+    """查詢服務日期區間的已付款訂單，跨日依專員彙整成一筆。"""
+    service_date_e = service_date_e or service_date_s
     _configure_backend(env_name)
     session = orders.requests.Session()
     if not orders.login(session, backend_email, backend_password):
@@ -198,8 +222,8 @@ def find_paid_cleaner_reminders(
     for page in range(1, max_pages + 1):
         params = dict(orders.PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update({
-            "clean_date_s": service_date,
-            "clean_date_e": service_date,
+            "clean_date_s": service_date_s,
+            "clean_date_e": service_date_e,
             "purchase_status": "1",
             "p_board": "on",
             "page": str(page),
@@ -223,7 +247,7 @@ def find_paid_cleaner_reminders(
             if not re.search(r"付款狀態[：:]\s*已付款", joined):
                 continue
             listed_date, _ = _listed_service_date_time(lines)
-            if listed_date != service_date:
+            if not listed_date or not (service_date_s <= listed_date <= service_date_e):
                 continue
             found_date, service_time, sms_time_used = _preferred_service_date_time(lines)
             customer_name, _ = _name_phone(lines)
@@ -250,9 +274,12 @@ def find_paid_cleaner_reminders(
             "name": name,
             "user_id": profile.get("user_id", ""),
             "line_url": profile.get("line_url", ""),
-            "service_date": service_date,
+            "service_date_s": service_date_s,
+            "service_date_e": service_date_e,
             "jobs": jobs,
-            "message": build_cleaner_message(name, service_date, jobs),
+            "message": build_cleaner_message(
+                name, service_date_s, jobs, service_date_e=service_date_e
+            ),
         })
     return rows, {
         "base_url": orders.BASE_URL,

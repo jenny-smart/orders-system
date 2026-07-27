@@ -37,6 +37,26 @@ class CleanerReminderTests(unittest.TestCase):
         self.assertIn("當日有多筆工作，請務必確認 final 時間", message)
         self.assertIn("請回覆「收到」", message)
 
+    def test_builds_one_record_across_date_range(self):
+        jobs = [
+            {
+                "order_no": "LC101", "service_date": "2026-07-28",
+                "service_time": "09:00-12:00", "address": "台北市A路1號",
+            },
+            {
+                "order_no": "LC102", "service_date": "2026-07-29",
+                "service_time": "14:00-17:00", "address": "台北市B路2號",
+            },
+        ]
+        message = build_cleaner_message(
+            "蔡立娟", "2026-07-28", jobs,
+            service_date_e="2026-07-29", reference_date=date(2026, 7, 27),
+        )
+        self.assertIn("7/28（二）～7/29（三）", message)
+        self.assertIn("1. 7/28（二） 09:00-12:00", message)
+        self.assertIn("2. 7/29（三） 14:00-17:00", message)
+        self.assertNotIn("當日有多筆工作", message)
+
 
 if __name__ == "__main__":
     unittest.main()

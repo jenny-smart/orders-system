@@ -356,11 +356,21 @@ def _tracking_worksheet():
     except orders.gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=TRACKING_SHEET_TITLE, rows=1000, cols=len(TRACKING_HEADERS))
     current_headers = worksheet.row_values(1)
+    while current_headers and not str(current_headers[-1]).strip():
+        current_headers.pop()
     if worksheet.col_count < len(TRACKING_HEADERS):
         worksheet.resize(cols=len(TRACKING_HEADERS))
     if not current_headers:
         worksheet.update(range_name="A1", values=[TRACKING_HEADERS])
-    elif current_headers in (LEGACY_TRACKING_HEADERS, SCHEDULED_TRACKING_HEADERS):
+    elif (
+        current_headers in (LEGACY_TRACKING_HEADERS, SCHEDULED_TRACKING_HEADERS)
+        or (
+            current_headers
+            and current_headers[0] == "訂單編號"
+            and len(current_headers) == len(set(current_headers))
+            and set(current_headers).issubset(set(TRACKING_HEADERS))
+        )
+    ):
         old_values = worksheet.get_all_values()
         migrated = [TRACKING_HEADERS]
         for values in old_values[1:]:
