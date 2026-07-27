@@ -209,7 +209,8 @@ def _address(lines):
     return ""
 
 
-def _service_date_time(lines):
+def _listed_service_date_time(lines):
+    """訂單服務日期欄原始日期／時間（不套用簡訊時間）。"""
     _, service_date, _ = orders._extract_order_dates_from_block_lines(lines)
     service_time = ""
     if service_date:
@@ -223,6 +224,53 @@ def _service_date_time(lines):
                         break
                 break
     return service_date or "", service_time
+
+
+def _sms_service_date_time(lines, fallback_date=""):
+    """解析「簡訊時間／簡訊日期」欄位，可接受 YYYY-MM-DD 或 M/D。"""
+    for idx, raw_line in enumerate(lines):
+        line = str(raw_line or "").strip()
+        if not re.search(r"簡訊.*(?:時間|日期)", line):
+            continue
+        value_lines = [line]
+        value_lines.extend(str(item or "").strip() for item in lines[idx + 1:idx + 4])
+        text = " ".join(value_lines)
+
+        date_value = ""
+        full_date = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", text)
+        if full_date:
+            date_value = (
+                f"{int(full_date.group(1)):04d}-"
+                f"{int(full_date.group(2)):02d}-"
+                f"{int(full_date.group(3)):02d}"
+            )
+        else:
+            short_date = re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)", text)
+            if short_date and fallback_date:
+                date_value = (
+                    f"{str(fallback_date)[:4]}-"
+                    f"{int(short_date.group(1)):02d}-"
+                    f"{int(short_date.group(2)):02d}"
+                )
+
+        time_value = ""
+        time_match = re.search(
+            r"(?<!\d)(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})(?!\d)",
+            text,
+        )
+        if time_match:
+            start_h, start_m = time_match.group(1).split(":")
+            end_h, end_m = time_match.group(2).split(":")
+            time_value = f"{int(start_h):02d}:{start_m}-{int(end_h):02d}:{end_m}"
+        return date_value, time_value, True
+    return "", "", False
+
+
+def _service_date_time(lines):
+    """提醒顯示時間：有簡訊時間就優先，否則使用訂單服務日期欄。"""
+    service_date, service_time = _listed_service_date_time(lines)
+    sms_date, sms_time, _ = _sms_service_date_time(lines, service_date)
+    return sms_date or service_date, sms_time or service_time
 
 
 def build_reminder_message(row):
@@ -273,9 +321,10 @@ def find_paid_weekend_orders(env_name, backend_email, backend_password, clean_da
             joined = "\n".join(lines)
             if not re.search(r"付款狀態[：:]\s*已付款", joined):
                 continue
-            service_date, service_time = _service_date_time(lines)
-            if not service_date or not (clean_date_s <= service_date <= clean_date_e):
+            listed_date, _ = _listed_service_date_time(lines)
+            if not listed_date or not (clean_date_s <= listed_date <= clean_date_e):
                 continue
+            service_date, service_time = _service_date_time(lines)
             name, phone = _name_phone(lines)
             if "檸檬" in name or "保留" in name:
                 continue

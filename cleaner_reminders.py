@@ -1,4 +1,91 @@
+# -*- coding: utf-8 -*-
+"""已付款訂單的專員隔日上班提醒（後台唯讀）。"""
+
+import re
+from collections import defaultdict
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from bs4 import BeautifulSoup
+
+import orders
+from weekend_reminders import (
+    _address,
+    _configure_backend,
+    _listed_service_date_time,
+    _name_phone,
+    _service_date_time,
+    _sms_service_date_time,
+)
+
+
+def extract_cleaner_names(lines):
+    staff = orders._extract_staff_line(lines)
+    if not staff or staff == "無人力":
+        return []
+    return [
+        name.strip()
+        for name in re.split(r"\s+[Xx×]\s+", staff)
+        if name.strip() and name.strip() != "無人力"
+    ]
+
+
+def cleaner_profile_ids(raw_html, target_names):
+    """由 /cleaner1 表格找專員名稱對應的 user id。"""
+    wanted = {re.sub(r"\s+", "", name): name for name in target_names}
+    found = {}
+    soup = BeautifulSoup(raw_html or "", "html.parser")
+    for row in soup.find_all("tr"):
+        compact = re.sub(r"\s+", "", row.get_text(" ", strip=True))
+        matched = [original for key, original in wanted.items() if key and key in compact]
+        if not matched:
+            continue
+        html = str(row)
+        match = re.search(r"/user/edit/(\d+)", html, re.I)
+        if not match:
+            match = re.search(r"/cleaner1/(\d+)(?=[/'\"?#])", html, re.I)
+        if match:
+            for name in matched:
+                found[name] = match.group(1)
+    return found
+
+
+def extract_cleaner_line(raw_html):
+    soup = BeautifulSoup(raw_html or "", "html.parser")
+    field = soup.select_one('input[name="line"], input#line')
+    return str(field.get("value") or "").strip() if field else ""
+
+
+def build_cleaner_message(name, service_date, jobs, reference_date=None):
+    day = datetime.strptime(service_date, "%Y-%m-%d").date()
+    weekdays = "一二三四五六日"
+    day_text = f"{day.month}/{day.day}（{weekdays[day.weekday()]}）"
+    reference_date = reference_date or datetime.now(ZoneInfo("Asia/Taipei")).date()
+    opening = "提醒您明日有排班" if day == reference_date + timedelta(days=1) else f"提醒您 {day_text} 有排班"
+    lines = [f"{name}專員您好，{opening}："]
+    sorted_jobs = sorted(
+        jobs,
+        key=lambda item: (
+            item.get("service_date") or service_date,
+            item.get("service_time") or "",
+            item.get("order_no") or "",
+        ),
+    )
+    for idx, job in enumerate(sorted_jobs, 1):
+        job_day = datetime.strptime(
+            job.get("service_date") or service_date, "%Y-%m-%d"
+        ).date()
+        job_day_text = (
+            f"{job_day.month}/{job_day.day}（{weekdays[job_day.weekday()]}）"
+        )
+        lines.extend([
+            "",
+            f"{idx}. {job_day_text} {job.get('service_time') or '時間待確認'}",
+            f"地址：{job.get('address') or '請至後台確認'}",
+            f"訂單：{job.get('order_no') or ''}",
         ])
+    if len(sorted_jobs) > 1:
+        lines.extend(["", "⚠️ 當日有多筆工作，請務必確認 final 時間。"])
     lines.extend(["", "請確認明日行程，收到後請回覆「收到」，謝謝。"])
     return "\n".join(lines)
 
@@ -75,9 +162,11 @@ def find_paid_cleaner_reminders(
             joined = "\n".join(lines)
             if not re.search(r"付款狀態[：:]\s*已付款", joined):
                 continue
-            found_date, service_time = _service_date_time(lines)
-            if found_date != service_date:
+            listed_date, _ = _listed_service_date_time(lines)
+            if listed_date != service_date:
                 continue
+            found_date, service_time = _service_date_time(lines)
+            _, _, sms_time_used = _sms_service_date_time(lines, listed_date)
             customer_name, _ = _name_phone(lines)
             job = {
                 "order_no": block.get("order_no", ""),
@@ -85,6 +174,7 @@ def find_paid_cleaner_reminders(
                 "service_time": service_time,
                 "address": _address(lines),
                 "customer_name": customer_name,
+                "sms_time_used": sms_time_used,
             }
             for cleaner_name in extract_cleaner_names(lines):
                 jobs_by_name[cleaner_name].append(job)
