@@ -10,6 +10,7 @@ from weekend_reminders import (
     _service_date_time,
     apply_line_reminder_statuses,
     build_reminder_message,
+    find_paid_weekend_orders,
     line_id_from_chat_url,
     merge_tracking_rows,
     previous_workday,
@@ -85,6 +86,34 @@ class WeekendReminderTests(unittest.TestCase):
         html = f'<table><tr><td>LC001</td><td><a href="{url}">LINE</a></td></tr></table>'
         self.assertEqual(_line_urls_from_html(html)["LC001"], url)
         self.assertEqual(line_id_from_chat_url(url), "U805b7af99c975eb040d1f82d7b1e8b6b")
+
+    @patch("weekend_reminders.orders.login", return_value=True)
+    @patch("weekend_reminders.orders.requests.Session")
+    def test_dev_paid_order_named_lemon_reserved_is_included(self, session_class, _login):
+        response = Mock()
+        response.status_code = 200
+        response.text = """
+        <html><body>
+        <div>TT00213362</div>
+        <div>檸檬保留</div>
+        <div>0939592628</div>
+        <div>2026-07-28 04:58:57</div>
+        <div>2026-08-01 (六)</div>
+        <div>14:00 - 16:00</div>
+        <div>簡訊實際服務時間</div>
+        <div>10:00-12:00</div>
+        <div>付款狀態：已付款</div>
+        </body></html>
+        """
+        session_class.return_value.get.return_value = response
+
+        rows, debug = find_paid_weekend_orders(
+            "dev", "test@example.com", "password", "2026-08-01", "2026-08-02",
+        )
+
+        self.assertEqual([row["order_no"] for row in rows], ["TT00213362"])
+        self.assertEqual(rows[0]["name"], "檸檬保留")
+        self.assertEqual(debug["base_url"], "https://backend-dev.lemonclean.com.tw")
 
     def test_sms_time_overrides_listed_service_time(self):
         lines = [

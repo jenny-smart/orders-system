@@ -326,8 +326,6 @@ def find_paid_weekend_orders(env_name, backend_email, backend_password, clean_da
                 continue
             service_date, service_time = _service_date_time(lines)
             name, phone = _name_phone(lines)
-            if "檸檬" in name or "保留" in name:
-                continue
             order_no = block.get("order_no", "")
             row = {
                 "order_no": order_no,
