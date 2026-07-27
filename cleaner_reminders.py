@@ -12,11 +12,71 @@ import orders
 from weekend_reminders import (
     _address,
     _configure_backend,
-    _listed_service_date_time,
     _name_phone,
-    _service_date_time,
-    _sms_service_date_time,
 )
+
+
+def _listed_service_date_time(lines):
+    """本模組自行解析，避免 Streamlit 熱更新仍快取舊 weekend_reminders。"""
+    _, service_date, _ = orders._extract_order_dates_from_block_lines(lines)
+    service_time = ""
+    if service_date:
+        for idx, line in enumerate(lines):
+            if str(line).strip().startswith(service_date):
+                for following in lines[idx + 1:idx + 6]:
+                    match = re.search(
+                        r"(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})",
+                        str(following),
+                    )
+                    if match:
+                        service_time = f"{match.group(1)}-{match.group(2)}"
+                        break
+                break
+    return service_date or "", service_time
+
+
+def _sms_service_date_time(lines, fallback_date=""):
+    for idx, raw_line in enumerate(lines):
+        line = str(raw_line or "").strip()
+        if not re.search(r"簡訊.*(?:時間|日期)", line):
+            continue
+        text = " ".join(
+            [line]
+            + [str(item or "").strip() for item in lines[idx + 1:idx + 4]]
+        )
+        date_value = ""
+        full_date = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", text)
+        if full_date:
+            date_value = (
+                f"{int(full_date.group(1)):04d}-"
+                f"{int(full_date.group(2)):02d}-"
+                f"{int(full_date.group(3)):02d}"
+            )
+        else:
+            short_date = re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)", text)
+            if short_date and fallback_date:
+                date_value = (
+                    f"{str(fallback_date)[:4]}-"
+                    f"{int(short_date.group(1)):02d}-"
+                    f"{int(short_date.group(2)):02d}"
+                )
+        time_value = ""
+        time_match = re.search(
+            r"(?<!\d)(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})(?!\d)",
+            text,
+        )
+        if time_match:
+            start_h, start_m = time_match.group(1).split(":")
+            end_h, end_m = time_match.group(2).split(":")
+            time_value = f"{int(start_h):02d}:{start_m}-{int(end_h):02d}:{end_m}"
+        return date_value, time_value, True
+    return "", "", False
+
+
+def _preferred_service_date_time(lines):
+    listed_date, listed_time = _listed_service_date_time(lines)
+    sms_date, sms_time, used = _sms_service_date_time(lines, listed_date)
+    return sms_date or listed_date, sms_time or listed_time, used
 
 
 def extract_cleaner_names(lines):
@@ -165,8 +225,7 @@ def find_paid_cleaner_reminders(
             listed_date, _ = _listed_service_date_time(lines)
             if listed_date != service_date:
                 continue
-            found_date, service_time = _service_date_time(lines)
-            _, _, sms_time_used = _sms_service_date_time(lines, listed_date)
+            found_date, service_time, sms_time_used = _preferred_service_date_time(lines)
             customer_name, _ = _name_phone(lines)
             job = {
                 "order_no": block.get("order_no", ""),
