@@ -16,6 +16,7 @@ from weekend_reminders import (
     schedule_line_reminders,
     tracking_rows_tsv,
     upcoming_weekend,
+    _tracking_worksheet,
 )
 
 
@@ -27,6 +28,32 @@ class WeekendReminderTests(unittest.TestCase):
             "回覆狀態", "回覆時間", "回覆備註", "最後更新",
         ]
         self.assertTrue(set(older).issubset(set(TRACKING_HEADERS)))
+
+    @patch("weekend_reminders.orders.build_gsheet_client")
+    def test_tracking_sheet_backs_up_unknown_columns_before_migration(self, build_client):
+        old_values = [
+            ["訂單編號", "服務日期", "人工備註"],
+            ["LC001", "2026-08-01", "不可遺失"],
+        ]
+        worksheet = Mock()
+        worksheet.row_values.return_value = old_values[0]
+        worksheet.get_all_values.return_value = old_values
+        worksheet.col_count = 3
+        backup = Mock()
+        spreadsheet = Mock()
+        spreadsheet.worksheet.return_value = worksheet
+        spreadsheet.add_worksheet.return_value = backup
+        build_client.return_value.open_by_key.return_value = spreadsheet
+
+        self.assertIs(_tracking_worksheet(), worksheet)
+
+        backup_call = spreadsheet.add_worksheet.call_args
+        self.assertIn("週末服務提醒_備份_", backup_call.kwargs["title"])
+        backup.update.assert_called_once_with(range_name="A1", values=old_values)
+        migrated = worksheet.update.call_args.kwargs["values"]
+        self.assertEqual(migrated[0], TRACKING_HEADERS)
+        self.assertEqual(migrated[1][TRACKING_HEADERS.index("訂單編號")], "LC001")
+        self.assertEqual(migrated[1][TRACKING_HEADERS.index("服務日期")], "2026-08-01")
 
     def test_upcoming_weekend_from_weekday(self):
         self.assertEqual(
