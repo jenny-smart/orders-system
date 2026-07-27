@@ -4,6 +4,8 @@ from unittest.mock import Mock, patch
 
 from weekend_reminders import (
     _line_urls_from_html,
+    _listed_service_date_time,
+    _sms_service_date_time,
     _service_date_time,
     apply_line_reminder_statuses,
     build_reminder_message,
@@ -47,6 +49,29 @@ class WeekendReminderTests(unittest.TestCase):
         html = f'<table><tr><td>LC001</td><td><a href="{url}">LINE</a></td></tr></table>'
         self.assertEqual(_line_urls_from_html(html)["LC001"], url)
         self.assertEqual(line_id_from_chat_url(url), "U805b7af99c975eb040d1f82d7b1e8b6b")
+
+    def test_sms_time_overrides_listed_service_time(self):
+        lines = [
+            "LC001", "2026-07-20 10:00:00", "居家清潔",
+            "2026-07-25 (六)", "09:00 - 12:00",
+            "簡訊時間：2026/07/26 14:30-17:30",
+        ]
+        self.assertEqual(
+            _listed_service_date_time(lines), ("2026-07-25", "09:00-12:00")
+        )
+        self.assertEqual(
+            _sms_service_date_time(lines, "2026-07-25"),
+            ("2026-07-26", "14:30-17:30", True),
+        )
+        self.assertEqual(_service_date_time(lines), ("2026-07-26", "14:30-17:30"))
+
+    def test_sms_short_date_uses_service_year(self):
+        lines = [
+            "LC001", "2026-07-20 10:00:00",
+            "2026-07-25 (六)", "09:00 - 12:00",
+            "簡訊通知時間", "7/26（日） 10:00～13:00",
+        ]
+        self.assertEqual(_service_date_time(lines), ("2026-07-26", "10:00-13:00"))
 
     def test_merge_adds_schedule_without_phone_matching(self):
         order_rows = [{
