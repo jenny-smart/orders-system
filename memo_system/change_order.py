@@ -1,11 +1,15 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.7
+# 版本：v2.8
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-07-15
 #
 # Change Log
+# v2.8
+# - 回填 purchase/edit 表單時，過濾後台未渲染的 Vue/Blade 佔位符（例如
+#   {{ purchase.chargeNote }}），避免退款列把佔位符寫進加收備註，或反向
+#   污染另一側欄位。加收／退款仍只啟用對應一側狀態。
 # v2.7
 # - 階段 A 建立異動寫入 Google Sheet 時，AD 欄同步記錄建立時間（台北時區），
 #   AE 欄維持標記「建立異動」。
@@ -1199,6 +1203,11 @@ def _read_form_state(soup: BeautifulSoup) -> tuple[dict, dict]:
             value = chosen.get("value", "") if chosen else ""
         else:
             value = el.get("value", "")
+
+        # 後台偶爾會把未渲染的 Vue/Blade 表達式直接留在 input/textarea。
+        # 這些不是使用者資料，不可在完整表單 POST 時原樣寫回資料庫。
+        if re.fullmatch(r"\s*\{\{\s*[^{}]+\s*\}\}\s*", str(value or "")):
+            value = ""
 
         control = {
             "name": name,
