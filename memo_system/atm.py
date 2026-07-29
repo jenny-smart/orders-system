@@ -73,11 +73,17 @@ REGION_SECRET_PREFIX = {
 ATM_WORKSHEET_TITLE = "ATM"
 
 COL_ORDER_NO = 10
+COL_BANK_TIME = 2       # B
+COL_BANK_INCOME = 5     # E
+COL_BANK_NOTE = 6       # F
+COL_CUSTOMER_NAME = 11  # K
+COL_ORDER_AMOUNT = 12   # L
 COL_RECONCILED_AT = 16  # P
 COL_PAID_AT = 17        # Q
 COL_INVOICE_NO = 18     # R
 COL_MAIL_STATUS = 19    # S
 COL_RECON_STATUS = 20   # T
+COL_MOVE_WITH_MATCH = 21  # U：配對時隨訂單資料一併上移
 
 
 def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
@@ -324,6 +330,9 @@ def extract_purchase_list_json(html: str) -> Optional[Dict]:
 
 
 def find_purchase_by_order_no(session, order_no: str) -> Optional[Dict]:
+    order_no = str(order_no or "").strip()
+    if not order_no:
+        return None
     url = f"{memo.BASE_URL}/purchase"
     r = memo.session_get(session, url, params={"orderNo": order_no})
     r.raise_for_status()
@@ -333,11 +342,11 @@ def find_purchase_by_order_no(session, order_no: str) -> Optional[Dict]:
         return None
 
     for item in data.get("data", []):
-        if str(item.get("order_no", "")).strip() == str(order_no).strip():
+        if str(item.get("order_no", "")).strip() == order_no:
             return item
 
-    items = data.get("data", [])
-    return items[0] if items else None
+    # 絕不可在訂單編號沒有精確命中時拿搜尋結果第一筆代替，否則會更新錯單。
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -403,15 +412,27 @@ def process_atm_rows(
 
             row = rows[r - 1]
             order_no = memo.safe_cell(row, COL_ORDER_NO)
-            recon_status = memo.safe_cell(row, COL_RECON_STATUS)
+            bank_values = [memo.safe_cell(row, col) for col in range(1, 7)]
+            customer_name = memo.safe_cell(row, COL_CUSTOMER_NAME)
+            sheet_order_amount = _to_int_amount(memo.safe_cell(row, COL_ORDER_AMOUNT))
 
             if not order_no:
                 log(f"⏭ 第{r}列：J欄沒有訂單編號，可能是非訂單收入，略過系統更新")
                 result["skipped"] += 1
                 continue
 
-            if str(recon_status).strip() in ["需確認", "非訂單", "非訂單收入", "疑似拆單"]:
-                log(f"⏭ 第{r}列：T欄狀態為「{recon_status}」，不執行系統更新")
+            if not re.fullmatch(r"[A-Za-z]{2}\d{6,}", order_no):
+                log(f"⏭ 第{r}列：J欄「{order_no}」不是有效訂單編號，略過系統更新")
+                result["skipped"] += 1
+                continue
+
+            if not any(str(value).strip() for value in bank_values):
+                log(f"⏭ 第{r}列：左側 A～F 沒有銀行明細，不執行付款、開票或寄信")
+                result["skipped"] += 1
+                continue
+
+            if not customer_name or sheet_order_amount is None or sheet_order_amount <= 0:
+                log(f"⏭ 第{r}列：J～L 訂單資料不完整，不執行付款、開票或寄信")
                 result["skipped"] += 1
                 continue
 
@@ -426,16 +447,48 @@ def process_atm_rows(
                 continue
 
             purchase_id = purchase.get("purchase_id")
+            if not purchase_id:
+                raise ValueError(f"後台訂單 {order_no} 缺少 purchase_id，已停止")
+
+            backend_order_no = str(purchase.get("order_no") or "").strip()
+            if backend_order_no != order_no:
+                raise ValueError(f"後台回傳訂單編號 {backend_order_no or '空白'}，與 J 欄 {order_no} 不一致")
+
+            backend_total = _to_int_amount(purchase.get("total")) or 0
+            backend_fare = _to_int_amount(purchase.get("fare")) or 0
+            backend_net_amount = backend_total - backend_fare
+            if backend_net_amount != sheet_order_amount:
+                raise ValueError(
+                    f"訂單 {order_no} 金額不一致：Sheet L欄={sheet_order_amount}，"
+                    f"後台總金額扣車馬費={backend_net_amount}"
+                )
+
+            payway = str(purchase.get("payway") or "").strip()
+            if payway != "2":
+                raise ValueError(f"訂單 {order_no} 付款方式不是 ATM（後台 payway={payway or '空白'}）")
             log(f"找到 purchase_id={purchase_id}")
 
             updates = []
 
             if do_mark_paid:
-                if purchase.get("purchase_status") == 1:
+                if str(purchase.get("purchase_status") or "") == "1":
                     log("（已經是已付款狀態，略過按已付款）")
                 else:
                     mark_paid(session, purchase_id)
                     log("✅ 已按下「已付款」")
+
+            # 所有後續動作都必須建立在「重新查詢同一訂單」後，後台確實回覆已付款
+            # 且有付款時間；不可用本機時間或 Sheet 內容自行生成付款時間。
+            if do_mark_paid:
+                refreshed = find_purchase_by_order_no(session, order_no)
+                if not refreshed:
+                    raise ValueError(f"按已付款後無法重新查到同一訂單 {order_no}")
+                purchase = refreshed
+
+            paid_at = str(purchase.get("paid_at") or "").strip()
+            is_paid = str(purchase.get("purchase_status") or "") == "1"
+            if (do_mark_paid or do_issue_invoice or do_send_mail) and (not is_paid or not paid_at):
+                raise ValueError(f"訂單 {order_no} 尚未由後台確認已付款及付款時間，禁止後續動作及 Sheet 回填")
 
             if do_issue_invoice:
                 if purchase.get("invoice_no"):
@@ -443,21 +496,30 @@ def process_atm_rows(
                 else:
                     issue_invoice(session, purchase_id)
                     log("✅ 已按下「開立發票」")
+                    refreshed = find_purchase_by_order_no(session, order_no)
+                    if not refreshed:
+                        raise ValueError(f"開立發票後無法重新查到同一訂單 {order_no}")
+                    purchase = refreshed
+                    if not str(purchase.get("invoice_no") or "").strip():
+                        raise ValueError(f"後台尚未回覆訂單 {order_no} 的發票號碼，停止 Sheet 回填")
 
             if do_send_mail:
                 mail_resp = send_confirmation_mail(session, order_no)
                 log(f"✅ 已發確認信，回應：{mail_resp}")
 
-            if do_mark_paid or do_issue_invoice:
-                purchase = find_purchase_by_order_no(session, order_no) or purchase
+            # 最後再精確查詢一次；Q/R 只能使用這筆系統訂單實際回傳的欄位。
+            refreshed = find_purchase_by_order_no(session, order_no)
+            if not refreshed:
+                raise ValueError(f"完成動作後無法重新查到同一訂單 {order_no}")
+            purchase = refreshed
 
-            paid_at = purchase.get("paid_at") or ""
-            invoice_no = purchase.get("invoice_no") or ""
+            paid_at = str(purchase.get("paid_at") or "").strip()
+            invoice_no = str(purchase.get("invoice_no") or "").strip()
 
             updates.append((COL_RECONCILED_AT, _now_text()))
-            if do_mark_paid and paid_at:
+            if paid_at:
                 updates.append((COL_PAID_AT, paid_at))
-            if do_issue_invoice and invoice_no:
+            if invoice_no:
                 updates.append((COL_INVOICE_NO, invoice_no))
             if do_send_mail:
                 updates.append((COL_MAIL_STATUS, "已發送"))
@@ -719,6 +781,7 @@ def auto_match_bank_rows(
         candidates.append({
             "row": idx,
             "extra": memo.safe_cell(row, COL_EXTRA),
+            "u_value": memo.safe_cell(row, COL_MOVE_WITH_MATCH),
             "year_month": memo.safe_cell(row, COL_MONTH),
             "order_no": order_no,
             "name": name,
@@ -819,6 +882,8 @@ def auto_match_bank_rows(
                     source_row = int(c.get("row") or 0)
                     _copy_data_validation(ws, source_row, target_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                     memo.with_retry(ws.update, f"H{target_row}:O{target_row}", values, value_input_option="RAW")
+                    if c.get("u_value"):
+                        memo.with_retry(ws.update_cell, target_row, COL_MOVE_WITH_MATCH, c["u_value"])
                     _clear_data_validation(ws, target_row, COL_RECONCILED_AT, COL_RECONCILED_AT)
                     _clear_data_validation(ws, target_row, COL_RECON_STATUS, COL_RECON_STATUS)
                     memo.with_retry(ws.update_cell, target_row, COL_RECONCILED_AT, _now_text())
@@ -827,6 +892,8 @@ def auto_match_bank_rows(
                     if source_row and source_row != target_row:
                         _copy_data_validation(ws, target_row, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                         memo.with_retry(ws.update, f"H{source_row}:O{source_row}", [["", "", "", "", "", "", "", ""]], value_input_option="RAW")
+                        if c.get("u_value"):
+                            memo.with_retry(ws.update_cell, source_row, COL_MOVE_WITH_MATCH, "")
                         _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                         memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
 
@@ -923,6 +990,8 @@ def auto_match_bank_rows(
 
                 _copy_data_validation(ws, source_row, idx, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                 memo.with_retry(ws.update, f"H{idx}:O{idx}", values, value_input_option="RAW")
+                if c.get("u_value"):
+                    memo.with_retry(ws.update_cell, idx, COL_MOVE_WITH_MATCH, c["u_value"])
                 _clear_data_validation(ws, idx, COL_RECONCILED_AT, COL_RECONCILED_AT)
                 _clear_data_validation(ws, idx, COL_RECON_STATUS, COL_RECON_STATUS)
                 memo.with_retry(ws.update_cell, idx, COL_RECONCILED_AT, _now_text())
@@ -931,6 +1000,8 @@ def auto_match_bank_rows(
                 if source_row and source_row != idx:
                     _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                     memo.with_retry(ws.update, f"H{source_row}:O{source_row}", [["", "", "", "", "", "", "", ""]], value_input_option="RAW")
+                    if c.get("u_value"):
+                        memo.with_retry(ws.update_cell, source_row, COL_MOVE_WITH_MATCH, "")
                     _copy_data_validation(ws, idx, source_row, [COL_EXTRA, COL_MONTH, COL_SERVICE_TYPE, COL_FEE_TYPE])
                     _clear_data_validation(ws, source_row, COL_RECON_STATUS, COL_RECON_STATUS)
                     memo.with_retry(ws.update_cell, source_row, COL_RECON_STATUS, "")
