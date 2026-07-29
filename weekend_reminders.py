@@ -405,6 +405,7 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
     for item in order_rows:
         old = existing.get(item["order_no"], {})
         merged.append({
+            "資料狀態": "已存在" if old else "新增",
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
             "服務時間": item.get("service_time", ""), "姓名": item.get("name", ""),
             "電話": item.get("phone", ""), "地址": item.get("address", ""),

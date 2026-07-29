@@ -152,6 +152,28 @@ class WeekendReminderTests(unittest.TestCase):
         merged = merge_tracking_rows(order_rows, [], scheduled_at="2026-07-24 09:03")
         self.assertEqual(merged[0]["預約發送時間"], "2026-07-24 09:03")
         self.assertEqual(merged[0]["通知狀態"], "待通知")
+        self.assertEqual(merged[0]["資料狀態"], "新增")
+
+    def test_merge_marks_existing_order_without_creating_duplicate_identity(self):
+        order_rows = [{
+            "order_no": "LC001",
+            "service_date": "2026-07-25",
+            "service_time": "09:00-12:00",
+            "name": "王小姐",
+            "phone": "0912345678",
+            "address": "台北市測試路1號",
+            "line_url": "",
+            "message": "提醒",
+        }]
+        existing_rows = [{
+            "訂單編號": "LC001",
+            "通知狀態": "已通知",
+            "回覆狀態": "未回覆",
+        }]
+        merged = merge_tracking_rows(order_rows, existing_rows)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["資料狀態"], "已存在")
+        self.assertEqual(merged[0]["通知狀態"], "已通知")
 
     def test_applies_postback_status_and_builds_copy_text(self):
         rows = [{
