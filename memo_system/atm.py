@@ -1133,33 +1133,43 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
 
-    last_b_row = 0
+    last_a_row = 0
     for idx, row in enumerate(all_values, start=1):
-        b_val = row[1] if len(row) > 1 else ""
-        if str(b_val).strip():
-            last_b_row = idx
+        a_val = row[0] if row else ""
+        if str(a_val).strip():
+            last_a_row = idx
 
-    start_row = last_b_row + 5
+    start_row = last_a_row + 5
+    insert_count = len(rows)
 
-    def block_has_data(row_num: int) -> bool:
-        if row_num - 1 >= len(all_values):
-            return False
-        row = all_values[row_num - 1]
-        for col_idx in range(8, 13):  # I~M：0-based index 8~12
-            if len(row) > col_idx and str(row[col_idx]).strip():
-                return True
-        return False
+    # 若定位列超過目前工作表範圍，先補足空白列，再插入本次需要的完整列數。
+    # insertDimension 會把既有整列往下移，因此人工填入的 I:M 或其他欄位都不會被覆蓋。
+    current_row_count = int(getattr(ws, "row_count", 0) or len(all_values))
+    if start_row > current_row_count + 1:
+        memo.with_retry(ws.add_rows, start_row - current_row_count - 1)
 
-    while block_has_data(start_row):
-        log(f"第 {start_row} 列的 I~L 欄已經有資料，往下移 5 列")
-        start_row += 5
+    insert_request = {
+        "requests": [{
+            "insertDimension": {
+                "range": {
+                    "sheetId": ws.id,
+                    "dimension": "ROWS",
+                    "startIndex": start_row - 1,
+                    "endIndex": start_row - 1 + insert_count,
+                },
+                "inheritFromBefore": True,
+            }
+        }]
+    }
+    memo.with_retry(ws.spreadsheet.batch_update, insert_request)
+    log(f"已於第 {start_row}:{start_row + insert_count - 1} 列插入 {insert_count} 列")
 
     updates = []
     for i, r in enumerate(rows):
         row_num = start_row + i
         updates.append({
-            "range": f"I{row_num}:L{row_num}",
-            "values": [[r["year_month"], r["order_no"], r["name"], r["net_amount"]]],
+            "range": f"I{row_num}:M{row_num}",
+            "values": [[r["year_month"], r["order_no"], r["name"], r["net_amount"], ""]],
         })
         # v2026-07-07：LINE 聊天連結網址另外寫進 H 欄（純網址，Google Sheets
         # 貼上/寫入後會自動變成可點擊連結；不能跟姓名塞在同一格）。
@@ -1173,6 +1183,6 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
 
     result["pasted"] = len(rows)
     result["start_row"] = start_row
-    log(f"✅ 已從第 {start_row} 列開始，貼上 {len(rows)} 筆資料到 I~L 欄")
+    log(f"✅ 已從第 {start_row} 列開始，貼上 {len(rows)} 筆資料到 I~M 欄")
 
     return result
