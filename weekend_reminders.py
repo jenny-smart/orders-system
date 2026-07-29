@@ -21,7 +21,7 @@ SCHEDULED_TRACKING_HEADERS = [
     "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註", "最後更新",
 ]
 TRACKING_HEADERS = [
-    "訂單編號", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE", "LINE ID",
+    "訂單編號", "資料狀態", "服務日期", "服務時間", "姓名", "電話", "地址", "LINE", "LINE ID",
     "預約發送時間", "通知狀態", "通知時間", "回覆狀態", "回覆時間", "回覆備註",
     "發送錯誤", "最後更新",
 ]
@@ -399,11 +399,15 @@ def load_tracking_rows():
     return [dict(zip(TRACKING_HEADERS, row + [""] * (len(TRACKING_HEADERS) - len(row)))) for row in values[1:] if row and row[0]]
 
 
-def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
+def merge_tracking_rows(
+    order_rows, existing_rows, scheduled_at="", query_date_s="", query_date_e=""
+):
     existing = {row.get("訂單編號", ""): dict(row) for row in existing_rows}
     merged = []
+    current_order_nos = set()
     for item in order_rows:
         old = existing.get(item["order_no"], {})
+        current_order_nos.add(item["order_no"])
         merged.append({
             "資料狀態": "已存在" if old else "新增",
             "訂單編號": item["order_no"], "服務日期": item["service_date"],
@@ -417,6 +421,25 @@ def merge_tracking_rows(order_rows, existing_rows, scheduled_at=""):
             "發送錯誤": old.get("發送錯誤", ""),
             "最後更新": old.get("最後更新", ""), "LINE訊息": item.get("message", ""),
         })
+    if query_date_s and query_date_e:
+        for order_no, old in existing.items():
+            service_date = str(old.get("服務日期", "") or "")
+            if (
+                order_no
+                and order_no not in current_order_nos
+                and query_date_s <= service_date <= query_date_e
+            ):
+                missing = dict(old)
+                missing["資料狀態"] = "本次查詢未出現"
+                missing["LINE訊息"] = ""
+                merged.append(missing)
+    merged.sort(
+        key=lambda item: (
+            item.get("服務日期", ""),
+            item.get("服務時間", ""),
+            item.get("訂單編號", ""),
+        )
+    )
     return merged
 
 
@@ -432,6 +455,8 @@ def save_tracking_rows(rows):
     for raw in rows:
         row = {header: str(raw.get(header, "") or "") for header in TRACKING_HEADERS}
         old = existing.get(row["訂單編號"], {})
+        if row["資料狀態"] == "新增":
+            row["資料狀態"] = "已存在"
         if row["通知狀態"] == "已通知" and not row["通知時間"]:
             row["通知時間"] = old.get("通知時間") or now
         if row["回覆狀態"] == "已回覆" and not row["回覆時間"]:
@@ -447,5 +472,6 @@ def save_tracking_rows(rows):
     old_row_count = len(worksheet.get_all_values())
     worksheet.update(range_name="A1", values=matrix)
     if old_row_count > len(matrix):
-        worksheet.batch_clear([f"A{len(matrix) + 1}:P{old_row_count}"])
+        end_col = orders.gspread.utils.rowcol_to_a1(1, len(TRACKING_HEADERS)).rstrip("1")
+        worksheet.batch_clear([f"A{len(matrix) + 1}:{end_col}{old_row_count}"])
     return len(incoming)

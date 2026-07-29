@@ -175,6 +175,37 @@ class WeekendReminderTests(unittest.TestCase):
         self.assertEqual(merged[0]["資料狀態"], "已存在")
         self.assertEqual(merged[0]["通知狀態"], "已通知")
 
+    def test_merge_marks_tracked_order_missing_from_current_query(self):
+        existing_rows = [{
+            "訂單編號": "LC-CANCELLED",
+            "服務日期": "2026-08-01",
+            "服務時間": "09:00-12:00",
+            "姓名": "王小姐",
+            "通知狀態": "待通知",
+            "回覆狀態": "未回覆",
+        }]
+        merged = merge_tracking_rows(
+            [],
+            existing_rows,
+            query_date_s="2026-08-01",
+            query_date_e="2026-08-02",
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["資料狀態"], "本次查詢未出現")
+
+    def test_merge_does_not_mark_missing_outside_query_range(self):
+        existing_rows = [{
+            "訂單編號": "LC-OLD",
+            "服務日期": "2026-07-25",
+        }]
+        merged = merge_tracking_rows(
+            [],
+            existing_rows,
+            query_date_s="2026-08-01",
+            query_date_e="2026-08-02",
+        )
+        self.assertEqual(merged, [])
+
     def test_applies_postback_status_and_builds_copy_text(self):
         rows = [{
             "訂單編號": "LC001",
