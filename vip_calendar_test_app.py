@@ -8,14 +8,14 @@ import vip_calendar_patch as vcp
 from vip_calendar_patch import apply_patch
 from vip_calendar_patch2 import apply_patch as apply_patch2
 from vip_calendar_patch3 import apply_patch as apply_patch3
+from vip_calendar_patch4 import apply_patch as apply_patch4
 
-# Test newer VIP behavior without touching ordersapp.py yet.
-# Patch 1: compare-first workflow + VIP calendar update logic.
-# Patch 2: full Google Calendar pagination + side-by-side backend/calendar results.
-# Patch 3: complete calendar date/time/status editor + correct color semantics.
+# Patch order matters. Patch 4 replaces the visible workflow with the compact,
+# manual-selection UI so the system never decides which calendar event matches an order.
 apply_patch(vcs)
 apply_patch2(vcs, vcp)
 apply_patch3(vcs, vcp)
+apply_patch4(vcs, vcp)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
@@ -30,7 +30,6 @@ with col3:
     env = "dev" if env_label.startswith("dev") else "prod"
 
 st.divider()
-
 query_mode = st.radio("查詢方式", ["月份", "日期區間"], horizontal=True, key="vipcal_query_mode")
 today = date.today()
 
@@ -44,7 +43,6 @@ if query_mode == "月份":
     last_day = calendar.monthrange(int(query_year), int(query_month))[1]
     query_date_s = date(int(query_year), int(query_month), 1)
     query_date_e = date(int(query_year), int(query_month), last_day)
-    st.caption(f"將同步查詢後台訂單與 Google 日曆：{query_date_s.isoformat()} ～ {query_date_e.isoformat()}")
 else:
     r1, r2 = st.columns(2)
     with r1:
@@ -57,5 +55,6 @@ else:
 
 st.session_state["vipcal_query_date_s"] = query_date_s.isoformat()
 st.session_state["vipcal_query_date_e"] = query_date_e.isoformat()
+st.caption(f"查詢範圍：{query_date_s.isoformat()} ～ {query_date_e.isoformat()}")
 
 vcs.render_vip_calendar_sync(backend_email.strip(), backend_password.strip(), env)
