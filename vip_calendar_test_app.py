@@ -9,13 +9,16 @@ from vip_calendar_patch import apply_patch
 from vip_calendar_patch2 import apply_patch as apply_patch2
 from vip_calendar_patch3 import apply_patch as apply_patch3
 from vip_calendar_patch4 import apply_patch as apply_patch4
+from vip_calendar_patch5 import apply_patch as apply_patch5
 
 # Patch order matters. Patch 4 replaces the visible workflow with the compact,
-# manual-selection UI so the system never decides which calendar event matches an order.
+# manual-selection UI. Patch 5 aligns the left order fields with the right
+# calendar fields so date and period can be compared horizontally.
 apply_patch(vcs)
 apply_patch2(vcs, vcp)
 apply_patch3(vcs, vcp)
 apply_patch4(vcs, vcp)
+apply_patch5(vcs, vcp)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
