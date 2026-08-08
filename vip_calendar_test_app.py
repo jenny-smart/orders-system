@@ -7,12 +7,15 @@ import vip_calendar_sync as vcs
 import vip_calendar_patch as vcp
 from vip_calendar_patch import apply_patch
 from vip_calendar_patch2 import apply_patch as apply_patch2
+from vip_calendar_patch3 import apply_patch as apply_patch3
 
 # Test newer VIP behavior without touching ordersapp.py yet.
 # Patch 1: compare-first workflow + VIP calendar update logic.
-# Patch 2: full Google Calendar pagination + unified calendar-style agenda.
+# Patch 2: full Google Calendar pagination + side-by-side backend/calendar results.
+# Patch 3: complete calendar date/time/status editor + correct color semantics.
 apply_patch(vcs)
 apply_patch2(vcs, vcp)
+apply_patch3(vcs, vcp)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
