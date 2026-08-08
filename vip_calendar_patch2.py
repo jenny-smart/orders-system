@@ -2,18 +2,9 @@
 """Second-stage VIP calendar patch.
 
 - Fetch every Google Calendar page inside the selected month/date range.
-  The old helper only read the first 250 calendar events, which could omit later
-  dates such as 8/28 on a busy regional calendar.
-- Replace the side-by-side backend/calendar comparison with one chronological
-  calendar-style agenda containing both backend orders and Google Calendar rows.
+- Present query results as two synchronized calendar-style columns:
+  left = backend paid orders, right = Google Calendar.
 """
-
-from collections import defaultdict
-
-
-def _norm(value):
-    import re
-    return re.sub(r"\s+", "", str(value or ""))
 
 
 def _paginated_list_events(vcs, service, calendar_id, start_dt, end_dt):
@@ -47,100 +38,99 @@ def _status_and_icon(vcs, vcp, row):
     return icon, color_name, status
 
 
-def _calendar_agenda_renderer(vcs, vcp, customer, source):
+def _date_label(date_s):
+    from datetime import datetime
+    weekdays = "一二三四五六日"
+    try:
+        d = datetime.strptime(str(date_s), "%Y-%m-%d").date()
+        return f"{d.month}/{d.day}（{weekdays[d.weekday()]}）"
+    except Exception:
+        return str(date_s or "")
+
+
+def _render_backend_column(st, customer, source):
+    st.markdown("### 🧾 後台已付款訂單")
+    rows = sorted(
+        customer.get("orders") or [],
+        key=lambda x: (str(x.get("date") or ""), str(x.get("time") or "")),
+    )
+    if not rows:
+        st.info("此範圍沒有後台已付款訂單")
+        return
+
+    for order in rows:
+        marker = "⭐ " if order is source else ""
+        date_s = str(order.get("date") or "")
+        period = str(order.get("time") or "").replace(" ", "")
+        with st.expander(
+            f"{marker}📅 {_date_label(date_s)}｜{period or '未標時段'}｜{order.get('order_no', '')}",
+            expanded=True,
+        ):
+            st.write(f"**訂單編號：** {order.get('order_no', '')}")
+            st.write(f"**日期：** {date_s}")
+            st.write(f"**時段：** {period}")
+            st.write(f"**地址：** {order.get('address', '')}")
+            st.write(f"**付款：** {order.get('payway', '')}")
+
+
+def _render_calendar_column(vcs, vcp, st, customer, matched):
+    st.markdown("### 📅 Google 日曆")
+    if customer.get("calendar_lookup_error"):
+        st.warning(f"Google 日曆查詢失敗：{customer.get('calendar_lookup_error')}")
+
+    rows = sorted(
+        customer.get("calendar_events") or [],
+        key=lambda x: (str(x.get("date") or ""), str(x.get("period") or "")),
+    )
+    if not rows:
+        if not customer.get("calendar_lookup_error"):
+            st.info("此範圍沒有符合手機號碼的 Google 日曆事件")
+        return
+
+    for row in rows:
+        event = row.get("event") or {}
+        icon, color_name, status = _status_and_icon(vcs, vcp, row)
+        marker = "⭐ " if row is matched else ""
+        date_s = str(row.get("date") or "")
+        period = str(row.get("period") or "").replace(" ", "")
+        with st.expander(
+            f"{marker}{icon} {_date_label(date_s)}｜{period or '未標時段'}｜{status}",
+            expanded=True,
+        ):
+            st.write(f"**日期：** {date_s}")
+            st.write(f"**時段：** {period}")
+            st.write(f"**狀態：** {status}")
+            st.write(f"**顏色：** {icon} {color_name}")
+            st.write(f"**標題：** {row.get('summary', '')}")
+            st.write(f"**Event ID：** `{event.get('id', '')}`")
+
+
+def _side_by_side_renderer(vcs, vcp, customer, source):
     st = vcs.st
     st.divider()
-    st.markdown("## 查詢行程（日曆檢視）")
+    st.markdown("## 查詢結果")
     st.caption(
         f"{customer.get('query_date_s', '')} ～ {customer.get('query_date_e', '')}｜"
-        "同一天會一起顯示後台已付款訂單與 Google 日曆。"
+        "左邊看後台，右邊看 Google 日曆，方便直接對照日期與時段。"
     )
 
     matched = vcp._find_matching_calendar_row(vcs, customer, source)
-    by_date = defaultdict(list)
+    left, right = st.columns(2, gap="large")
+    with left:
+        _render_backend_column(st, customer, source)
+    with right:
+        _render_calendar_column(vcs, vcp, st, customer, matched)
 
-    for order in customer.get("orders") or []:
-        date_s = str(order.get("date") or "")
-        if not date_s:
-            continue
-        by_date[date_s].append({
-            "kind": "backend",
-            "period": str(order.get("time") or "").replace(" ", ""),
-            "order_no": str(order.get("order_no") or ""),
-            "address": str(order.get("address") or ""),
-            "payway": str(order.get("payway") or ""),
-            "raw": order,
-        })
-
-    for row in customer.get("calendar_events") or []:
-        date_s = str(row.get("date") or "")
-        if not date_s:
-            continue
-        by_date[date_s].append({
-            "kind": "calendar",
-            "period": str(row.get("period") or "").replace(" ", ""),
-            "summary": str(row.get("summary") or ""),
-            "raw": row,
-        })
-
-    if not by_date:
-        if customer.get("calendar_lookup_error"):
-            st.warning(f"Google 日曆查詢失敗：{customer.get('calendar_lookup_error')}")
-        else:
-            st.info("此查詢範圍沒有後台訂單或 Google 日曆事件")
-        return matched
-
-    weekdays = "一二三四五六日"
-    from datetime import datetime
-
-    for date_s in sorted(by_date):
-        items = sorted(by_date[date_s], key=lambda x: (x.get("period", ""), x.get("kind", "")))
-        try:
-            d = datetime.strptime(date_s, "%Y-%m-%d").date()
-            date_label = f"{d.month}/{d.day}（{weekdays[d.weekday()]}）"
-        except Exception:
-            date_label = date_s
-
-        backend_count = sum(x["kind"] == "backend" for x in items)
-        calendar_count = sum(x["kind"] == "calendar" for x in items)
-        with st.expander(
-            f"📅 {date_label}　後台 {backend_count}｜日曆 {calendar_count}",
-            expanded=True,
-        ):
-            for item in items:
-                if item["kind"] == "backend":
-                    order = item["raw"]
-                    marker = "⭐ " if order is source else ""
-                    st.markdown(
-                        f"{marker}**🧾 後台｜{item['period'] or '未標時段'}｜{item['order_no']}**  "
-                        f"\n{item['address']}｜{item['payway']}"
-                    )
-                else:
-                    row = item["raw"]
-                    event = row.get("event") or {}
-                    icon, color_name, status = _status_and_icon(vcs, vcp, row)
-                    marker = "⭐ " if matched is row else ""
-                    st.markdown(
-                        f"{marker}**{icon} 日曆｜{item['period'] or '未標時段'}｜{status}**  "
-                        f"\n{item['summary']}  "
-                        f"\n{color_name}｜Event ID `{event.get('id', '')}`"
-                    )
-
-    if customer.get("calendar_lookup_error"):
-        st.warning(f"Google 日曆查詢有錯誤：{customer.get('calendar_lookup_error')}")
-
-    # Keep a compact selected-order comparison below the agenda because later
-    # actions need to know whether the chosen backend order already has a match.
-    st.markdown("### 目前選取訂單")
+    st.markdown("### 目前選取訂單比對")
     st.write(
-        f"**{source.get('order_no', '')}｜{source.get('date', '')} "
+        f"**後台：{source.get('order_no', '')}｜{source.get('date', '')} "
         f"{str(source.get('time') or '').replace(' ', '')}**"
     )
     if matched:
         event = matched.get("event") or {}
         icon, color_name, status = _status_and_icon(vcs, vcp, matched)
         st.write(
-            f"配對日曆：**{matched.get('date', '')} {matched.get('period', '')}｜"
+            f"**日曆：{matched.get('date', '')} {matched.get('period', '')}｜"
             f"{icon} {status}｜{color_name}**"
         )
         diffs = []
@@ -166,9 +156,7 @@ def apply_patch(vcs, vcp):
     vcs._list_events = lambda service, calendar_id, start_dt, end_dt: _paginated_list_events(
         vcs, service, calendar_id, start_dt, end_dt
     )
-
-    # _render_compare_first_ui in vip_calendar_patch resolves this global name at runtime.
-    vcp._render_query_results = lambda vcs_arg, customer, source: _calendar_agenda_renderer(
+    vcp._render_query_results = lambda vcs_arg, customer, source: _side_by_side_renderer(
         vcs_arg, vcp, customer, source
     )
     return vcs
