@@ -2,16 +2,11 @@
 """
 Runtime patch for vip_calendar_sync.py.
 
-Purpose:
-- Before creating a yellow calendar event for a newly-created VIP order,
-  search the customer's nearby existing calendar events.
-- Prefer a purple prebook event (e.g. <每月確認/自行預約>) with the same phone,
-  similar date, same time period, and optionally same address.
-- If found, update that event in-place: move to the new date/time, change
-  <每月確認/自行預約> to <已確認/自行預約>, set yellow, and add order no.
-- Only insert a brand new yellow event when no suitable prebook event exists.
-
-This file avoids touching the large existing ordersapp.py / quick_order.py files.
+Adds two behaviors without touching the large ordersapp.py / quick_order.py files:
+1. VIP lookup uses the query range selected by the test UI, and shows only backend
+   orders + Google Calendar events inside that range.
+2. A newly-created yellow VIP order reuses a nearby purple prebook event when
+   possible, moving it to the confirmed date/time instead of creating a duplicate.
 """
 
 from datetime import datetime, time, timedelta
@@ -57,6 +52,23 @@ def _replace_confirm_status(text):
     return text
 
 
+def _query_range(vcs):
+    """Read YYYY-MM-DD query range selected by the Streamlit test UI."""
+    today = datetime.now(vcs.TAIPEI_TZ).date()
+    default_s = today.replace(day=1)
+    default_e = default_s + timedelta(days=62)
+    try:
+        date_s = str(vcs.st.session_state.get("vipcal_query_date_s") or default_s.isoformat())
+        date_e = str(vcs.st.session_state.get("vipcal_query_date_e") or default_e.isoformat())
+        start_d = datetime.strptime(date_s, "%Y-%m-%d").date()
+        end_d = datetime.strptime(date_e, "%Y-%m-%d").date()
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        return start_d, end_d
+    except Exception:
+        return default_s, default_e
+
+
 def find_nearby_prebook_event(vcs, service, calendar_id, phone, address, new_date_s, new_period_s, window_days=14):
     """Return best nearby purple/prebook calendar event for this VIP customer."""
     target_date = datetime.strptime(new_date_s, "%Y-%m-%d").date()
@@ -74,7 +86,6 @@ def find_nearby_prebook_event(vcs, service, calendar_id, phone, address, new_dat
         description = str(event.get("description") or "")
         location = str(event.get("location") or "")
         blob = _norm(" ".join([summary, description, location]))
-
         if phone_n and phone_n not in blob:
             continue
 
@@ -82,7 +93,6 @@ def find_nearby_prebook_event(vcs, service, calendar_id, phone, address, new_dat
         end = _event_end_dt(vcs, event)
         if not start or not end:
             continue
-
         date_diff = abs((start.date() - target_date).days)
         if date_diff > window_days:
             continue
@@ -91,7 +101,11 @@ def find_nearby_prebook_event(vcs, service, calendar_id, phone, address, new_dat
         same_period = event_period == f"{p_start}-{p_end}"
         same_addr = bool(addr_n and addr_n in blob)
         is_purple = str(event.get("colorId") or "") == str(vcs.COLOR_PURPLE)
-        is_prebook = "每月確認/自行預約" in summary or "每月確認/自行預約" in description or "VIP預排" in description
+        is_prebook = (
+            "每月確認/自行預約" in summary
+            or "每月確認/自行預約" in description
+            or "VIP預排" in description
+        )
 
         score = 0
         if is_prebook:
@@ -109,7 +123,6 @@ def find_nearby_prebook_event(vcs, service, calendar_id, phone, address, new_dat
         return None
     scored.sort(key=lambda x: (-x[0], x[1], x[2]))
     best = scored[0]
-    # Require a strong-enough match: phone + at least prebook/purple/same period signal.
     return best[3] if best[0] >= 40 else None
 
 
@@ -147,19 +160,33 @@ def apply_patch(vcs):
 
     def load_vip_customer_with_calendar(env_name, backend_email, backend_password, phone, clean_type_id="1"):
         data = original_load(env_name, backend_email, backend_password, phone, clean_type_id)
-        # Calendar lookup is best-effort: do not block backend lookup if local secrets are missing.
+        start_d, end_d = _query_range(vcs)
+        start_s, end_s = start_d.isoformat(), end_d.isoformat()
+
+        # Restrict the backend rows displayed/used by the VIP page to the selected range.
+        data["orders"] = [
+            row for row in (data.get("orders") or [])
+            if row.get("date") and start_s <= str(row.get("date")) <= end_s
+        ]
+        data["query_date_s"] = start_s
+        data["query_date_e"] = end_s
+
+        # Calendar lookup uses the same selected date range, avoiding a large historical scan.
         try:
             service = vcs.build_calendar_service()
             all_events = []
             seen = set()
+            range_start = datetime.combine(start_d, time.min, tzinfo=vcs.TAIPEI_TZ)
+            range_end = datetime.combine(end_d + timedelta(days=1), time.min, tzinfo=vcs.TAIPEI_TZ)
             for addr in data.get("addresses") or [""]:
                 region = vcs.orders.get_region_by_address(addr, vcs.ACCOUNTS) if addr else "台北"
                 region = region or "台北"
                 calendar_id = vcs._calendar_id(region)
-                anchor = datetime.now(vcs.TAIPEI_TZ)
-                events = vcs._list_events(service, calendar_id, anchor - timedelta(days=120), anchor + timedelta(days=180))
+                events = vcs._list_events(service, calendar_id, range_start, range_end)
                 for ev in events:
-                    blob = _norm(" ".join([ev.get("summary", ""), ev.get("description", ""), ev.get("location", "")]))
+                    blob = _norm(" ".join([
+                        ev.get("summary", ""), ev.get("description", ""), ev.get("location", "")
+                    ]))
                     if data.get("phone") and _norm(data["phone"]) not in blob:
                         continue
                     key = (calendar_id, ev.get("id"))
@@ -188,7 +215,6 @@ def apply_patch(vcs):
         service = vcs.build_calendar_service()
         calendar_id = vcs._calendar_id(region)
 
-        # Yellow + order_no means a backend order has been created. Reuse nearby purple/prebook event first.
         if str(color_id) == str(vcs.COLOR_YELLOW) and order_no:
             candidate = find_nearby_prebook_event(
                 vcs, service, calendar_id, phone, address, new_date_s, new_period_s
@@ -199,9 +225,8 @@ def apply_patch(vcs):
                     new_date_s, new_period_s, order_no,
                 )
                 updated["_vip_sync_action"] = "updated_existing_prebook"
-                updated["_vip_original_date"] = (
-                    _event_dt(vcs, candidate).strftime("%Y-%m-%d") if _event_dt(vcs, candidate) else ""
-                )
+                original_dt = _event_dt(vcs, candidate)
+                updated["_vip_original_date"] = original_dt.strftime("%Y-%m-%d") if original_dt else ""
                 return updated
 
         created = original_create(
