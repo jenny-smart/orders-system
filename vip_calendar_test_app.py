@@ -4,10 +4,15 @@ import calendar
 
 import streamlit as st
 import vip_calendar_sync as vcs
+import vip_calendar_patch as vcp
 from vip_calendar_patch import apply_patch
+from vip_calendar_patch2 import apply_patch as apply_patch2
 
-# Test the newer VIP calendar behavior without touching ordersapp.py yet.
+# Test newer VIP behavior without touching ordersapp.py yet.
+# Patch 1: compare-first workflow + VIP calendar update logic.
+# Patch 2: full Google Calendar pagination + unified calendar-style agenda.
 apply_patch(vcs)
+apply_patch2(vcs, vcp)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
@@ -23,7 +28,6 @@ with col3:
 
 st.divider()
 
-# Query scope: keep backend + Google Calendar lookups within a deliberate range.
 query_mode = st.radio("查詢方式", ["月份", "日期區間"], horizontal=True, key="vipcal_query_mode")
 today = date.today()
 
@@ -48,50 +52,7 @@ else:
         st.error("查詢起日不可晚於查詢迄日")
         st.stop()
 
-# The patch reads these normalized values when the user clicks 查詢 VIP 訂單.
 st.session_state["vipcal_query_date_s"] = query_date_s.isoformat()
 st.session_state["vipcal_query_date_e"] = query_date_e.isoformat()
 
 vcs.render_vip_calendar_sync(backend_email.strip(), backend_password.strip(), env)
-
-# Show the synchronized calendar rows returned by the same lookup.
-customer = st.session_state.get("vipcal_customer")
-if customer:
-    st.divider()
-    st.markdown("#### 同步查詢結果")
-    st.caption(
-        f"查詢範圍：{customer.get('query_date_s', query_date_s.isoformat())} ～ "
-        f"{customer.get('query_date_e', query_date_e.isoformat())}"
-    )
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**後台已付款訂單**")
-        backend_rows = customer.get("orders") or []
-        if backend_rows:
-            for row in backend_rows:
-                st.write(
-                    f"{row.get('order_no', '')}｜{row.get('date', '')} {row.get('time', '')}｜"
-                    f"{row.get('address', '')}｜{row.get('payway', '')}"
-                )
-        else:
-            st.info("此範圍沒有後台已付款訂單")
-
-    with right:
-        st.markdown("**Google 日曆**")
-        if customer.get("calendar_lookup_error"):
-            st.warning(f"日曆查詢失敗：{customer.get('calendar_lookup_error')}")
-        calendar_rows = customer.get("calendar_events") or []
-        if calendar_rows:
-            color_names = {
-                str(vcs.COLOR_PURPLE): "紫色／預排",
-                str(vcs.COLOR_YELLOW): "黃色／已確認",
-                "10": "綠色／取消暫停",
-            }
-            for row in calendar_rows:
-                color_text = color_names.get(str(row.get("color_id") or ""), f"顏色 {row.get('color_id') or '預設'}")
-                st.write(
-                    f"{row.get('date', '')} {row.get('period', '')}｜{color_text}｜{row.get('summary', '')}"
-                )
-        elif not customer.get("calendar_lookup_error"):
-            st.info("此範圍沒有符合手機號碼的 Google 日曆事件")
