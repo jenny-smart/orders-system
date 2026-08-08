@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-from vip_calendar_sync import render_vip_calendar_sync
+import vip_calendar_sync as vcs
+from vip_calendar_patch import apply_patch
+
+# Test the newer VIP calendar behavior without touching ordersapp.py yet.
+# The patch makes a newly-created backend order reuse a nearby purple
+# <每月確認/自行預約> calendar event when possible, instead of duplicating it.
+apply_patch(vcs)
 
 st.set_page_config(page_title="VIP 訂單／Google 日曆同步測試", layout="wide")
 st.title("VIP 訂單／Google 日曆同步測試")
@@ -15,4 +21,4 @@ with col3:
     env = "dev" if env_label.startswith("dev") else "prod"
 
 st.divider()
-render_vip_calendar_sync(backend_email.strip(), backend_password.strip(), env)
+vcs.render_vip_calendar_sync(backend_email.strip(), backend_password.strip(), env)
