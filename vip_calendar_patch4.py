@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """VIP manual-sync UI.
 
-Rules:
+UI rule:
+- Left column = backend order information/actions.
+- Right column = Google Calendar information/actions.
 - Never auto-decide which existing Google Calendar event corresponds to an order.
-- Every calendar create/update flow exposes the same four fields:
-  date, period, confirmation text, and color/status.
+- Every calendar create/update flow exposes date, period, confirmation text, and color/status.
 - Purple = 未安排, Yellow = 已安排, Green = 暫停.
 """
 
@@ -34,14 +35,14 @@ def _compact_results(vcs, customer):
     st.markdown("## 查詢結果")
     left, right = st.columns(2, gap="large")
     with left:
-        st.markdown("### 後台")
+        st.markdown("### 🧾 訂單資訊")
         rows = sorted(customer.get("orders") or [], key=lambda x: (str(x.get("date") or ""), str(x.get("time") or "")))
         if not rows:
             st.caption("此範圍沒有已付款訂單")
         for row in rows:
             st.write(f"**{row.get('date','')} {str(row.get('time') or '').replace(' ','')}**｜{row.get('order_no','')}｜{row.get('payway','')}")
     with right:
-        st.markdown("### Google 日曆")
+        st.markdown("### 📅 日曆資訊")
         rows = sorted(customer.get("calendar_events") or [], key=lambda x: (str(x.get("date") or ""), str(x.get("period") or "")))
         if customer.get("calendar_lookup_error"):
             st.warning(customer.get("calendar_lookup_error"))
@@ -57,7 +58,7 @@ def _event_label(vcs, row):
     return f"{row.get('date','')} {row.get('period','')}｜{icon}{status}｜{row.get('summary','')}"
 
 
-def _choose_calendar(st, vcs, rows, key, label="選擇要同步的 Google 日曆事件"):
+def _choose_calendar(st, vcs, rows, key, label="選擇 Google 日曆事件"):
     if not rows:
         st.warning("目前查詢範圍沒有 Google 日曆事件")
         return None
@@ -81,21 +82,15 @@ def _calendar_fields(st, vcs, prefix, default_date, default_period, *, confirm_d
     confirm_index = confirm_options.index(confirm_default) if confirm_default in confirm_options else 0
     color_index = color_options.index(color_default) if color_default in color_options else 0
 
-    c1, c2 = st.columns(2)
-    with c1:
-        cal_date = st.date_input("日曆日期", value=default_date, key=f"{prefix}_cal_date")
-    with c2:
-        cal_period = st.selectbox(
-            "日曆時段",
-            periods,
-            index=periods.index(current_period) if current_period in periods else 0,
-            key=f"{prefix}_cal_period",
-        )
-    c3, c4 = st.columns(2)
-    with c3:
-        confirmation = st.selectbox("確認文字", confirm_options, index=confirm_index, key=f"{prefix}_cal_confirm")
-    with c4:
-        color = st.selectbox("日曆顏色／安排狀態", color_options, index=color_index, key=f"{prefix}_cal_color")
+    cal_date = st.date_input("日曆日期", value=default_date, key=f"{prefix}_cal_date")
+    cal_period = st.selectbox(
+        "日曆時段",
+        periods,
+        index=periods.index(current_period) if current_period in periods else 0,
+        key=f"{prefix}_cal_period",
+    )
+    confirmation = st.selectbox("確認文字", confirm_options, index=confirm_index, key=f"{prefix}_cal_confirm")
+    color = st.selectbox("日曆顏色／安排狀態", color_options, index=color_index, key=f"{prefix}_cal_color")
     return cal_date, cal_period, confirmation, color
 
 
@@ -103,11 +98,8 @@ def _backend_period_input(st, vcs, source, prefix, date_label="服務日期", pe
     source_date = datetime.strptime(str(source.get("date")), "%Y-%m-%d").date()
     current_period = str(source.get("time") or "").replace(" ", "")
     periods, current_period = _default_periods(vcs, current_period)
-    c1, c2 = st.columns(2)
-    with c1:
-        new_date = st.date_input(date_label, value=source_date, key=f"{prefix}_date")
-    with c2:
-        new_period = st.selectbox(period_label, periods, index=periods.index(current_period), key=f"{prefix}_period")
+    new_date = st.date_input(date_label, value=source_date, key=f"{prefix}_date")
+    new_period = st.selectbox(period_label, periods, index=periods.index(current_period), key=f"{prefix}_period")
     return new_date, new_period
 
 
@@ -153,10 +145,21 @@ def _refresh(vcs, st, env_name, email, password, customer):
     st.session_state.vipcal_customer = refreshed
 
 
+def _select_order(st, vcs, orders_list, key="vipcal_order"):
+    if not orders_list:
+        st.warning("此範圍沒有後台訂單可作為來源")
+        return None
+    labels = [vcs._order_label(o) for o in orders_list]
+    chosen = st.selectbox("選擇後台訂單／範本", labels, key=key)
+    source = orders_list[labels.index(chosen)]
+    st.caption(f"{source.get('order_no','')}｜{source.get('date','')} {str(source.get('time') or '').replace(' ','')}｜{source.get('payway','')}")
+    return source
+
+
 def _render_manual_ui(vcs, vcp, backend_email, backend_password, env_name):
     st = vcs.st
     st.markdown("### VIP 訂單／Google 日曆同步")
-    st.caption("系統不自動配對日曆；需要修改既有事件時，由你自行選擇。所有新增／異動日曆都會顯示日期、時段、確認文字與顏色。")
+    st.caption("左邊固定處理訂單，右邊固定處理 Google 日曆；系統不自動配對既有日曆事件。")
 
     phone = st.text_input("VIP 客戶手機號碼", key="vipcal_phone", placeholder="09xxxxxxxx")
     if st.button("🔎 查詢後台＋Google 日曆", key="vipcal_lookup", type="primary", use_container_width=True):
@@ -184,23 +187,32 @@ def _render_manual_ui(vcs, vcp, backend_email, backend_password, env_name):
     orders_list = customer.get("orders") or []
     calendar_rows = customer.get("calendar_events") or []
 
+    left, right = st.columns(2, gap="large")
+
     if action == "修改日曆資訊":
-        row = _choose_calendar(st, vcs, calendar_rows, "vipcal_edit_pick", "選擇要修改的 Google 日曆事件")
-        if not row:
-            return
-        event = row.get("event") or {}
-        start = vcs.orders.parse_event_time((event.get("start") or {}).get("dateTime"))
-        end = vcs.orders.parse_event_time((event.get("end") or {}).get("dateTime"))
-        if not start or not end:
-            st.error("此事件不是標準日期時間格式")
-            return
-        start = start.astimezone(vcs.TAIPEI_TZ)
-        end = end.astimezone(vcs.TAIPEI_TZ)
-        current_period = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
-        cal_date, cal_period, confirm, color = _calendar_fields(
-            st, vcs, "vipcal_edit", start.date(), current_period,
-            confirm_default="保持不變", color_default="保持不變", allow_keep=True,
-        )
+        with left:
+            st.markdown("### 🧾 訂單資訊")
+            source = _select_order(st, vcs, orders_list, key="vipcal_edit_ref_order")
+            if source:
+                st.info("此訂單僅供參考，不會修改後台。")
+        with right:
+            st.markdown("### 📅 日曆資訊")
+            row = _choose_calendar(st, vcs, calendar_rows, "vipcal_edit_pick", "選擇要修改的 Google 日曆事件")
+            if not row:
+                return
+            event = row.get("event") or {}
+            start = vcs.orders.parse_event_time((event.get("start") or {}).get("dateTime"))
+            end = vcs.orders.parse_event_time((event.get("end") or {}).get("dateTime"))
+            if not start or not end:
+                st.error("此事件不是標準日期時間格式")
+                return
+            start = start.astimezone(vcs.TAIPEI_TZ)
+            end = end.astimezone(vcs.TAIPEI_TZ)
+            current_period = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+            cal_date, cal_period, confirm, color = _calendar_fields(
+                st, vcs, "vipcal_edit", start.date(), current_period,
+                confirm_default="保持不變", color_default="保持不變", allow_keep=True,
+            )
         if st.button("✅ 修改 Google 日曆", key="vipcal_edit_save", type="primary", use_container_width=True):
             try:
                 _patch_calendar(vcs, vcp, row, cal_date, cal_period, confirm, color)
@@ -211,96 +223,105 @@ def _render_manual_ui(vcs, vcp, backend_email, backend_password, env_name):
                 st.error(str(exc))
         return
 
-    if not orders_list:
-        st.warning("此範圍沒有後台訂單可作為來源")
+    with left:
+        st.markdown("### 🧾 訂單資訊")
+        source = _select_order(st, vcs, orders_list)
+    if not source:
         return
-    order_labels = [vcs._order_label(o) for o in orders_list]
-    selected_order_label = st.selectbox("選擇後台訂單／範本", order_labels, key="vipcal_order")
-    source = orders_list[order_labels.index(selected_order_label)]
 
     if action == "異動日期／時段":
-        new_date, new_period = _backend_period_input(st, vcs, source, "vipcal_change", "新服務日期", "新服務時段")
-        cal_row = _choose_calendar(st, vcs, calendar_rows, "vipcal_change_cal", "選擇異動成功後要同步的 Google 日曆事件")
-        if cal_row:
-            event = cal_row.get("event") or {}
-            start = vcs.orders.parse_event_time((event.get("start") or {}).get("dateTime"))
-            end = vcs.orders.parse_event_time((event.get("end") or {}).get("dateTime"))
-            default_date = new_date
-            default_period = new_period
-            if start and end:
-                start = start.astimezone(vcs.TAIPEI_TZ); end = end.astimezone(vcs.TAIPEI_TZ)
-            cal_date, cal_period, confirm, color = _calendar_fields(
-                st, vcs, "vipcal_change_sync", default_date, default_period,
-                confirm_default="已確認", color_default="黃色／已安排", allow_keep=True,
-            )
-        else:
-            cal_date = cal_period = confirm = color = None
-
-        if st.button("🔎 先確認後台可異動", key="vipcal_change_check", use_container_width=True):
-            try:
-                st.session_state.vipcal_change_ok = vcs.check_backend_change_slot(customer, source, new_date.isoformat(), new_period)
-            except Exception as exc:
-                st.error(str(exc))
+        with left:
+            new_date, new_period = _backend_period_input(st, vcs, source, "vipcal_change", "新服務日期", "新服務時段")
+            if st.button("🔎 先確認後台可異動", key="vipcal_change_check", use_container_width=True):
+                try:
+                    st.session_state.vipcal_change_ok = vcs.check_backend_change_slot(customer, source, new_date.isoformat(), new_period)
+                except Exception as exc:
+                    st.error(str(exc))
+            check = st.session_state.get("vipcal_change_ok")
+            if check and check.get("available"):
+                st.success(f"可異動：{check.get('staff') or '有可用時段'}")
+        with right:
+            st.markdown("### 📅 日曆資訊")
+            cal_row = _choose_calendar(st, vcs, calendar_rows, "vipcal_change_cal", "選擇要同步異動的日曆事件")
+            if cal_row:
+                cal_date, cal_period, confirm, color = _calendar_fields(
+                    st, vcs, "vipcal_change_sync", new_date, new_period,
+                    confirm_default="已確認", color_default="黃色／已安排", allow_keep=True,
+                )
+            else:
+                cal_date = cal_period = confirm = color = None
         check = st.session_state.get("vipcal_change_ok")
-        if check and check.get("available"):
-            st.success(f"可異動：{check.get('staff') or '有可用時段'}")
-            if cal_row and st.button("✅ 異動後台＋同步選取日曆", key="vipcal_change_exec", type="primary", use_container_width=True):
+        if check and check.get("available") and cal_row:
+            if st.button("✅ 異動訂單＋同步日曆", key="vipcal_change_exec", type="primary", use_container_width=True):
                 result = vcs.change_backend_order_date(customer, source, new_date.isoformat(), new_period)
                 if not result.get("ok"):
-                    st.error(result.get("message", "後台異動失敗")); return
+                    st.error(result.get("message", "後台異動失敗"))
+                    return
                 try:
                     _patch_calendar(vcs, vcp, cal_row, cal_date, cal_period, confirm, color)
                     _refresh(vcs, st, env_name, backend_email, backend_password, customer)
-                    st.success("✅ 後台與選取的 Google 日曆已同步異動")
+                    st.success("✅ 訂單與 Google 日曆已同步異動")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"⚠️ 後台已異動，但日曆同步失敗：{exc}")
         return
 
     if action == "取消／暫停":
-        cal_row = _choose_calendar(st, vcs, calendar_rows, "vipcal_cancel_cal", "選擇取消後要同步的 Google 日曆事件")
-        if cal_row:
-            event = cal_row.get("event") or {}
-            start = vcs.orders.parse_event_time((event.get("start") or {}).get("dateTime"))
-            end = vcs.orders.parse_event_time((event.get("end") or {}).get("dateTime"))
-            if start and end:
-                start = start.astimezone(vcs.TAIPEI_TZ); end = end.astimezone(vcs.TAIPEI_TZ)
-                default_date = start.date()
-                default_period = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+        with left:
+            cancel_status = st.radio("取消處理方式", ["不需退款", "待退款", "待收異動"], horizontal=True, key="vipcal_cancel_status")
+            memo = st.text_area("客人備註", key="vipcal_cancel_memo")
+        with right:
+            st.markdown("### 📅 日曆資訊")
+            cal_row = _choose_calendar(st, vcs, calendar_rows, "vipcal_cancel_cal", "選擇取消後要同步的日曆事件")
+            if cal_row:
+                event = cal_row.get("event") or {}
+                start = vcs.orders.parse_event_time((event.get("start") or {}).get("dateTime"))
+                end = vcs.orders.parse_event_time((event.get("end") or {}).get("dateTime"))
+                if start and end:
+                    start = start.astimezone(vcs.TAIPEI_TZ)
+                    end = end.astimezone(vcs.TAIPEI_TZ)
+                    default_date = start.date()
+                    default_period = f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+                else:
+                    default_date = datetime.strptime(str(cal_row.get("date")), "%Y-%m-%d").date()
+                    default_period = cal_row.get("period", "")
+                cal_date, cal_period, confirm, color = _calendar_fields(
+                    st, vcs, "vipcal_cancel_sync", default_date, default_period,
+                    confirm_default="保持不變", color_default="綠色／暫停", allow_keep=True,
+                )
             else:
-                default_date = datetime.strptime(str(cal_row.get("date")), "%Y-%m-%d").date()
-                default_period = cal_row.get("period", "")
-            cal_date, cal_period, confirm, color = _calendar_fields(
-                st, vcs, "vipcal_cancel_sync", default_date, default_period,
-                confirm_default="保持不變", color_default="綠色／暫停", allow_keep=True,
-            )
-        else:
-            cal_date = cal_period = confirm = color = None
-
-        cancel_status = st.radio("取消處理方式", ["不需退款", "待退款", "待收異動"], horizontal=True, key="vipcal_cancel_status")
-        memo = st.text_area("客人備註", key="vipcal_cancel_memo")
-        if cal_row and st.button("🛑 取消後台＋同步日曆", key="vipcal_cancel_exec", type="primary", use_container_width=True):
+                cal_date = cal_period = confirm = color = None
+        if cal_row and st.button("🛑 取消訂單＋同步日曆", key="vipcal_cancel_exec", type="primary", use_container_width=True):
             try:
                 from cancel_order import cancel_orders
                 purchase_id = str(source.get("purchase_id") or "") or re.sub(r"\D", "", str(source.get("order_no") or ""))
-                rows = cancel_orders(env_name, backend_email, backend_password, [{"purchase_id": purchase_id, "order_no": source.get("order_no", ""), "phone": customer.get("phone", ""), "service_date": source.get("date", ""), "period": source.get("time", "")}], cancel_status, memo, "", "")
+                rows = cancel_orders(
+                    env_name, backend_email, backend_password,
+                    [{"purchase_id": purchase_id, "order_no": source.get("order_no", ""), "phone": customer.get("phone", ""), "service_date": source.get("date", ""), "period": source.get("time", "")}],
+                    cancel_status, memo, "", "",
+                )
                 if not rows or not rows[0].get("ok"):
-                    st.error((rows[0].get("message") if rows else "後台取消失敗")); return
+                    st.error((rows[0].get("message") if rows else "後台取消失敗"))
+                    return
                 _patch_calendar(vcs, vcp, cal_row, cal_date, cal_period, confirm, color)
                 _refresh(vcs, st, env_name, backend_email, backend_password, customer)
-                st.success("✅ 後台已取消，選取的 Google 日曆已同步")
+                st.success("✅ 訂單已取消，Google 日曆已同步")
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
         return
 
     if action == "僅新增日曆":
-        source_date = datetime.strptime(str(source.get("date")), "%Y-%m-%d").date()
-        source_period = str(source.get("time") or "").replace(" ", "")
-        cal_date, cal_period, confirm, color = _calendar_fields(
-            st, vcs, "vipcal_add_only", source_date, source_period,
-            confirm_default="每月確認", color_default="紫色／未安排", allow_keep=False,
-        )
+        with left:
+            st.info("使用左側訂單作為姓名、電話、地址等日曆範本；不修改後台訂單。")
+        with right:
+            st.markdown("### 📅 日曆資訊")
+            source_date = datetime.strptime(str(source.get("date")), "%Y-%m-%d").date()
+            source_period = str(source.get("time") or "").replace(" ", "")
+            cal_date, cal_period, confirm, color = _calendar_fields(
+                st, vcs, "vipcal_add_only", source_date, source_period,
+                confirm_default="每月確認", color_default="紫色／未安排", allow_keep=False,
+            )
         if st.button("➕ 新增 Google 日曆", key="vipcal_add_only_exec", type="primary", use_container_width=True):
             try:
                 _create_calendar_direct(vcs, customer, source, cal_date.isoformat(), cal_period, confirm, color)
@@ -312,19 +333,24 @@ def _render_manual_ui(vcs, vcp, backend_email, backend_password, env_name):
         return
 
     if action == "先預約再新增日曆":
-        new_date, new_period = _backend_period_input(st, vcs, source, "vipcal_book_add", "預約日期", "預約時段")
-        cal_date, cal_period, confirm, color = _calendar_fields(
-            st, vcs, "vipcal_book_add_sync", new_date, new_period,
-            confirm_default="已確認", color_default="黃色／已安排", allow_keep=False,
-        )
-        if st.button("🔎 先確認後台可預約", key="vipcal_book_check", use_container_width=True):
-            try:
-                st.session_state.vipcal_book_ok = vcs.check_backend_change_slot(customer, source, new_date.isoformat(), new_period)
-            except Exception as exc:
-                st.error(str(exc))
+        with left:
+            new_date, new_period = _backend_period_input(st, vcs, source, "vipcal_book_add", "預約日期", "預約時段")
+            if st.button("🔎 先確認後台可預約", key="vipcal_book_check", use_container_width=True):
+                try:
+                    st.session_state.vipcal_book_ok = vcs.check_backend_change_slot(customer, source, new_date.isoformat(), new_period)
+                except Exception as exc:
+                    st.error(str(exc))
+            check = st.session_state.get("vipcal_book_ok")
+            if check and check.get("available"):
+                st.success(f"可預約：{check.get('staff') or '有可用時段'}")
+        with right:
+            st.markdown("### 📅 日曆資訊")
+            cal_date, cal_period, confirm, color = _calendar_fields(
+                st, vcs, "vipcal_book_add_sync", new_date, new_period,
+                confirm_default="已確認", color_default="黃色／已安排", allow_keep=False,
+            )
         check = st.session_state.get("vipcal_book_ok")
         if check and check.get("available"):
-            st.success(f"可預約：{check.get('staff') or '有可用時段'}")
             if st.button("✅ 成立訂單＋新增 Google 日曆", key="vipcal_book_exec", type="primary", use_container_width=True):
                 try:
                     result = vcs.create_backend_order_from_template(customer, source, new_date.isoformat(), new_period)
