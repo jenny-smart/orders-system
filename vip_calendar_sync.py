@@ -2,6 +2,8 @@
 # File: vip_calendar_sync.py
 # Module: VIP order / Google Calendar synchronization
 # Created: 2026-08-07
+# Updated: 2026-08-08
+# v8.75: UI help is provided by ordersapp.py; core VIP/calendar sync logic unchanged.
 #
 # Standalone module. Do NOT add new business logic to quick_order.py.
 # ordersapp.py can import render_vip_calendar_sync later.
@@ -429,7 +431,7 @@ def _order_label(o):
 def render_vip_calendar_sync(backend_email: str, backend_password: str, env_name: str):
     """Streamlit renderer; ordersapp.py integration intentionally deferred."""
     st.markdown("### VIP 訂單／Google 日曆同步")
-    st.caption("後台優先：異動與取消都先完成後台，成功後才同步 Google 日曆。紫色=預排未成單、黃色=已成單、綠色=取消/暫停。")
+    st.caption("後台優先：異動與取消都先完成後台，成功後才同步 Google 日曆。紫色＝未安排、黃色＝已安排、綠色＝暫停；既有日曆事件由使用者自行選擇，不由系統自動決定。")
 
     phone = st.text_input("VIP 客戶手機號碼", key="vipcal_phone", placeholder="09xxxxxxxx")
     if st.button("🔎 查詢 VIP 訂單", key="vipcal_lookup", type="primary", use_container_width=True):
