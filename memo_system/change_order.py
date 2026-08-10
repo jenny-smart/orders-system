@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.8
+# 版本：v2.9
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-07-15
+# 最後更新：2026-08-10
 #
 # Change Log
+# v2.9
+# - 一般客異動費 30%／50% 統一改以「訂單總金額－車馬費」為計算基礎，
+#   不再直接用訂單總金額乘以異動比例。
 # v2.8
 # - 回填 purchase/edit 表單時，過濾後台未渲染的 Vue/Blade 佔位符（例如
 #   {{ purchase.chargeNote }}），避免退款列把佔位符寫進加收備註，或反向
@@ -712,7 +715,8 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
         rate_percent = None
     else:
         rate = 0.5 if tier == "near" else (0.3 if tier == "far" else 0)
-        change_fee = round(order.get("total", 0) * rate)
+        service_amount = get_service_amount(order)
+        change_fee = round(service_amount * rate)
         if tier == "free":
             calc_note = (
                 f"{workday_note}，一般客：4個工作天以上，免收異動費 = $0；"
@@ -720,7 +724,8 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
             )
         else:
             calc_note = (
-                f"{workday_note}，一般客：總金額{order.get('total', 0)} × "
+                f"{workday_note}，一般客：(總金額{_money_int(order.get('total', 0))} "
+                f"− 車馬費{get_travel_fee(order)}) = {service_amount} × "
                 f"{int(rate*100)}% = ${change_fee}"
             )
         unit = None
