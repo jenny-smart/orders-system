@@ -4307,6 +4307,20 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         core = addr_norm[:10] if len(addr_norm) >= 10 else addr_norm
         return bool(core) and core in blob
 
+    def _phone_in_any_event(phone, events):
+        phone_norm = normalize_phone(phone) if phone else ""
+        if not phone_norm:
+            return False
+        for event in events:
+            blob = re.sub(r"\s+", "", " ".join([
+                event.get("summary", "") or "",
+                event.get("description", "") or "",
+                event.get("location", "") or "",
+            ]))
+            if phone_norm in blob:
+                return True
+        return False
+
     matched_event_ids = set()
     result = {"backend_missing_in_calendar": [], "calendar_missing_in_backend": []}
 
@@ -4343,6 +4357,13 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         ]
         if candidates:
             matched_event_ids.add(candidates[0].get("id"))
+            continue
+
+        # v2026.08.14：後台有這筆訂單，但這支電話整段期間內完全沒出現在該區域
+        # 日曆的任何一筆事件裡（不限時段、不限顏色）——代表這位客人根本不是走
+        # 日曆管理流程（例如電話沒登記進日曆、或這類客人本來就不會排進這個
+        # 日曆），不列入比對範圍，避免誤報成「日曆沒有」。
+        if not _phone_in_any_event(order["phone"], all_events_by_region.get(order["region"], [])):
             continue
 
         # v2026.08.14：找不到黃色事件時，額外查同時段／同區域是否有「其他顏色
