@@ -196,10 +196,16 @@ def _order_from_block(block):
     # 篩選永遠對不上。改成先定位「HH:MM-HH:MM」服務時段這一行（格式獨特，
     # 卡片裡只會出現一次），再往回找最接近、且不是完整建立時間戳記（帶秒數）
     # 的純日期行，才是真正的服務日期。
+    # v2026.08.15 修正：原本用 .replace(" ", "") 只會去掉一般 ASCII 空白，
+    # 後台頁面實際可能用 &nbsp;（解析成 \xa0 不斷行空白）分隔時間跟連字號，
+    # 導致這裡永遠比對不到、period_idx 永遠是 None，連真正有服務時段的訂單
+    # 也會被判定成「解析不出服務日期」而整批被上面新加的排除規則擋掉
+    # （真實案例：reboot 更新到最新程式碼後，連 LC00214361 都消失了）。
+    # 改成 re.sub(r"\s+", "", ...)，可以正確吃掉 \xa0 等各種空白字元。
     period = ""
     period_idx = None
     for idx, ln in enumerate(lines):
-        compact = ln.strip().replace(" ", "")
+        compact = re.sub(r"\s+", "", ln.strip())
         m = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", compact)
         if m:
             period_idx = idx
