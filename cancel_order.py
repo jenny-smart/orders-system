@@ -257,8 +257,18 @@ def find_orders_for_cancel(
     clean_date_e: str,
     payment_status: str = "已付款",
     max_pages: int = 30,
+    return_debug: bool = False,
 ):
-    """Search backend orders by phone + service date range + payment status."""
+    """
+    Search backend orders by phone + service date range + payment status.
+
+    v2026.08.15：新增 return_debug——True 時額外回傳這支電話底下每一張
+    掃到的訂單卡片解析結果（不管有沒有通過篩選），以及被排除的原因。
+    這幾次修正每次都要靠客服截圖來回確認才能抓到根因，太沒效率；改成
+    直接把解析明細攤在畫面上，之後遇到查不到／查太多的狀況，客服自己
+    展開查詢明細就能看到是「電話解析錯誤」「日期解析錯誤」還是「付款
+    狀態不符」，不用再截圖。
+    """
     phone = re.sub(r"\D", "", str(phone or ""))
     if not re.fullmatch(r"09\d{8}", phone):
         raise ValueError("手機號碼需為 09 開頭共 10 碼")
@@ -275,6 +285,7 @@ def find_orders_for_cancel(
     purchase_url = f"{base_url}/purchase"
     found = []
     seen = set()
+    debug_rows = []
 
     # v2026.08.15 修正：原本把 phone／clean_date_s／clean_date_e／
     # purchase_status 一次全部送給後台當篩選條件，即使日期區間頭尾都有填，
@@ -302,20 +313,38 @@ def find_orders_for_cancel(
         page_added = 0
         for block in blocks:
             item = _order_from_block(block)
-            if not item or item["purchase_id"] in seen:
+            if not item:
+                if return_debug:
+                    debug_rows.append({
+                        "order_no": str(block.get("order_no", "") or ""),
+                        "phone": "", "service_date": "", "period": "", "payment_status": "",
+                        "included": False, "reason": "解析不出訂單編號／購買編號",
+                    })
                 continue
+            if item["purchase_id"] in seen:
+                continue
+            reason = ""
             if item["phone"] and item["phone"] != phone:
-                continue
+                reason = f"電話不符（解析到：{item['phone']}）"
             # v2026.08.15 修正：原本「解析不出服務日期就不篩選、直接放行」，
             # 導致像儲值金購買這種沒有服務時段（沒有 HH:MM-HH:MM 可定位）的
             # 訂單，不管查詢的服務日期區間是哪個月，都會被無條件列進結果
             # （真實案例：查 2026-09，卻混進服務日期是 2026-03 的儲值金購買
             # 訂單 LC00206151）。改成解析不出服務日期時直接排除，因為沒辦法
             # 確認是否落在查詢區間內，排除比誤放行安全。
-            if not item["service_date"] or not (clean_date_s <= item["service_date"] <= clean_date_e):
+            elif not item["service_date"]:
+                reason = "解析不出服務日期（此卡片可能沒有服務時段，例如儲值金購買）"
+            elif not (clean_date_s <= item["service_date"] <= clean_date_e):
+                reason = f"服務日期 {item['service_date']} 不在查詢區間內"
+            elif item["payment_status"] and item["payment_status"] != payment_status:
+                reason = f"付款狀態不符（解析到：{item['payment_status']}）"
+
+            if return_debug:
+                debug_rows.append({**item, "included": not reason, "reason": reason})
+
+            if reason:
                 continue
-            if item["payment_status"] and item["payment_status"] != payment_status:
-                continue
+
             seen.add(item["purchase_id"])
             found.append(item)
             page_added += 1
@@ -323,6 +352,8 @@ def find_orders_for_cancel(
         if len(blocks) < 20 or page_added == 0:
             break
 
+    if return_debug:
+        return found, debug_rows
     return found
 
 
@@ -532,7 +563,7 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
         else:
             try:
                 with st.spinner("搜尋訂單中…"):
-                    rows = find_orders_for_cancel(
+                    rows, debug_rows = find_orders_for_cancel(
                         env_name,
                         backend_email,
                         backend_password,
@@ -540,8 +571,10 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
                         _date_value(start_date),
                         _date_value(end_date),
                         payment_status=payment_status,
+                        return_debug=True,
                     )
                 st.session_state.cancel_order_results = rows
+                st.session_state.cancel_order_debug = debug_rows
                 st.session_state.cancel_order_selected = {r["purchase_id"]: True for r in rows}
                 st.session_state.cancel_order_search_status = payment_status
                 if not rows:
@@ -550,7 +583,22 @@ def render_cancel_order(backend_email: str, backend_password: str, env_name: str
                     )
             except Exception as exc:
                 st.session_state.cancel_order_results = []
+                st.session_state.cancel_order_debug = []
                 st.error(str(exc))
+
+    debug_rows = st.session_state.get("cancel_order_debug") or []
+    if debug_rows:
+        with st.expander(f"🔍 查詢明細（此電話底下共掃到 {len(debug_rows)} 筆訂單，含被排除的）"):
+            for d in debug_rows:
+                mark = "✅" if d.get("included") else "❌"
+                st.text(
+                    f"{mark} {d.get('order_no') or '（無訂單編號）'}　"
+                    f"電話：{d.get('phone') or '（解析不到）'}　"
+                    f"服務日期：{d.get('service_date') or '（解析不到）'}　"
+                    f"時段：{d.get('period') or '（解析不到）'}　"
+                    f"付款狀態：{d.get('payment_status') or '（解析不到）'}"
+                    + (f"　原因：{d['reason']}" if d.get("reason") else "")
+                )
 
     rows = st.session_state.get("cancel_order_results") or []
     if not rows:
