@@ -3,7 +3,8 @@
 #           .github/workflows/sync-to-tool-system.yml
 #
 # 功能：orders-system 的 main branch 一有 push，就自動把
-#       ordersapp.py / orders.py / quick_order.py / accounts.py
+#       ordersapp.py / orders.py / quick_order.py / accounts.py /
+#       weekend_reminders.py / cleaner_reminders.py
 #       複製一份到 tool-system repo 的 tools/orders_system/ 目錄，
 #       自動 commit + push，觸發 Streamlit Cloud 自動重新部署。
 #
@@ -27,6 +28,8 @@ on:
       - "orders.py"
       - "quick_order.py"
       - "accounts.py"
+      - "weekend_reminders.py"
+      - "cleaner_reminders.py"
 
 jobs:
   sync:
@@ -50,7 +53,7 @@ jobs:
           mkdir -p tool-system/tools/orders_system
 
           # ↓↓↓ 需要同步的檔案清單，之後有新增檔案就加在這裡 ↓↓↓
-          SYNC_FILES="ordersapp.py orders.py quick_order.py accounts.py"
+          SYNC_FILES="ordersapp.py orders.py quick_order.py accounts.py weekend_reminders.py cleaner_reminders.py"
 
           for f in $SYNC_FILES; do
             if [ -f "orders-system/$f" ]; then
