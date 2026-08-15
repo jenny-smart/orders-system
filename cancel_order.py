@@ -300,7 +300,13 @@ def find_orders_for_cancel(
                 continue
             if item["phone"] and item["phone"] != phone:
                 continue
-            if item["service_date"] and not (clean_date_s <= item["service_date"] <= clean_date_e):
+            # v2026.08.15 修正：原本「解析不出服務日期就不篩選、直接放行」，
+            # 導致像儲值金購買這種沒有服務時段（沒有 HH:MM-HH:MM 可定位）的
+            # 訂單，不管查詢的服務日期區間是哪個月，都會被無條件列進結果
+            # （真實案例：查 2026-09，卻混進服務日期是 2026-03 的儲值金購買
+            # 訂單 LC00206151）。改成解析不出服務日期時直接排除，因為沒辦法
+            # 確認是否落在查詢區間內，排除比誤放行安全。
+            if not item["service_date"] or not (clean_date_s <= item["service_date"] <= clean_date_e):
                 continue
             if item["payment_status"] and item["payment_status"] != payment_status:
                 continue
