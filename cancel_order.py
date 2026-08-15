@@ -270,13 +270,20 @@ def find_orders_for_cancel(
     found = []
     seen = set()
 
+    # v2026.08.15 修正：原本把 phone／clean_date_s／clean_date_e／
+    # purchase_status 一次全部送給後台當篩選條件，即使日期區間頭尾都有填，
+    # 後台在「多個篩選條件同時送」的情況下仍可能整個篩選失效、回傳空結果
+    # （這個 /purchase 頁面的日期篩選已經在 find_orders_without_line_link 等
+    # 功能踩過同樣的坑，最後都改成只用最少量、最可靠的條件當後台粗篩，
+    # 其餘條件自己在 Python 這邊比對）。改成只送 phone 這個單一、最可靠的
+    # 篩選條件（跟 verify_batch_order_consistency 查詢電話的作法一致），
+    # 撈出這支電話底下全部訂單後，服務日期區間跟付款狀態都在下面用
+    # _order_from_block 解析出的欄位自己比對篩選，不管後台的組合篩選準不準
+    # 都不影響最終結果正確性。
     for page in range(1, max_pages + 1):
         params = dict(PURCHASE_FILTER_PARAMS_TEMPLATE)
         params.update({
             "phone": phone,
-            "clean_date_s": clean_date_s,
-            "clean_date_e": clean_date_e,
-            "purchase_status": status_map[payment_status],
             "page": str(page),
         })
         resp = session.get(purchase_url, params=params, headers=orders.HEADERS, allow_redirects=True)
