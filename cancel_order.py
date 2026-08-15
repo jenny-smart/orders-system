@@ -310,7 +310,6 @@ def find_orders_for_cancel(
         if not blocks:
             break
 
-        page_added = 0
         for block in blocks:
             item = _order_from_block(block)
             if not item:
@@ -347,9 +346,18 @@ def find_orders_for_cancel(
 
             seen.add(item["purchase_id"])
             found.append(item)
-            page_added += 1
 
-        if len(blocks) < 20 or page_added == 0:
+        # v2026.08.15 修正：原本這裡多一個條件「這一頁沒有任何項目通過篩選
+        # 就停止翻頁」，把「這一頁 20 筆剛好都不符合篩選條件」誤判成「已經
+        # 翻到最後一頁」。這個系統的 /purchase 查詢預設依服務日期由舊到新
+        # 排序，老客戶（例如從 2021 年就開始訂閱、每兩週一次的客人）前面
+        # 好幾頁都是很久以前的舊訂單，全部會被日期區間濾掉，導致查詢直接
+        # 停在第一頁，永遠翻不到真正要找的最近日期訂單（真實案例：
+        # LC00214360，服務日期 2026-09-10，客人從 2021 年就開始訂閱，第一頁
+        # 全是 2021~2022 年的舊單）。只用「這一頁筆數 < 20」判斷是否翻到
+        # 最後一頁才正確，跟系統其他分頁查詢（例如
+        # _fetch_all_purchase_blocks_by_date_range）的作法一致。
+        if len(blocks) < 20:
             break
 
     if return_debug:
