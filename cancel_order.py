@@ -158,45 +158,75 @@ def _edit_payload_from_page(page_html: str) -> tuple[dict, dict]:
     return payload, purchase
 
 
-def _order_from_row(row):
-    checkbox = row.find("input", attrs={"name": "purchase_id[]"})
-    if checkbox is None:
+def _order_from_block(block):
+    """
+    v2026.08.14 修正：原本用 soup.select("table tbody tr") 假設 /purchase 頁面是
+    標準 HTML table，導致完全抓不到任何列（查詢永遠回傳空清單，即使後台明明
+    查得到相符訂單）。改成跟系統其他地方一致，用 orders.extract_order_cards_
+    from_purchase_html（純文字掃描＋訂單編號正則切卡片）解析同一份頁面，這是
+    已經被大量其他功能驗證過的作法。
+
+    原本 purchase_id 是從 <input name="purchase_id[]"> checkbox 的 value 讀出，
+    文字掃描法沒有這個欄位；改用跟 orders.py 的
+    _purchase_edit_id_from_order_no 相同的公式（訂單編號去掉英文字母、轉成
+    整數字串）直接算出來，這個公式已經在儲值獎金備註、查詢無LINE連結訂單等
+    功能驗證過可以正確對應 /purchase/edit/{id} 與 /purchase/cancel/{id}。
+    """
+    order_no = str(block.get("order_no", "") or "").strip()
+    if not order_no:
         return None
-    purchase_id = str(checkbox.get("value") or "").strip()
+
+    digits = re.sub(r"\D", "", order_no)
+    purchase_id = str(int(digits)) if digits else ""
     if not purchase_id:
         return None
 
-    text = "\n".join(
-        ln.strip() for ln in row.get_text("\n", strip=True).splitlines() if ln.strip()
-    )
-    order_m = re.search(r"\b(?:LC|TT|KK)\d+\b", text)
-    order_no = order_m.group(0) if order_m else ""
+    lines = block.get("lines", [])
+    joined = "\n".join(lines)
 
-    phone_m = re.search(r"\b09\d{8}\b", text)
-    phone = phone_m.group(0) if phone_m else ""
-
-    service_date = ""
-    for m in re.finditer(r"\b(20\d{2}-\d{2}-\d{2})\b", text):
-        candidate = m.group(1)
-        before = text[max(0, m.start() - 8):m.start()]
-        if "付款日期" not in before and "取消時間" not in before:
-            service_date = candidate
+    phone = ""
+    for ln in lines:
+        if re.fullmatch(r"09\d{8}", ln.strip()):
+            phone = ln.strip()
             break
 
-    period_m = re.search(r"\b(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})\b", text)
-    period = f"{period_m.group(1)}-{period_m.group(2)}" if period_m else ""
+    # v2026.08.14 修正：服務日期不能只抓「第一個看起來像日期的字串」——訂單
+    # 卡片裡「訂購日期（建立時間，格式 YYYY-MM-DD HH:MM:SS）」通常排在服務
+    # 日期前面，naive 抓法會抓到建立時間、不是真正的服務日期，導致日期區間
+    # 篩選永遠對不上。改成先定位「HH:MM-HH:MM」服務時段這一行（格式獨特，
+    # 卡片裡只會出現一次），再往回找最接近、且不是完整建立時間戳記（帶秒數）
+    # 的純日期行，才是真正的服務日期。
+    period = ""
+    period_idx = None
+    for idx, ln in enumerate(lines):
+        compact = ln.strip().replace(" ", "")
+        m = re.match(r"^(\d{2}:\d{2})[-~～](\d{2}:\d{2})$", compact)
+        if m:
+            period_idx = idx
+            period = f"{m.group(1)}-{m.group(2)}"
+            break
 
-    status_m = re.search(r"付款狀態[：:]\s*([^\n]+)", text)
+    service_date = ""
+    if period_idx is not None:
+        for j in range(period_idx - 1, max(-1, period_idx - 5), -1):
+            candidate_line = lines[j].strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", candidate_line):
+                continue  # 這是訂購日期（建立時間），不是服務日期
+            m2 = re.match(r"^(\d{4}-\d{2}-\d{2})", candidate_line)
+            if m2:
+                service_date = m2.group(1)
+                break
+
+    status_m = re.search(r"付款狀態[：:]\s*([^\n]+)", joined)
     payment_status = status_m.group(1).strip() if status_m else ""
 
     name = ""
     if phone:
-        lines = [x.strip() for x in text.splitlines() if x.strip()]
         try:
             idx = lines.index(phone)
             if idx > 0:
-                candidate = lines[idx - 1]
-                if candidate not in {"LINE", order_no}:
+                candidate = lines[idx - 1].strip()
+                if candidate not in {"LINE", order_no} and "@" not in candidate:
                     name = candidate
         except ValueError:
             pass
@@ -252,14 +282,13 @@ def find_orders_for_cancel(
         resp = session.get(purchase_url, params=params, headers=orders.HEADERS, allow_redirects=True)
         if resp.status_code != 200:
             raise RuntimeError(f"訂單搜尋失敗：HTTP {resp.status_code}")
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table tbody tr")
-        if not rows:
+        blocks = orders.extract_order_cards_from_purchase_html(resp.text)
+        if not blocks:
             break
 
         page_added = 0
-        for row in rows:
-            item = _order_from_row(row)
+        for block in blocks:
+            item = _order_from_block(block)
             if not item or item["purchase_id"] in seen:
                 continue
             if item["phone"] and item["phone"] != phone:
@@ -272,7 +301,7 @@ def find_orders_for_cancel(
             found.append(item)
             page_added += 1
 
-        if len(rows) < 20 or page_added == 0:
+        if len(blocks) < 20 or page_added == 0:
             break
 
     return found
