@@ -2,10 +2,23 @@
 # 放置位置：orders-system repo 底下的
 #           .github/workflows/sync-to-tool-system.yml
 #
-# 功能：orders-system 的 main branch 一有 push，就自動把
-#       ordersapp.py / orders.py / quick_order.py / accounts.py
-#       複製一份到 tool-system repo 的 tools/orders_system/ 目錄，
-#       自動 commit + push，觸發 Streamlit Cloud 自動重新部署。
+# 功能：orders-system 的 main branch 一有 push，就自動把根目錄下所有
+#       *.py 檔案（env.py 除外，見下方說明）複製一份到 tool-system repo
+#       的 tools/orders_system/ 目錄，自動 commit + push，觸發
+#       Streamlit Cloud 自動重新部署。
+#
+#       之後在 orders-system 根目錄新增任何 .py 檔案，不需要再手動修改
+#       這支 workflow，push 到 main 就會自動一起同步過去。
+#
+# 為什麼 env.py 要排除：
+#       env.py 裡面有正式環境用的金鑰（例如 GOOGLE_MAPS_API_KEY），
+#       tool-system 是 public repo，不能把金鑰帶過去。tool-system 那邊
+#       的 env.py 是手動維護的獨立版本，不受這支 workflow 影響。
+#
+# 為什麼 memo_system/ 目錄不在這支 workflow 的同步範圍：
+#       memo_system 在 tool-system 那邊是用「墊片檔案」轉接到
+#       tools/memo_system 的獨立模組，維護方式不一樣，這支 workflow
+#       只處理根目錄的 .py 檔案，不會動到子目錄。
 #
 # 事前準備（只需要做一次）：
 # 1. 到 GitHub → 右上角頭像 → Settings → Developer settings →
@@ -14,8 +27,6 @@
 # 2. 到 orders-system repo → Settings → Secrets and variables →
 #    Actions → New repository secret，
 #    Name 填 TOOL_SYSTEM_PUSH_TOKEN，Value 貼上剛剛的 token。
-# 3. 下面 SYNC_FILES 清單如果之後訂單系統又拆出新的檔案
-#    （例如新增 xxx_helper.py），要記得把檔名加進清單。
 # ============================================================
 name: Sync ordersapp to tool-system
 
@@ -23,10 +34,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "ordersapp.py"
-      - "orders.py"
-      - "quick_order.py"
-      - "accounts.py"
+      - "*.py"
+      - "!env.py"
+  workflow_dispatch: {}
 
 jobs:
   sync:
@@ -49,16 +59,16 @@ jobs:
           set -e
           mkdir -p tool-system/tools/orders_system
 
-          # ↓↓↓ 需要同步的檔案清單，之後有新增檔案就加在這裡 ↓↓↓
-          SYNC_FILES="ordersapp.py orders.py quick_order.py accounts.py"
-
-          for f in $SYNC_FILES; do
-            if [ -f "orders-system/$f" ]; then
-              cp "orders-system/$f" "tool-system/tools/orders_system/$f"
-              echo "已複製：$f"
-            else
-              echo "⚠️ 找不到 orders-system/$f，略過"
+          # 同步根目錄下所有 .py 檔案，env.py 是唯一手動排除的例外
+          # （裡面有正式金鑰，見上方檔頭說明）。
+          for f in orders-system/*.py; do
+            name="$(basename "$f")"
+            if [ "$name" = "env.py" ]; then
+              echo "⏭️ 略過 env.py（手動維護，含金鑰，不同步）"
+              continue
             fi
+            cp "$f" "tool-system/tools/orders_system/$name"
+            echo "已複製：$name"
           done
 
       - name: 檢查是否有變動
