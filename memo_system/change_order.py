@@ -1633,8 +1633,10 @@ def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None
             ui_logger(msg)
 
     ws = get_worksheet(region)
-    ws.update_acell(f"AD{sheet_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
-    ws.update_acell(f"AE{sheet_row}", f"更新系統（B欄：{status}）")
+    update_status = f"更新系統（B欄：{status}）"
+    updated_at = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    ws.update_acell(f"AC{sheet_row}", updated_at)
+    ws.update_acell(f"AE{sheet_row}", update_status)
     log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
