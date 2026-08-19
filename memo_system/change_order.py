@@ -1626,7 +1626,7 @@ def sync_one_to_purchase_edit(item: dict, session: requests.Session, ui_logger=N
     return True
 
 
-def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
+def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None):
     """回填成功後只標記處理時間，不改 B 欄狀態。"""
     def log(msg):
         if ui_logger:
@@ -1634,7 +1634,7 @@ def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
 
     ws = get_worksheet(region)
     ws.update_acell(f"AD{sheet_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
-    ws.update_acell(f"AE{sheet_row}", "更新系統")
+    ws.update_acell(f"AE{sheet_row}", f"更新系統（B欄：{status}）")
     log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
@@ -1657,7 +1657,7 @@ def sync_pending_rows(region: str, selected_rows: list, session: requests.Sessio
         result["processed"] += 1
         try:
             sync_one_to_purchase_edit(item, session=session, ui_logger=ui_logger)
-            mark_sheet_row_done(region, item["sheet_row"], item["kind"], ui_logger=ui_logger)
+            mark_sheet_row_done(region, item["sheet_row"], item["status"], ui_logger=ui_logger)
             result["success"] += 1
         except Exception as e:
             result["failed"] += 1
