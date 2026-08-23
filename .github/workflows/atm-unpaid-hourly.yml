@@ -2,9 +2,8 @@ name: ATM 待付款每小時同步
 
 on:
   schedule:
-    # UTC 23:00 = 台北 07:00；UTC 00:00–10:00 = 台北 08:00–18:00
-    - cron: "0 23 * * *"
-    - cron: "0 0-10 * * *"
+    # UTC 00:00、07:00 = 台北 08:00、15:00
+    - cron: "0 0,7 * * *"
   workflow_dispatch: {}
 
 concurrency:
