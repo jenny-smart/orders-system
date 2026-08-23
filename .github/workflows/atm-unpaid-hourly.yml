@@ -1,0 +1,38 @@
+name: ATM 待付款每小時同步
+
+on:
+  schedule:
+    # UTC 23:00 = 台北 07:00；UTC 00:00–10:00 = 台北 08:00–18:00
+    - cron: "0 23 * * *"
+    - cron: "0 0-10 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: atm-unpaid-hourly-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      ATM_TAIPEI_SPREADSHEET_ID: ${{ secrets.ATM_TAIPEI_SPREADSHEET_ID }}
+      ATM_TAIPEI_GID: ${{ secrets.ATM_TAIPEI_GID }}
+      ATM_TAIPEI_WORKSHEET_TITLE: ${{ secrets.ATM_TAIPEI_WORKSHEET_TITLE }}
+      ATM_TAIPEI_EMAIL: ${{ secrets.ATM_TAIPEI_EMAIL }}
+      ATM_TAIPEI_PASSWORD: ${{ secrets.ATM_TAIPEI_PASSWORD }}
+      ATM_TAICHUNG_SPREADSHEET_ID: ${{ secrets.ATM_TAICHUNG_SPREADSHEET_ID }}
+      ATM_TAICHUNG_GID: ${{ secrets.ATM_TAICHUNG_GID }}
+      ATM_TAICHUNG_WORKSHEET_TITLE: ${{ secrets.ATM_TAICHUNG_WORKSHEET_TITLE }}
+      ATM_TAICHUNG_EMAIL: ${{ secrets.ATM_TAICHUNG_EMAIL }}
+      ATM_TAICHUNG_PASSWORD: ${{ secrets.ATM_TAICHUNG_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m memo_system.atm_schedule
