@@ -1134,7 +1134,12 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
 
-    # 銀行明細以 B 欄最後一筆為界；只在這一列以下檢查與新增待付款資料。
+    # 新增位置仍以 A 欄最後一筆＋5 列定位；B 欄只決定重複檢查範圍。
+    last_a_row = max(
+        (idx for idx, row in enumerate(all_values, start=1)
+         if row and str(row[0]).strip()),
+        default=0,
+    )
     last_b_row = max(
         (idx for idx, row in enumerate(all_values, start=1)
          if len(row) >= 2 and str(row[1]).strip()),
@@ -1170,8 +1175,8 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
         log(f"沒有新訂單可新增；已略過 {result['skipped_duplicates']} 筆重複訂單")
         return result
 
-    # 保留原本銀行明細下方 4 列空白；若 I:L 已有資料，一律接在最後一列後方。
-    start_row = max(last_b_row + 5, last_unpaid_row + 1)
+    # 維持原規則：A 欄最後一筆下方空 4 列；既有 I:L 絕不覆蓋。
+    start_row = max(last_a_row + 5, last_unpaid_row + 1)
     end_row = start_row + len(pending_rows) - 1
 
     current_row_count = int(getattr(ws, "row_count", 0) or len(all_values))
