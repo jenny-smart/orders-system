@@ -1215,3 +1215,42 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
         f"略過 {result['skipped_duplicates']} 筆重複訂單"
     )
     return result
+
+
+def run_scheduled_unpaid_sync(ui_logger=None) -> Dict:
+    """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。"""
+    log = make_logger(ui_logger)
+    results = {}
+    errors = []
+
+    for region in ("台北", "台中"):
+        prefix = REGION_SECRET_PREFIX[region]
+        try:
+            email = _secret_text(f"{prefix}_EMAIL")
+            password = _secret_text(f"{prefix}_PASSWORD")
+            if not email or not password:
+                raise RuntimeError(f"缺少 {prefix}_EMAIL 或 {prefix}_PASSWORD")
+
+            memo.set_runtime_credentials(email, password)
+            session = memo.login(ui_logger=ui_logger)
+            rows = search_atm_unpaid_orders(session=session, ui_logger=ui_logger)
+            results[region] = paste_atm_unpaid_list(
+                region=region,
+                rows=rows,
+                ui_logger=ui_logger,
+            )
+        except Exception as exc:
+            errors.append(f"{region}：{exc}")
+            log(f"❌ {region}：{exc}")
+
+    if errors:
+        raise RuntimeError("；".join(errors))
+    return results
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--scheduled-unpaid" not in sys.argv:
+        raise SystemExit("請指定 --scheduled-unpaid")
+    run_scheduled_unpaid_sync()
