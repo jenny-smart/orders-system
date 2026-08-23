@@ -16,17 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON || secrets.GOOGLE_SERVICE_ACCOUNT }}
       ATM_TAIPEI_SPREADSHEET_ID: ${{ secrets.ATM_TAIPEI_SPREADSHEET_ID }}
       ATM_TAIPEI_GID: ${{ secrets.ATM_TAIPEI_GID }}
       ATM_TAIPEI_WORKSHEET_TITLE: ${{ secrets.ATM_TAIPEI_WORKSHEET_TITLE }}
-      ATM_TAIPEI_EMAIL: ${{ secrets.ATM_TAIPEI_EMAIL }}
-      ATM_TAIPEI_PASSWORD: ${{ secrets.ATM_TAIPEI_PASSWORD }}
+      TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
+      TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
       ATM_TAICHUNG_SPREADSHEET_ID: ${{ secrets.ATM_TAICHUNG_SPREADSHEET_ID }}
       ATM_TAICHUNG_GID: ${{ secrets.ATM_TAICHUNG_GID }}
       ATM_TAICHUNG_WORKSHEET_TITLE: ${{ secrets.ATM_TAICHUNG_WORKSHEET_TITLE }}
-      ATM_TAICHUNG_EMAIL: ${{ secrets.ATM_TAICHUNG_EMAIL }}
-      ATM_TAICHUNG_PASSWORD: ${{ secrets.ATM_TAICHUNG_PASSWORD }}
+      TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
+      TAICHUNG_PASSWORD: ${{ secrets.TAICHUNG_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
@@ -35,4 +35,4 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m memo_system.atm_schedule
+      - run: python -m memo_system.atm --scheduled-unpaid
