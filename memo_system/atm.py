@@ -223,8 +223,13 @@ def _get_gspread_client():
         creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
         return gspread.authorize(creds)
 
+    try:
+        from accounts import GOOGLE_SERVICE_ACCOUNT_FILE as local_credentials_file
+    except Exception:
+        local_credentials_file = ""
+    credentials_file = str(local_credentials_file or memo.GOOGLE_SERVICE_ACCOUNT_FILE).strip()
     creds = Credentials.from_service_account_file(
-        memo.GOOGLE_SERVICE_ACCOUNT_FILE,
+        credentials_file,
         scopes=scopes,
     )
     return gspread.authorize(creds)
@@ -267,7 +272,18 @@ def _atm_sheet_config(region: str) -> Dict:
     gid_text = _secret_text(f"ATM_{prefix}_GID")
     worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE") or ATM_WORKSHEET_TITLE
     if not spreadsheet_id:
-        raise ValueError(f"Secrets 尚未設定「{region}」ATM 試算表 ID")
+        try:
+            from . import env as local_env
+            spreadsheet_id = str(
+                getattr(local_env, "ATM_SHEET_IDS", {}).get(region, "")
+            ).strip()
+            worksheet_title = str(
+                getattr(local_env, "ATM_WORKSHEET_TITLE", worksheet_title)
+            ).strip() or worksheet_title
+        except Exception:
+            pass
+    if not spreadsheet_id:
+        raise ValueError(f"找不到「{region}」ATM 試算表設定")
     try:
         gid = int(gid_text) if gid_text else None
     except ValueError as exc:
@@ -1223,13 +1239,21 @@ def run_scheduled_unpaid_sync(ui_logger=None) -> Dict:
     results = {}
     errors = []
 
+    try:
+        from accounts import ACCOUNTS
+    except Exception:
+        ACCOUNTS = {}
+
     for region in ("台北", "台中"):
         prefix = REGION_SECRET_PREFIX[region]
         try:
-            email = _secret_text(f"{prefix}_EMAIL")
-            password = _secret_text(f"{prefix}_PASSWORD")
+            account = ACCOUNTS.get(region, {}) if isinstance(ACCOUNTS, dict) else {}
+            email = str(account.get("email") or _secret_text(f"{prefix}_EMAIL")).strip()
+            password = str(account.get("password") or _secret_text(f"{prefix}_PASSWORD")).strip()
             if not email or not password:
-                raise RuntimeError(f"缺少 {prefix}_EMAIL 或 {prefix}_PASSWORD")
+                raise RuntimeError(
+                    f"本機 ~/lemon/accounts.py 缺少「{region}」email/password"
+                )
 
             memo.set_runtime_credentials(email, password)
             session = memo.login(ui_logger=ui_logger)
