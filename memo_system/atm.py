@@ -1139,7 +1139,7 @@ def search_atm_unpaid_orders(session, date_until: Optional[str] = None, ui_logge
 
 
 def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict:
-    """將未出現的待付款訂單接在 B 欄資料區下方，不覆蓋既有 I:L。"""
+    """新增未出現的待付款訂單；J 欄去重範圍為 A 欄最後資料列以下，並回填 P/T。"""
     log = make_logger(ui_logger)
     result = {"pasted": 0, "skipped_duplicates": 0, "start_row": None, "errors": []}
 
@@ -1150,22 +1150,17 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     ws = get_atm_worksheet(region)
     all_values = memo.with_retry(ws.get_all_values)
 
-    # 新增位置仍以 A 欄最後一筆＋5 列定位；B 欄只決定重複檢查範圍。
+    # 新增位置以 A 欄最後一筆＋5 列定位；去重只檢查 A 欄最後一筆以下的 J 欄。
     last_a_row = max(
         (idx for idx, row in enumerate(all_values, start=1)
          if row and str(row[0]).strip()),
         default=0,
     )
-    last_b_row = max(
-        (idx for idx, row in enumerate(all_values, start=1)
-         if len(row) >= 2 and str(row[1]).strip()),
-        default=1,
-    )
 
     existing_order_nos = set()
     last_unpaid_row = 0
     for idx, row in enumerate(all_values, start=1):
-        if idx <= last_b_row:
+        if idx <= last_a_row:
             continue
         i_to_l = row[8:12] if len(row) > 8 else []
         if any(str(value).strip() for value in i_to_l):
@@ -1200,6 +1195,7 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
         memo.with_retry(ws.add_rows, end_row - current_row_count)
 
     updates = []
+    pasted_at = _now_text()
     for offset, row in enumerate(pending_rows):
         row_num = start_row + offset
         updates.append({
@@ -1211,6 +1207,8 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
                 row["net_amount"],
             ]],
         })
+        updates.append({"range": f"P{row_num}", "values": [[pasted_at]]})
+        updates.append({"range": f"T{row_num}", "values": [["待對帳"]]})
 
         # H 欄 LINE 連結只在原儲存格為空時寫入，避免覆蓋人工資料。
         existing_h = ""
