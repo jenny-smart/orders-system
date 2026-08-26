@@ -1,11 +1,13 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.1
+# 版本：v3.2
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-08-27
 #
 # Change Log
+# v3.2
+# - 403 權限錯誤直接顯示 Google 服務帳號憑證的 client_email，不再因 gspread 版本差異顯示未知服務帳號。
 # v3.1
 # - 儲值金異動成功回填後，B 欄狀態同步完成：待回／待扣儲值金→已扣儲值金，待返儲值金→已返儲值金。
 # - Google Sheet 403 時顯示實際服務帳號 email，方便確認地區試算表編輯權限。
@@ -214,6 +216,7 @@ _SCOPES = [
 ]
 
 _gspread_client = None
+_service_account_email = ""
 
 
 def _secret_value(key, default=""):
@@ -254,7 +257,7 @@ def _get_gspread_client():
     沒有的話再試 st.secrets["GOOGLE_SERVICE_ACCOUNT"]（整包 JSON 字串）。
     若您 memo.py 用的 key 名稱不同，請把下面兩個 _secret_value(...) 的 key 改成一致即可。
     """
-    global _gspread_client
+    global _gspread_client, _service_account_email
     if _gspread_client is not None:
         return _gspread_client
 
@@ -289,6 +292,7 @@ def _get_gspread_client():
             "區塊或 GOOGLE_SERVICE_ACCOUNT（JSON 字串），命名請跟 memo.py 現有設定一致"
         )
 
+    _service_account_email = str(sa_info.get("client_email", "") or "").strip()
     creds = Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
     _gspread_client = gspread.authorize(creds)
     return _gspread_client
@@ -1692,8 +1696,7 @@ def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None
     except gspread.exceptions.APIError as exc:
         response = getattr(exc, "response", None)
         if getattr(response, "status_code", None) == 403:
-            auth = getattr(_get_gspread_client(), "auth", None)
-            account = getattr(auth, "service_account_email", "") or "未知服務帳號"
+            account = _service_account_email or "憑證未提供 client_email"
             raise RuntimeError(
                 f"Google Sheet 無編輯權限（服務帳號：{account}）。"
                 f"請將「{region}」清潔異動試算表分享為編輯者。"
