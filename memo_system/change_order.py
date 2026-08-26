@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.0
+# 版本：v3.1
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-08-23
+# 最後更新：2026-08-27
 #
 # Change Log
+# v3.1
+# - 儲值金異動成功回填後，B 欄狀態同步完成：待回／待扣儲值金→已扣儲值金，待返儲值金→已返儲值金。
+# - Google Sheet 403 時顯示實際服務帳號 email，方便確認地區試算表編輯權限。
 # v3.0
 # - 回填加收／退款時只更新指定側，另一側狀態與資料完整保留。
 # - 從 Vue purchase JSON 取得真實值；抓不到時停止，避免把樣板占位符寫回。
@@ -352,12 +355,19 @@ STATUS_PENDING_CHARGE = "待收款"
 STATUS_PENDING_REFUND = "待退款"
 STATUS_DONE_CHARGE = "已收款"
 STATUS_DONE_REFUND = "已退款"
-STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待加收", "待扣儲值金"}
+STATUS_PENDING_CHARGE_ALIASES = {
+    STATUS_PENDING_CHARGE, "待加收", "待回儲值金", "待扣儲值金",
+}
 STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已加收", "已扣儲值金"}
 STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND, "VIP待退券", "待返儲值金"}
 STATUS_DONE_REFUND_ALIASES = {
     STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款",
     "VIP已退券", "已返儲值金",
+}
+STATUS_AFTER_SYNC = {
+    "待回儲值金": "已扣儲值金",
+    "待扣儲值金": "已扣儲值金",
+    "待返儲值金": "已返儲值金",
 }
 STATUS_STAFF_TIME_CHANGE = {"專員服務時間異動"}
 STATUS_FARE_INVOICE_ONLY = {"車馬費發票"}
@@ -1661,17 +1671,39 @@ def sync_one_to_purchase_edit(item: dict, session: requests.Session, ui_logger=N
 
 
 def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None):
-    """回填成功後只標記處理時間，不改 B 欄狀態。"""
+    """回填成功後標記處理時間；儲值金待處理狀態同步改為完成狀態。"""
     def log(msg):
         if ui_logger:
             ui_logger(msg)
 
     ws = get_worksheet(region)
-    update_status = f"更新系統（B欄：{status}）"
+    done_status = STATUS_AFTER_SYNC.get(status, status)
+    update_status = f"更新系統（B欄：{done_status}）"
     updated_at = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
-    ws.update_acell(f"AD{sheet_row}", updated_at)
-    ws.update_acell(f"AE{sheet_row}", update_status)
-    log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
+    updates = [
+        {"range": f"AD{sheet_row}", "values": [[updated_at]]},
+        {"range": f"AE{sheet_row}", "values": [[update_status]]},
+    ]
+    if done_status != status:
+        updates.insert(0, {"range": f"B{sheet_row}", "values": [[done_status]]})
+
+    try:
+        ws.batch_update(updates)
+    except gspread.exceptions.APIError as exc:
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 403:
+            auth = getattr(_get_gspread_client(), "auth", None)
+            account = getattr(auth, "service_account_email", "") or "未知服務帳號"
+            raise RuntimeError(
+                f"Google Sheet 無編輯權限（服務帳號：{account}）。"
+                f"請將「{region}」清潔異動試算表分享為編輯者。"
+            ) from exc
+        raise
+
+    if done_status != status:
+        log(f"✅ Sheet 第 {sheet_row} 列 B 欄已由「{status}」改為「{done_status}」，並標記回填時間")
+    else:
+        log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
 # ============================================================
