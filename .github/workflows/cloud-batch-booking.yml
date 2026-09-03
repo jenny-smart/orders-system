@@ -1,4 +1,4 @@
-name: Batch Finalize Orders
+name: Optimized Cloud Batch Booking
 
 on:
   workflow_dispatch:
@@ -7,23 +7,23 @@ on:
         description: "工作表分頁名稱，例如台北202609"
         required: true
         type: string
-      max_rows:
-        description: "最多處理列數；0 = 跑到沒有待成單資料"
-        required: false
-        default: "0"
-        type: string
       chunk_size:
-        description: "每輪最多抓幾列"
+        description: "每輪最多處理列數；不是時間限制"
         required: false
         default: "50"
         type: string
+      max_rows:
+        description: "本次最多處理列數；0 = 跑完所有待成單"
+        required: false
+        default: "0"
+        type: string
 
 concurrency:
-  group: batch-finalize-orders-prod
+  group: optimized-cloud-batch-booking-prod
   cancel-in-progress: false
 
 jobs:
-  finalize:
+  booking:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -47,10 +47,9 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Finalize pending orders
+      - name: Run optimized cloud batch booking
         run: >-
-          python batch_finalize_orders.py
+          python cloud_batch_booking.py
           --sheet "${{ inputs.sheet_name }}"
-          --env prod
           --chunk-size "${{ inputs.chunk_size }}"
           --max-rows "${{ inputs.max_rows }}"
