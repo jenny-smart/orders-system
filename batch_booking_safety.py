@@ -4,6 +4,7 @@
 - 原批次建單：逐列執行，一列完成/回填後才處理下一列。
 - 優化/雲端批次：保留既有多人多日期批次核心，但改成每一組完成即回填。
 - 重跑時先把後台已成立、Sheet 尚未回填的訂單補回，避免重複成單。
+- 「每月確認」只做 Sheet 狀態防呆：Google 日曆不改色，表單狀態寫成「待確認」。
 """
 from __future__ import annotations
 
@@ -17,9 +18,84 @@ import orders as _orders
 from accounts import ACCOUNTS
 
 _BASE_RUN_PROCESS_WEB = _orders.run_process_web
+_BASE_STAGE_CALENDAR_COLOR = _orders.stage_calendar_color
+_BASE_UPDATE_SHEET_ROWS = _orders.update_sheet_rows
 _CHECKPOINT_RESULT = "處理中"
 _RECOVERED_RESULT = "中斷復原"
 _BLOCKED_RESULT = "待確認"
+
+
+def _is_monthly_confirm_event(event) -> bool:
+    text = " ".join([
+        str((event or {}).get("summary") or ""),
+        str((event or {}).get("description") or ""),
+    ])
+    return "每月確認/自行預約" in text or "每月確認" in text
+
+
+def _find_row_calendar_event(row, gcal_service, region):
+    if gcal_service is None:
+        return None
+    calendar_id = _orders.GOOGLE_CALENDAR_MAP.get(region)
+    if not calendar_id:
+        return None
+    try:
+        return _orders.find_matching_calendar_event(
+            gcal_service,
+            calendar_id,
+            str(row.get("地址", "")).strip(),
+            row.get("日期"),
+            str(row.get("開始時間", "")).strip(),
+            str(row.get("結束時間", "")).strip(),
+        )
+    except Exception:
+        return None
+
+
+def _stage_calendar_color_with_sheet_guard(row, gcal_service, region):
+    """每月確認事件不動日曆，只把 Sheet 狀態交給回填層改成待確認。"""
+    event = _find_row_calendar_event(row, gcal_service, region)
+    if event and _is_monthly_confirm_event(event):
+        old_color = _orders.color_name_from_id(event.get("colorId", ""))
+        return {
+            "日曆改色結果": "未改",
+            "日曆改色原因": "每月確認：保留 Google 日曆原狀；表單狀態改為待確認",
+            "日曆原色": old_color,
+            "日曆新色": old_color,
+            "狀態": "待確認",
+        }
+    return _BASE_STAGE_CALENDAR_COLOR(row, gcal_service, region)
+
+
+def _update_sheet_rows_with_pending_guard(ws, row_results):
+    """沿用既有回填；僅額外允許『待確認』覆寫表單狀態，不改其他既有規則。"""
+    _BASE_UPDATE_SHEET_ROWS(ws, row_results)
+    pending_rows = [
+        int(row_num)
+        for row_num, info in (row_results or {}).items()
+        if str((info or {}).get("狀態", "")).strip() == "待確認"
+    ]
+    if not pending_rows:
+        return
+
+    headers = _orders.ensure_columns_in_sheet(ws)
+    if "狀態" not in headers:
+        return
+    status_col = headers.index("狀態") + 1
+    updates = [
+        {
+            "range": _orders.gspread.utils.rowcol_to_a1(row_num, status_col),
+            "values": [["待確認"]],
+        }
+        for row_num in pending_rows
+    ]
+    if updates:
+        ws.batch_update(updates)
+
+
+# 所有批次入口共用同一層防呆；不修改 Google 日曆本身。
+_orders.stage_calendar_color = _stage_calendar_color_with_sheet_guard
+_orders.update_sheet_rows = _update_sheet_rows_with_pending_guard
 
 
 def _configure_runtime(env_name: str) -> None:
@@ -129,6 +205,8 @@ def _calendar_recover(row, region, gcal_service):
             "日曆新色": "",
         }
     info = _orders.stage_calendar_color(row, gcal_service, region)
+    if str(info.get("狀態", "")).strip() == "待確認":
+        return info
     old_color = str(info.get("日曆原色", "")).strip()
     new_color = str(info.get("日曆新色", "")).strip()
     if old_color == "香蕉黃" or new_color == "香蕉黃":
