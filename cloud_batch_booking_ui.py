@@ -4,6 +4,11 @@ import os
 import requests
 import streamlit as st
 from batch_booking_optimized import _load_candidates
+from batch_booking_safety import install_streamlit_batch_hooks
+
+# ordersapp import 本模組時即安裝兩個批次入口：
+# 原「批次建單」＝逐列單筆；「批次建單優化」＝保留優化核心＋中斷復原。
+install_streamlit_batch_hooks()
 
 REPO = "jenny-smart/orders-system"
 WORKFLOW = "optimized-cloud-batch-booking.yml"
@@ -39,7 +44,7 @@ def _dispatch(sheet, chunk_size, max_rows):
 
 def render(env: str):
     st.subheader("批次建單優化＋雲端批次成單")
-    st.info("這是獨立雲端功能；原『批次建單優化』完全保留給人工成單。本功能沿用相同候選篩選與批次建單核心，啟動後由 GitHub Actions 執行，關閉電腦不會中斷。")
+    st.info("這是獨立雲端功能；原『批次建單優化』完全保留給人工成單。本功能沿用相同候選篩選與批次建單核心，啟動後由 GitHub Actions 執行，關閉電腦不會中斷。中斷後重跑會先反查後台已成立訂單，再決定是否建單。")
     if env != "prod":
         st.warning("雲端批次成單只允許正式機 prod。")
         return
