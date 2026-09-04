@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""指定列批次建單狀態防呆與優化入口綁定。"""
+"""批次建單共用防呆：欄位去重、候選條件、回填欄位定位、優化入口綁定。"""
 from __future__ import annotations
 
 import re
@@ -8,6 +8,7 @@ import orders
 
 _INSTALLED = False
 _ORIGINAL_LOAD_WORKSHEET = orders.load_worksheet
+_ORIGINAL_UPDATE_SHEET_ROWS = orders.update_sheet_rows
 
 
 def _scalar(value):
@@ -27,7 +28,6 @@ def normalize_status(value) -> str:
 def _dedupe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.columns.is_unique:
         return df
-    # 不改 Sheet，只在程式記憶體中保留第一個同名欄，避免 pandas reindex 失敗。
     return df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
 
@@ -44,7 +44,7 @@ def _first_series(df: pd.DataFrame, name: str) -> pd.Series:
 
 
 def _should_process_row(row) -> bool:
-    """已有訂單編號＝同步既有訂單；無單號時只有未安排可建單。"""
+    """已有單號可同步；沒有單號時只有未安排可進入建單流程。"""
     order_no = str(_scalar(row.get("訂單編號", "")) or "").strip()
     if order_no:
         return True
@@ -52,13 +52,12 @@ def _should_process_row(row) -> bool:
 
 
 def _should_create_order(row) -> bool:
-    """只有未安排＋訂單編號空白才真的建立新訂單。"""
     order_no = str(_scalar(row.get("訂單編號", "")) or "").strip()
     return not order_no and normalize_status(row.get("狀態", "")) == "未安排"
 
 
 def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
-    """人工批次優化：未安排空白單號可建單；已有單號可指定同步既有訂單。"""
+    """人工優化候選：未安排空白單號可建；已有單號可指定做同步。"""
     try:
         _, df = _load_worksheet_unique(sheet_name)
     except Exception as exc:
@@ -70,14 +69,12 @@ def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
     work["__sheet_row__"] = _first_series(df, "__sheet_row__")
     for col in batch_opt.REQUIRED_COLUMNS:
         work[col] = _first_series(df, col).map(batch_opt._text)
+    for col in ("原因", "沒班表日期"):
+        work[col] = _first_series(df, col).map(batch_opt._text) if col in df.columns else ""
 
     required_ok = (
-        work["姓名"].ne("")
-        & work["電話"].ne("")
-        & work["地址"].ne("")
-        & work["日期"].ne("")
-        & work["開始時間"].ne("")
-        & work["結束時間"].ne("")
+        work["姓名"].ne("") & work["電話"].ne("") & work["地址"].ne("")
+        & work["日期"].ne("") & work["開始時間"].ne("") & work["結束時間"].ne("")
     )
     create_ok = work["狀態"].map(normalize_status).eq("未安排") & work["訂單編號"].eq("")
     existing_ok = work["訂單編號"].ne("")
@@ -94,28 +91,68 @@ def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
     return work
 
 
+def _update_sheet_rows_first_header(ws, row_results):
+    """重複欄名時固定寫第一個正式欄位，避免訂單編號寫到後方同名欄。"""
+    headers = orders.ensure_columns_in_sheet(ws)
+    header_index = {}
+    for i, header in enumerate(headers, 1):
+        if header and header not in header_index:
+            header_index[header] = i
+
+    updates = []
+    for row_num, info in (row_results or {}).items():
+        xyz = orders.finalize_xyz(
+            {
+                "服務人員": info.get("服務人員", ""),
+                "服務狀態": info.get("服務狀態", ""),
+                "車馬費": info.get("車馬費", ""),
+            },
+            fallback_fare=info.get("車馬費", "0"),
+        )
+        info["服務人員"] = xyz["服務人員"]
+        info["服務狀態"] = xyz["服務狀態"]
+        info["車馬費"] = xyz["車馬費"]
+
+        for key, value in info.items():
+            if key not in header_index:
+                continue
+            if key == "狀態" and str(value).strip() not in ("已安排", "待確認"):
+                continue
+            updates.append({
+                "range": orders.gspread.utils.rowcol_to_a1(int(row_num), header_index[key]),
+                "values": [["" if value is None else str(value)]],
+            })
+    if updates:
+        ws.batch_update(updates)
+        orders.set_customer_notice_clip_style(ws, headers=headers, row_numbers=row_results.keys())
+
+
 def install_patch() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
 
-    # 批次核心統一使用去重後 DataFrame，避免任何後續 groupby/reindex 再爆 duplicate labels。
     orders.load_worksheet = _load_worksheet_unique
+    orders.update_sheet_rows = _update_sheet_rows_first_header
     orders.should_process_row = _should_process_row
     orders.should_create_order = _should_create_order
-    orders.ORDERS_VERSION = "v2026.09.05-1"
+    orders.ORDERS_VERSION = "v2026.09.05-2"
     orders.ORDERS_UPDATED_AT = "2026-09-05"
 
     try:
         import batch_booking_optimized as batch_opt
-        from batch_booking_safety import run_process_web_optimized
+        import batch_booking_safety as batch_safety
 
         batch_opt.load_worksheet = _load_worksheet_unique
         batch_opt._load_candidates = lambda sheet_name: _safe_load_candidates(batch_opt, sheet_name)
 
+        # safety 模組載入較早時會保存舊函式，這裡同步更新，確保斷點/復原也寫第一個正式欄。
+        batch_safety._BASE_UPDATE_SHEET_ROWS = _update_sheet_rows_first_header
+        batch_safety._orders.update_sheet_rows = _update_sheet_rows_first_header
+
         def _optimized_runner_with_lemon_fallback(**kwargs):
             kwargs["allow_auto_lemon_shift"] = True
-            return run_process_web_optimized(**kwargs)
+            return batch_safety.run_process_web_optimized(**kwargs)
 
         batch_opt.run_process_web = _optimized_runner_with_lemon_fallback
     except Exception:
