@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""批次建單優化＋雲端批次成單：沿用人工優化版的候選篩選與 orders 批次核心。"""
+"""批次建單優化＋雲端批次成單：沿用人工優化版核心，並加上中斷復原。"""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,8 @@ from collections import defaultdict
 
 from accounts import ACCOUNTS
 from batch_booking_optimized import _load_candidates, _text
-from orders import get_region_by_address, run_process_web
+from orders import get_region_by_address
+from batch_booking_safety import run_process_web_optimized
 
 ACTIONS = ["建單", "寄確認信", "改 Google 日曆"]
 
@@ -56,7 +57,7 @@ def run(sheet_name: str, chunk_size: int = 50, max_rows: int = 0, pause_seconds:
                 if not email or not password:
                     raise RuntimeError(f"{region} 尚未設定後台帳號密碼")
                 print(f"START {region}: rows={','.join(map(str, rows))}", flush=True)
-                result = run_process_web(
+                result = run_process_web_optimized(
                     env_name="prod", region=region, backend_email=email, backend_password=password,
                     sheet_name=sheet_name, start_row=min(rows), end_row=max(rows),
                     selected_actions=ACTIONS, logger=lambda msg: print(str(msg), flush=True),
@@ -66,7 +67,12 @@ def run(sheet_name: str, chunk_size: int = 50, max_rows: int = 0, pause_seconds:
                 fail = int(result.get("fail_count", 0) or 0)
                 success_total += success
                 fail_total += fail
-                print(f"DONE {region}: success={success} fail={fail}", flush=True)
+                print(
+                    f"DONE {region}: success={success} fail={fail} "
+                    f"recovered={int(result.get('recovered_count', 0) or 0)} "
+                    f"blocked={int(result.get('blocked_count', 0) or 0)}",
+                    flush=True,
+                )
             except Exception as exc:
                 fail_total += len(rows)
                 print(f"ERROR {region}: {exc}", flush=True)
