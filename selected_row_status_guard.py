@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""指定列批次建單狀態防呆。
-
-只有「未安排」且訂單編號空白的列可以進入建單。
-待確認／已安排／暫停／保留單一律不執行。
-同時清除 Google Sheet 可能帶入的不可見空白字元。
-"""
+"""指定列批次建單狀態防呆與優化入口綁定。"""
 from __future__ import annotations
 
 import re
@@ -21,7 +16,6 @@ def normalize_status(value) -> str:
 
 
 def _first_series(df: pd.DataFrame, name: str) -> pd.Series:
-    """Google Sheet 若有重複欄名，只讀第一個同名欄，避免 pandas reindex error。"""
     selected = df.loc[:, df.columns == name]
     if selected.shape[1] == 0:
         raise RuntimeError(f"工作表缺少必要欄位：{name}")
@@ -33,7 +27,7 @@ def _is_unarranged_blank_order(row) -> bool:
 
 
 def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
-    """直接重建優化候選資料，不再在原 DataFrame 上二次 reindex。"""
+    """只抽取第一個同名欄位，避免 duplicate labels 造成 pandas reindex 失敗。"""
     try:
         _, df = batch_opt.load_worksheet(sheet_name)
     except Exception as exc:
@@ -81,7 +75,17 @@ def install_patch() -> None:
 
     try:
         import batch_booking_optimized as batch_opt
+        from batch_booking_safety import run_process_web_optimized
+
         batch_opt._load_candidates = lambda sheet_name: _safe_load_candidates(batch_opt, sheet_name)
+
+        # 直接綁定人工「批次建單優化」入口，不再依賴 import/stack patch。
+        # 查無班表時允許核心補檸檬人；已有配班專員時核心不會覆蓋。
+        def _optimized_runner_with_lemon_fallback(**kwargs):
+            kwargs["allow_auto_lemon_shift"] = True
+            return run_process_web_optimized(**kwargs)
+
+        batch_opt.run_process_web = _optimized_runner_with_lemon_fallback
     except Exception:
         pass
 
