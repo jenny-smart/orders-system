@@ -17,9 +17,19 @@ on:
         default: "0"
         type: string
       filter_mode:
-        description: all / no_schedule / missing_order
+        description: all / no_schedule / missing_order / both
         required: false
         default: "all"
+        type: string
+      region:
+        description: Region, blank means infer from address
+        required: false
+        default: ""
+        type: string
+      allow_auto_lemon:
+        description: Allow adding idle Lemon staff when no schedule exists
+        required: false
+        default: "false"
         type: string
 concurrency:
   group: optimized-cloud-batch-booking-prod
@@ -49,4 +59,11 @@ jobs:
           KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
           KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-        run: python cloud_batch_booking.py --sheet "${{ inputs.sheet_name }}" --chunk-size "${{ inputs.chunk_size }}" --max-rows "${{ inputs.max_rows }}" --filter-mode "${{ inputs.filter_mode }}"
+        run: >-
+          python cloud_batch_booking.py
+          --sheet "${{ inputs.sheet_name }}"
+          --chunk-size "${{ inputs.chunk_size }}"
+          --max-rows "${{ inputs.max_rows }}"
+          --filter-mode "${{ inputs.filter_mode }}"
+          --region "${{ inputs.region }}"
+          --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
