@@ -8,7 +8,6 @@ import orders
 
 _INSTALLED = False
 _ORIGINAL_LOAD_WORKSHEET = orders.load_worksheet
-_ORIGINAL_UPDATE_SHEET_ROWS = orders.update_sheet_rows
 
 
 def _scalar(value):
@@ -44,11 +43,8 @@ def _first_series(df: pd.DataFrame, name: str) -> pd.Series:
 
 
 def _should_process_row(row) -> bool:
-    """已有單號可同步；沒有單號時只有未安排可進入建單流程。"""
     order_no = str(_scalar(row.get("訂單編號", "")) or "").strip()
-    if order_no:
-        return True
-    return normalize_status(row.get("狀態", "")) == "未安排"
+    return bool(order_no) or normalize_status(row.get("狀態", "")) == "未安排"
 
 
 def _should_create_order(row) -> bool:
@@ -57,7 +53,6 @@ def _should_create_order(row) -> bool:
 
 
 def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
-    """人工優化候選：未安排空白單號可建；已有單號可指定做同步。"""
     try:
         _, df = _load_worksheet_unique(sheet_name)
     except Exception as exc:
@@ -79,7 +74,6 @@ def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
     create_ok = work["狀態"].map(normalize_status).eq("未安排") & work["訂單編號"].eq("")
     existing_ok = work["訂單編號"].ne("")
     work = work[required_ok & (create_ok | existing_ok)].copy()
-
     work.reset_index(drop=True, inplace=True)
     work["日期顯示"] = work["日期"].map(batch_opt._date_text)
     work["時段顯示"] = work.apply(
@@ -91,47 +85,84 @@ def _safe_load_candidates(batch_opt, sheet_name: str) -> pd.DataFrame:
     return work
 
 
+def _auto_filter_rows(batch_opt, sheet_name: str, mode: str) -> list[int]:
+    work = _safe_load_candidates(batch_opt, sheet_name)
+    # 自動篩選只建立新單，不把已有訂單編號列納入。
+    work = work[
+        work["狀態"].map(normalize_status).eq("未安排")
+        & work["訂單編號"].eq("")
+    ].copy()
+    reason = work.get("原因", pd.Series("", index=work.index)).map(batch_opt._text)
+    no_schedule_date = work.get("沒班表日期", pd.Series("", index=work.index)).map(batch_opt._text)
+    if mode == "no_schedule":
+        mask = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
+    elif mode == "missing_order":
+        mask = reason.str.contains("找不到訂單編號", regex=False, na=False)
+    else:
+        mask = pd.Series(False, index=work.index)
+    return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
+
+
 def _update_sheet_rows_first_header(ws, row_results):
-    """重複欄名時固定寫第一個正式欄位，避免訂單編號寫到後方同名欄。"""
     headers = orders.ensure_columns_in_sheet(ws)
     header_index = {}
     for i, header in enumerate(headers, 1):
         if header and header not in header_index:
             header_index[header] = i
-
     updates = []
     for row_num, info in (row_results or {}).items():
         xyz = orders.finalize_xyz(
-            {
-                "服務人員": info.get("服務人員", ""),
-                "服務狀態": info.get("服務狀態", ""),
-                "車馬費": info.get("車馬費", ""),
-            },
+            {"服務人員": info.get("服務人員", ""), "服務狀態": info.get("服務狀態", ""), "車馬費": info.get("車馬費", "")},
             fallback_fare=info.get("車馬費", "0"),
         )
-        info["服務人員"] = xyz["服務人員"]
-        info["服務狀態"] = xyz["服務狀態"]
-        info["車馬費"] = xyz["車馬費"]
-
+        info["服務人員"], info["服務狀態"], info["車馬費"] = xyz["服務人員"], xyz["服務狀態"], xyz["車馬費"]
         for key, value in info.items():
             if key not in header_index:
                 continue
             if key == "狀態" and str(value).strip() not in ("已安排", "待確認"):
                 continue
-            updates.append({
-                "range": orders.gspread.utils.rowcol_to_a1(int(row_num), header_index[key]),
-                "values": [["" if value is None else str(value)]],
-            })
+            updates.append({"range": orders.gspread.utils.rowcol_to_a1(int(row_num), header_index[key]), "values": [["" if value is None else str(value)]]})
     if updates:
         ws.batch_update(updates)
         orders.set_customer_notice_clip_style(ws, headers=headers, row_numbers=row_results.keys())
+
+
+def _install_optimized_filter_ui(batch_opt):
+    """在既有批次優化畫面上方補回兩個自動篩選，不重寫原畫面。"""
+    original_render = batch_opt.render
+    if getattr(original_render, "_lemon_filter_wrapped", False):
+        return
+
+    def render_with_filters(backend_email: str, backend_password: str, env: str):
+        st = batch_opt.st
+        st.markdown("#### 快速自動篩選")
+        st.caption("查無班表時自動補檸檬人：已啟用。只補當日無任何班別的檸檬人，不改動其他客人已配班專員。")
+        sheet_name = str(st.session_state.get("batch_opt_sheet_name", "") or "").strip()
+        c1, c2 = st.columns(2)
+        if c1.button("自動篩選：未安排＋訂單編號空白＋無班表", disabled=not sheet_name, key="batch_opt_filter_no_schedule"):
+            try:
+                rows = _auto_filter_rows(batch_opt, sheet_name, "no_schedule")
+                st.session_state["batch_opt_row_spec"] = ",".join(map(str, rows))
+                st.success(f"已帶入 {len(rows)} 列" if rows else "查無符合『無班表』條件的列")
+            except Exception as exc:
+                st.error(f"自動篩選失敗：{exc}")
+        if c2.button("自動篩選：未安排＋訂單編號空白＋O欄找不到訂單編號", disabled=not sheet_name, key="batch_opt_filter_missing_order"):
+            try:
+                rows = _auto_filter_rows(batch_opt, sheet_name, "missing_order")
+                st.session_state["batch_opt_row_spec"] = ",".join(map(str, rows))
+                st.success(f"已帶入 {len(rows)} 列" if rows else "查無 O欄『找不到訂單編號』的列")
+            except Exception as exc:
+                st.error(f"自動篩選失敗：{exc}")
+        original_render(backend_email, backend_password, env)
+
+    render_with_filters._lemon_filter_wrapped = True
+    batch_opt.render = render_with_filters
 
 
 def install_patch() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
-
     orders.load_worksheet = _load_worksheet_unique
     orders.update_sheet_rows = _update_sheet_rows_first_header
     orders.should_process_row = _should_process_row
@@ -142,11 +173,8 @@ def install_patch() -> None:
     try:
         import batch_booking_optimized as batch_opt
         import batch_booking_safety as batch_safety
-
         batch_opt.load_worksheet = _load_worksheet_unique
         batch_opt._load_candidates = lambda sheet_name: _safe_load_candidates(batch_opt, sheet_name)
-
-        # safety 模組載入較早時會保存舊函式，這裡同步更新，確保斷點/復原也寫第一個正式欄。
         batch_safety._BASE_UPDATE_SHEET_ROWS = _update_sheet_rows_first_header
         batch_safety._orders.update_sheet_rows = _update_sheet_rows_first_header
 
@@ -155,7 +183,7 @@ def install_patch() -> None:
             return batch_safety.run_process_web_optimized(**kwargs)
 
         batch_opt.run_process_web = _optimized_runner_with_lemon_fallback
+        _install_optimized_filter_ui(batch_opt)
     except Exception:
         pass
-
     _INSTALLED = True
