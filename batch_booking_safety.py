@@ -2,7 +2,7 @@
 """批次建單斷點保護與中斷復原。
 
 - 原批次建單：逐列執行，一列完成/回填後才處理下一列。
-- 優化/雲端批次：保留既有多人多日期批次核心，但執行前先落斷點。
+- 優化/雲端批次：保留既有多人多日期批次核心，但改成每一組完成即回填。
 - 重跑時先把後台已成立、Sheet 尚未回填的訂單補回，避免重複成單。
 """
 from __future__ import annotations
@@ -281,6 +281,22 @@ def _merge_counts(results, recovered_count=0, blocked_count=0):
     }
 
 
+def _optimized_groups(sheet_name, remaining, region):
+    """依 orders.run_process_web 相同 group key 切組，讓每一組獨立呼叫核心並立即回填。"""
+    _, df = _orders.load_worksheet(sheet_name)
+    wanted = set(int(x) for x in remaining)
+    work = df[df["__sheet_row__"].isin(wanted)]
+    groups = defaultdict(list)
+    for _, row in work.iterrows():
+        if _orders.get_region_by_address(str(row.get("地址", "")), ACCOUNTS) != region:
+            continue
+        row_no = int(row["__sheet_row__"])
+        if row_no not in wanted:
+            continue
+        groups[_orders.build_group_key(row)].append(row_no)
+    return [sorted(rows) for rows in groups.values() if rows]
+
+
 def _safe_run(
     *, optimized: bool, env_name, region, backend_email, backend_password, sheet_name,
     start_row, end_row, selected_actions=None, logger=print,
@@ -305,14 +321,20 @@ def _safe_run(
 
     results = []
     if optimized:
-        _checkpoint(ws, remaining)
-        results.append(_BASE_RUN_PROCESS_WEB(
-            env_name=env_name, region=region, backend_email=backend_email,
-            backend_password=backend_password, sheet_name=sheet_name,
-            start_row=min(remaining), end_row=max(remaining), selected_actions=selected_actions,
-            logger=logger, allow_auto_lemon_shift=allow_auto_lemon_shift,
-            selected_rows=remaining,
-        ))
+        groups = _optimized_groups(sheet_name, remaining, region)
+        logger(f"優化批次：{len(remaining)} 列分成 {len(groups)} 組；改為每組完成立即回填。")
+        for group_no, group_rows in enumerate(groups, 1):
+            _checkpoint(ws, group_rows, message="本組已建立建單斷點；本組完成後立即回填")
+            logger(f"▶ 優化第 {group_no}/{len(groups)} 組：列號 {'、'.join(map(str, group_rows))}")
+            result = _BASE_RUN_PROCESS_WEB(
+                env_name=env_name, region=region, backend_email=backend_email,
+                backend_password=backend_password, sheet_name=sheet_name,
+                start_row=min(group_rows), end_row=max(group_rows), selected_actions=selected_actions,
+                logger=logger, allow_auto_lemon_shift=allow_auto_lemon_shift,
+                selected_rows=group_rows,
+            )
+            results.append(result)
+            logger(f"✅ 優化第 {group_no}/{len(groups)} 組已完成並回填 Google Sheet。")
     else:
         for row_no in remaining:
             _checkpoint(ws, [row_no])
@@ -336,7 +358,7 @@ def run_process_web_single(**kwargs):
 
 
 def run_process_web_optimized(**kwargs):
-    """「批次建單優化」與雲端版專用：保留既有批次核心＋斷點復原。"""
+    """「批次建單優化」與雲端版專用：每組即時回填＋斷點復原。"""
     return _safe_run(optimized=True, **kwargs)
 
 
