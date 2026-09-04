@@ -9,7 +9,10 @@ from collections import defaultdict
 from accounts import ACCOUNTS
 from batch_booking_optimized import _load_candidates, _text
 from orders import get_region_by_address
+from batch_recovery_meta import install_patch as install_recovery_meta_patch
 from batch_booking_safety import run_process_web_optimized
+
+install_recovery_meta_patch()
 
 ACTIONS = ["建單", "寄確認信", "改 Google 日曆"]
 
