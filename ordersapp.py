@@ -1286,11 +1286,16 @@ elif mode == "後台／Google 日曆雙向比對":
     cc_result = st.session_state.get("cc_result")
     if cc_result:
         st.markdown("#### 檢查結果")
+        _backend_duplicates = cc_result.get("backend_duplicate_slots") or []
         _backend_missing = cc_result.get("backend_missing_in_calendar") or []
         _calendar_missing = cc_result.get("calendar_missing_in_backend") or []
-        if not _backend_missing and not _calendar_missing:
+        if not _backend_duplicates and not _backend_missing and not _calendar_missing:
             st.success("✅ 檢查通過，後台已付款訂單與 Google 日曆黃色事件皆一一對應。")
         else:
+            if _backend_duplicates:
+                st.error(f"⚠️ 系統同日同時段多筆：{len(_backend_duplicates)} 組")
+                for _p in _backend_duplicates:
+                    st.warning(_p.get("issue", ""))
             if _backend_missing:
                 st.error(f"⚠️ 後台有、日曆沒有：{len(_backend_missing)} 筆")
                 for _p in _backend_missing:
