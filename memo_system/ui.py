@@ -3,6 +3,8 @@
 # 說明：整併進 tool-system，包成 render_memo_system() 供
 #       pages/訂單系統.py 呼叫。
 # 更新記錄：
+# 2026-09-08
+# - 服務異動的預設日期與加減時判斷改用台灣時區日期。
 # 2026-07-15（二）
 # - 清潔異動階段 B 掃描說明補上專員服務時間異動、車馬費發票、VIP券與儲值金
 #   扣返等特殊 B 欄狀態。
@@ -1535,13 +1537,14 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             time_change_timing = "服務前"; change_hours = None; change_person = None
             if is_time_change:
                 # 先從 session state 取服務日（c2 的 date_input 還沒渲染時用訂單預設值）
-                _svc = st.session_state.get("co_service_date") or (selected_orders[0].get("service_date") if selected_orders else date.today())
+                today_tw = change_order.today_taipei()
+                _svc = st.session_state.get("co_service_date") or (selected_orders[0].get("service_date") if selected_orders else today_tw)
                 if hasattr(_svc, "strftime"):
                     _svc_date = _svc
                 else:
                     try: _svc_date = date.fromisoformat(str(_svc))
-                    except: _svc_date = date.today()
-                _auto_timing = "專員回報" if _svc_date <= date.today() else "服務前"
+                    except: _svc_date = today_tw
+                _auto_timing = "專員回報" if _svc_date <= today_tw else "服務前"
                 _auto_idx = 1 if _auto_timing == "專員回報" else 0
                 st.caption(f"⚡ 依服務日 {_svc_date} 自動判斷：{_auto_timing}（可手動調整）")
                 time_change_timing = st.radio("加減時發生時間", ["服務前", "專員回報"], index=_auto_idx, horizontal=True, key="co_time_change_timing")
@@ -1551,7 +1554,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             if is_manual_refund: manual_amount = st.number_input("退款金額", min_value=0, step=50, value=0, key="co_manual_amount")
         with c2:
             customer_type = st.selectbox("客戶類別", ["一般", "VIP"], key="co_customer_type")
-            default_service_date = selected_orders[0].get("service_date") or date.today()
+            default_service_date = selected_orders[0].get("service_date") or change_order.today_taipei()
             service_date_input = st.date_input("服務日期（用於計算工作天數／平日假日）", value=default_service_date, key="co_service_date")
             service_note = st.text_input("後台備註（寫入 K 欄）", placeholder="例：客通知停水異動服務", key="co_service_note")
 

@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.3
+# 版本：v3.4
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-08-27
 #
 # Change Log
+# v3.4
+# - 服務異動的工作天、訂單篩選與加減時判斷統一使用台灣時區日期，避免
+#   Streamlit Cloud 在台灣凌晨仍以 UTC 前一天計算。
 # v3.3
 # - 階段 A 建立「待收款」異動時，同步把服務年月、訂單編號、訂購人姓名與
 #   收款金額新增至同地區 ATM 工作表 I:L。
@@ -175,11 +178,16 @@ TAIWAN_PUBLIC_HOLIDAYS = {
 
 
 
+def today_taipei() -> date:
+    """回傳台灣時區今天日期。"""
+    return datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+
 def _today_taipei_str(today: date = None) -> str:
     """回傳台北時區登記日期字串，避免 Streamlit 主機使用 UTC 導致日期少一天。"""
     if today:
         return today.strftime("%Y/%m/%d")
-    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y/%m/%d")
+    return today_taipei().strftime("%Y/%m/%d")
 
 
 def _money_int(value, default: int = 0) -> int:
@@ -420,16 +428,16 @@ def _is_weekend_or_holiday(d: date) -> bool:
 
 def _count_workdays_before(service_date: date, today: date = None) -> int:
     """
-    計算今天到服務日前一日之間還剩幾個工作天（不含服務日）。
-    週六日與例假日不算工作日；若今天不是工作日，從下一個工作日開始算。
+    計算通知日隔天到服務日前一日之間還剩幾個工作天（不含通知日與服務日）。
+    週六日與例假日不算工作日。
     例：2026-06-21（日）異動 2026-06-23（二），只算 2026-06-22（一）= 1 天。
     當天/已過去 -> 0
     """
-    today = today or date.today()
+    today = today or today_taipei()
     if service_date <= today:
         return 0
     days = 0
-    d = today
+    d = today + timedelta(days=1)
     while d < service_date:
         if _is_workday(d):
             days += 1
@@ -560,7 +568,7 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
 
 def _select_change_order_candidates(parsed: list, today: date = None) -> list:
     """已付款未服務 + 近 2 場已付款已服務，供服務時加減時異動使用。"""
-    today = today or date.today()
+    today = today or today_taipei()
     upcoming = [
         p for p in parsed
         if p.get("is_paid") and p.get("service_date") and p["service_date"] >= today
@@ -688,7 +696,7 @@ def _format_change_fee_j(order: dict, change_fee_info: dict) -> str:
 
 
 def _time_change_timing_label(service_date: date, today: date = None) -> str:
-    today = today or date.today()
+    today = today or today_taipei()
     if service_date and service_date <= today:
         return "當天"
     return "服務前"
