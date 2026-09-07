@@ -4409,16 +4409,27 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         ]))
 
     def _event_name_phone(event):
-        """從日曆事件的 summary／description 解析姓名與電話。"""
+        """解析姓名與電話；姓名後的「-XXXX」是地址標籤，不屬於姓名。"""
         blob = " ".join([event.get("summary", "") or "", event.get("description", "") or ""])
         phone_m = re.search(r"(09\d{8})", blob)
         phone = phone_m.group(1) if phone_m else ""
         name = ""
         if phone_m:
             before = blob[:phone_m.start()]
-            name_m = re.search(r"([\u4e00-\u9fffA-Za-z]+)[,，]?\s*$", before)
+            name_m = re.search(
+                r"([\u4e00-\u9fffA-Za-z]+?)(?:[-－—][^,，\s]+)?[,，]?\s*$",
+                before,
+            )
             name = name_m.group(1) if name_m else ""
         return name, phone
+
+    def _event_address_label(event):
+        """例：陳靜萱-文山區,0919... 中的「文山區」。"""
+        blob = " ".join([event.get("summary", "") or "", event.get("description", "") or ""])
+        phone_m = re.search(r"09\d{8}", blob)
+        before = blob[:phone_m.start()] if phone_m else blob
+        label_m = re.search(r"[-－—]([^,，\s]+)[,，]?\s*$", before)
+        return label_m.group(1).strip() if label_m else ""
 
     def _event_phone_match(order_phone, event):
         phone_norm = normalize_phone(order_phone) if order_phone else ""
@@ -4431,7 +4442,10 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             event.get("location", "") or "",
         ]))
         addr_norm = normalize_addr_for_match(order_address)
-        return bool(addr_norm) and addr_norm in blob
+        label_norm = normalize_addr_for_match(_event_address_label(event))
+        return bool(addr_norm) and (
+            addr_norm in blob or (bool(label_norm) and label_norm in addr_norm)
+        )
 
     def _event_person_match(order, event):
         event_name, event_phone = _event_name_phone(event)
@@ -4557,7 +4571,11 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         same_address_event = next((e for e in same_time_yellow
                                    if _event_addr_core_match(order["address"], e)), None)
         if same_person_event:
-            reason = "同一人、同日期時段，但日曆地址不同。"
+            calendar_label = _event_address_label(same_person_event) or "未標示地址"
+            reason = (
+                f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
+                f"後台地址是「{order['address']}」。"
+            )
             reported_event_ids.add(same_person_event.get("id"))
         elif same_address_event:
             reason = "同地址、同日期時段，但日曆是其他客人。"
@@ -4598,7 +4616,12 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             same_address_orders = [order for order in same_time_orders
                                    if _event_addr_core_match(order["address"], event)]
             if same_person_orders:
-                reason = "同一人、同日期時段，但日曆地址不同。"
+                backend_address = same_person_orders[0]["address"]
+                calendar_label = _event_address_label(event) or "未標示地址"
+                reason = (
+                    f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
+                    f"後台地址是「{backend_address}」。"
+                )
             elif same_address_orders:
                 reason = "同地址、同日期時段，但日曆是其他客人。"
             else:
