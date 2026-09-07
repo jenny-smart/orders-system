@@ -428,8 +428,8 @@ def _is_weekend_or_holiday(d: date) -> bool:
 
 def _count_workdays_before(service_date: date, today: date = None) -> int:
     """
-    計算通知日隔天到服務日前一日之間還剩幾個工作天（不含通知日與服務日）。
-    週六日與例假日不算工作日。
+    計算通知日到服務日前一日之間還剩幾個工作天（不含服務日）。
+    通知日若為工作日則計入；若為週末或例假日，從下一個工作日開始計算。
     例：2026-06-21（日）異動 2026-06-23（二），只算 2026-06-22（一）= 1 天。
     當天/已過去 -> 0
     """
@@ -437,7 +437,7 @@ def _count_workdays_before(service_date: date, today: date = None) -> int:
     if service_date <= today:
         return 0
     days = 0
-    d = today + timedelta(days=1)
+    d = today
     while d < service_date:
         if _is_workday(d):
             days += 1
