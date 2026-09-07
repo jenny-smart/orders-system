@@ -2368,8 +2368,10 @@ def prepare_base_order_data(row, member_payload, address_info, clean_type_id, pe
         "memoProcess": str(member.get("memo_process") or ""),
         "memoFinance": str(member.get("memo_finance") or ""),
         "addressId": str(address_info.get("addressId") or ""),
-        "country_id": str(address_info.get("country_id") or pick("country_id", "12")),
-        "address": str(row["地址"]).strip(),
+        # 縣市／行政區由 country_id 下拉承接；address 只送路街巷號樓。
+        # 禁止退回 12（大安區），否則文山區等地址會被錯加「大安區」前綴。
+        "country_id": str(address_info.get("country_id") or ""),
+        "address": str(address_info.get("submit_address") or row["地址"]).strip(),
         "ping": str(pick("ping", "4")),
         "room": str(pick("room", "0")),
         "bathroom": str(pick("bathroom", "0")),
@@ -2575,6 +2577,15 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
 
     selected_address = str(best_addr.get("address") or target_address).strip()
 
+    # 沿用快速建單的地址拆分規則，明確地址優先於會員舊資料中的錯誤區域值。
+    from quick_order import _split_booking_address
+    address_parts = _split_booking_address(selected_address)
+    if address_parts.get("city") and address_parts.get("district"):
+        if not address_parts.get("country_id"):
+            raise Exception(f"地址無法對應後台行政區：{selected_address}")
+        best_addr["country_id"] = address_parts["country_id"]
+        best_addr["submit_address"] = address_parts["detail"]
+
     geo_lat, geo_lng = geocode_address(selected_address)
     if geo_lat and geo_lng:
         best_addr["lat"] = geo_lat
@@ -2687,6 +2698,8 @@ def process_one_group(session, rows_with_idx, token, gcal_service, region, backe
         system_period,
         mapped,
     )
+    if not str(base_data.get("country_id") or "").strip():
+        raise Exception(f"地址缺少後台行政區，已停止成單：{selected_address}")
 
     # 強制套用查詢地址後取得的區域/車馬費資料
     base_data["fare"] = first_nonzero(best_addr.get("fare"), base_data.get("fare"), default="0")
