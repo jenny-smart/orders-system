@@ -1,11 +1,14 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v3.2
+# 版本：v3.3
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
 # 最後更新：2026-08-27
 #
 # Change Log
+# v3.3
+# - 階段 A 建立「待收款」異動時，同步把服務年月、訂單編號、訂購人姓名與
+#   收款金額新增至同地區 ATM 工作表 I:L。
 # v3.2
 # - 403 權限錯誤直接顯示 Google 服務帳號憑證的 client_email，不再因 gspread 版本差異顯示未知服務帳號。
 # v3.1
@@ -1044,6 +1047,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
         ws.add_rows(needed_rows - ws.row_count)
 
     written = 0
+    written_pending_charges = []
     errors = []
     for i, row in enumerate(rows):
         target_row = start_row + i
@@ -1054,11 +1058,45 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
             ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
+            if row.get("B") == STATUS_PENDING_CHARGE:
+                written_pending_charges.append(row)
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
         except Exception as e:
             errors.append(f"第 {target_row} 列（{row.get('G','')}）寫入失敗：{e}")
 
-    return {"written": written, "errors": errors, "start_row": start_row}
+    atm_result = {"pasted": 0, "start_row": None}
+    if written_pending_charges:
+        try:
+            from . import atm
+
+            atm_rows = []
+            for row in written_pending_charges:
+                service_date_match = re.search(r"(\d{4})[-/.](\d{1,2})", str(row.get("I", "")))
+                year_month = (
+                    f"{service_date_match.group(1)}.{int(service_date_match.group(2)):02d}"
+                    if service_date_match else ""
+                )
+                atm_rows.append({
+                    "year_month": year_month,
+                    "order_no": row.get("G", ""),
+                    "name": row.get("H", ""),
+                    "amount": row.get("N", 0),
+                })
+            atm_result = atm.append_change_order_charges(
+                region=region,
+                rows=atm_rows,
+                ui_logger=ui_logger,
+            )
+        except Exception as exc:
+            errors.append(f"ATM 工作表同步失敗：{exc}")
+
+    return {
+        "written": written,
+        "errors": errors,
+        "start_row": start_row,
+        "atm_pasted": atm_result["pasted"],
+        "atm_start_row": atm_result["start_row"],
+    }
 
 
 # ============================================================

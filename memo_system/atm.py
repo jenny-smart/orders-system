@@ -1231,6 +1231,51 @@ def paste_atm_unpaid_list(region: str, rows: List[Dict], ui_logger=None) -> Dict
     return result
 
 
+def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -> Dict:
+    """把清潔異動的待收款資料追加到同地區 ATM 工作表 I:L。"""
+    log = make_logger(ui_logger)
+    result = {"pasted": 0, "start_row": None}
+    if not rows:
+        return result
+
+    ws = get_atm_worksheet(region)
+    all_values = memo.with_retry(ws.get_all_values)
+
+    last_a_row = max(
+        (idx for idx, row in enumerate(all_values, start=1)
+         if row and str(row[0]).strip()),
+        default=0,
+    )
+    last_unpaid_row = max(
+        (idx for idx, row in enumerate(all_values, start=1)
+         if any(str(value).strip() for value in row[8:12])),
+        default=0,
+    )
+    start_row = max(last_a_row + 5, last_unpaid_row + 1)
+    end_row = start_row + len(rows) - 1
+
+    current_row_count = int(getattr(ws, "row_count", 0) or len(all_values))
+    if end_row > current_row_count:
+        memo.with_retry(ws.add_rows, end_row - current_row_count)
+
+    values = [[
+        row.get("year_month", ""),
+        row.get("order_no", ""),
+        row.get("name", ""),
+        row.get("amount", 0),
+    ] for row in rows]
+    memo.with_retry(
+        ws.update,
+        values=values,
+        range_name=f"I{start_row}:L{end_row}",
+        value_input_option="RAW",
+    )
+
+    result.update({"pasted": len(rows), "start_row": start_row})
+    log(f"✅ 已同步 {len(rows)} 筆待收款資料至 ATM 工作表 I{start_row}:L{end_row}")
+    return result
+
+
 def run_scheduled_unpaid_sync(ui_logger=None) -> Dict:
     """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。"""
     log = make_logger(ui_logger)
