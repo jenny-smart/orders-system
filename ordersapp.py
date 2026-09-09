@@ -1358,7 +1358,7 @@ elif mode == "後台／Google 日曆雙向比對":
             if _backend_missing:
                 st.error(f"⚠️ 後台有、日曆沒有：{len(_backend_missing)} 筆")
                 for _p in _backend_missing:
-                    st.warning(f"訂單 {_p.get('order_no')}：{_p.get('issue')}")
+                    st.warning(_p.get("issue"))
             if _calendar_missing:
                 st.error(f"⚠️ 日曆有、後台沒有：{len(_calendar_missing)} 筆")
                 for _p in _calendar_missing:

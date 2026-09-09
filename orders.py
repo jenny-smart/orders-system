@@ -4554,26 +4554,6 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         if order.get("_matched"):
             continue
 
-        # v2026.08.14：找不到黃色事件時，額外查同時段／同區域是否有「其他顏色
-        # （或根本沒設色）」的事件——這樣才分得出「日曆真的完全沒排」跟
-        # 「其實有排、只是顏色沒被標成黃色」這兩種不同狀況。顏色只彙總計數
-        # （例如「香蕉黃x6、葡萄紫x1」），不逐筆列出，避免同時段候選一多，
-        # 訊息裡出現同一個顏色名稱重複好幾次、反而不好讀。
-        same_time_any_color = [
-            e for e in all_events_by_region.get(order["region"], [])
-            if _event_time_match(order, e)
-        ]
-        if same_time_any_color:
-            yellow_events = [e for e in same_time_any_color if str(e.get("colorId", "")) == COLOR_YELLOW]
-            other_events = [e for e in same_time_any_color if str(e.get("colorId", "")) != COLOR_YELLOW]
-            parts = []
-            if yellow_events:
-                parts.append(f"{len(yellow_events)} 筆是黃色，但同時段訂單數比黃色事件數多，已被其他訂單配走")
-            if other_events:
-                parts.append(f"{len(other_events)} 筆顏色不是黃色（{_color_breakdown(other_events)}）")
-            extra = f"同時段在日曆上共找到 {len(same_time_any_color)} 筆事件：" + "；".join(parts) + "。"
-        else:
-            extra = "同時段在日曆上完全找不到任何事件。"
         same_time_yellow = [
             e for e in calendar_events_by_region.get(order["region"], [])
             if (e.get("id") not in matched_event_ids
@@ -4586,15 +4566,22 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
         if same_person_event:
             calendar_label = _event_address_label(same_person_event) or "未標示地址"
             reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
                 f"同一人、同日期時段，但地址不同：日曆標示「{calendar_label}」，"
                 f"後台地址是「{order['address']}」。"
             )
             reported_event_ids.add(same_person_event.get("id"))
         elif same_address_event:
-            reason = "同地址、同日期時段，但日曆是其他客人。"
+            reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}；"
+                "同地址、同日期時段，但日曆是其他客人。"
+            )
             reported_event_ids.add(same_address_event.get("id"))
         else:
-            reason = "找不到同一人／地址／日期時段完全相符的黃色日曆事件。"
+            reason = (
+                f"後台訂單 {order['order_no']} 是 {order['service_date']} {order['service_time']}，"
+                "日曆找不到同一人、同地址、相同日期與時段的黃色事件。"
+            )
         result["backend_missing_in_calendar"].append({
             "order_no": order["order_no"],
             "name": order["name"],
@@ -4603,11 +4590,7 @@ def run_backend_calendar_consistency_check(env_name, backend_email, backend_pass
             "region": order["region"],
             "service_date": order["service_date"],
             "service_time": order["service_time"],
-            "issue": (
-                f"{reason} 後台訂單 {order['order_no']}（{order['name'] or '姓名不明'}，"
-                f"{order['phone'] or '電話不明'}，{order['region']}，服務日期 "
-                f"{order['service_date']} {order['service_time']}）。{extra}"
-            ),
+            "issue": reason,
         })
 
     # ---------- 方向二：日曆有、後台沒有 ----------
