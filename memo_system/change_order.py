@@ -1,11 +1,25 @@
 # ============================================================
 # 檔名：change_order.py
-# 版本：v2.9
+# 版本：v3.4
 # 模組：清潔異動模組：車馬費 / 異動服務收款 / 異動服務退款
 # 建立日期：2026-06-22
-# 最後更新：2026-08-10
+# 最後更新：2026-08-27
 #
 # Change Log
+# v3.4
+# - 服務異動的工作天、訂單篩選與加減時判斷統一使用台灣時區日期，避免
+#   Streamlit Cloud 在台灣凌晨仍以 UTC 前一天計算。
+# v3.3
+# - 階段 A 建立「待收款」異動時，同步把服務年月、訂單編號、訂購人姓名與
+#   收款金額新增至同地區 ATM 工作表 I:L。
+# v3.2
+# - 403 權限錯誤直接顯示 Google 服務帳號憑證的 client_email，不再因 gspread 版本差異顯示未知服務帳號。
+# v3.1
+# - 儲值金異動成功回填後，B 欄狀態同步完成：待回／待扣儲值金→已扣儲值金，待返儲值金→已返儲值金。
+# - Google Sheet 403 時顯示實際服務帳號 email，方便確認地區試算表編輯權限。
+# v3.0
+# - 回填加收／退款時只更新指定側，另一側狀態與資料完整保留。
+# - 從 Vue purchase JSON 取得真實值；抓不到時停止，避免把樣板占位符寫回。
 # v2.9
 # - 一般客異動費 30%／50% 統一改以「訂單總金額－車馬費」為計算基礎，
 #   不再直接用訂單總金額乘以異動比例。
@@ -101,6 +115,7 @@
   階段 B：sync_pending_rows() → 讀「清潔異動工作表」待處理列 → 回填後台 purchase/edit → 更新 Sheet 狀態
 """
 
+import json
 import re
 import math
 import os
@@ -163,11 +178,16 @@ TAIWAN_PUBLIC_HOLIDAYS = {
 
 
 
+def today_taipei() -> date:
+    """回傳台灣時區今天日期。"""
+    return datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+
 def _today_taipei_str(today: date = None) -> str:
     """回傳台北時區登記日期字串，避免 Streamlit 主機使用 UTC 導致日期少一天。"""
     if today:
         return today.strftime("%Y/%m/%d")
-    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y/%m/%d")
+    return today_taipei().strftime("%Y/%m/%d")
 
 
 def _money_int(value, default: int = 0) -> int:
@@ -207,6 +227,7 @@ _SCOPES = [
 ]
 
 _gspread_client = None
+_service_account_email = ""
 
 
 def _secret_value(key, default=""):
@@ -247,7 +268,7 @@ def _get_gspread_client():
     沒有的話再試 st.secrets["GOOGLE_SERVICE_ACCOUNT"]（整包 JSON 字串）。
     若您 memo.py 用的 key 名稱不同，請把下面兩個 _secret_value(...) 的 key 改成一致即可。
     """
-    global _gspread_client
+    global _gspread_client, _service_account_email
     if _gspread_client is not None:
         return _gspread_client
 
@@ -282,6 +303,7 @@ def _get_gspread_client():
             "區塊或 GOOGLE_SERVICE_ACCOUNT（JSON 字串），命名請跟 memo.py 現有設定一致"
         )
 
+    _service_account_email = str(sa_info.get("client_email", "") or "").strip()
     creds = Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
     _gspread_client = gspread.authorize(creds)
     return _gspread_client
@@ -348,12 +370,19 @@ STATUS_PENDING_CHARGE = "待收款"
 STATUS_PENDING_REFUND = "待退款"
 STATUS_DONE_CHARGE = "已收款"
 STATUS_DONE_REFUND = "已退款"
-STATUS_PENDING_CHARGE_ALIASES = {STATUS_PENDING_CHARGE, "待加收", "待扣儲值金"}
+STATUS_PENDING_CHARGE_ALIASES = {
+    STATUS_PENDING_CHARGE, "待加收", "待回儲值金", "待扣儲值金",
+}
 STATUS_DONE_CHARGE_ALIASES = {STATUS_DONE_CHARGE, "已加收", "已扣儲值金"}
 STATUS_PENDING_REFUND_ALIASES = {STATUS_PENDING_REFUND, "VIP待退券", "待返儲值金"}
 STATUS_DONE_REFUND_ALIASES = {
     STATUS_DONE_REFUND, "已部份退款", "已部分退款", "已全額退款",
     "VIP已退券", "已返儲值金",
+}
+STATUS_AFTER_SYNC = {
+    "待回儲值金": "已扣儲值金",
+    "待扣儲值金": "已扣儲值金",
+    "待返儲值金": "已返儲值金",
 }
 STATUS_STAFF_TIME_CHANGE = {"專員服務時間異動"}
 STATUS_FARE_INVOICE_ONLY = {"車馬費發票"}
@@ -399,12 +428,12 @@ def _is_weekend_or_holiday(d: date) -> bool:
 
 def _count_workdays_before(service_date: date, today: date = None) -> int:
     """
-    計算今天到服務日前一日之間還剩幾個工作天（不含服務日）。
-    週六日與例假日不算工作日；若今天不是工作日，從下一個工作日開始算。
+    計算通知日到服務日前一日之間還剩幾個工作天（不含服務日）。
+    通知日若為工作日則計入；若為週末或例假日，從下一個工作日開始計算。
     例：2026-06-21（日）異動 2026-06-23（二），只算 2026-06-22（一）= 1 天。
     當天/已過去 -> 0
     """
-    today = today or date.today()
+    today = today or today_taipei()
     if service_date <= today:
         return 0
     days = 0
@@ -539,7 +568,7 @@ def fetch_order_basic(keyword: str, session: requests.Session, ui_logger=None, b
 
 def _select_change_order_candidates(parsed: list, today: date = None) -> list:
     """已付款未服務 + 近 2 場已付款已服務，供服務時加減時異動使用。"""
-    today = today or date.today()
+    today = today or today_taipei()
     upcoming = [
         p for p in parsed
         if p.get("is_paid") and p.get("service_date") and p["service_date"] >= today
@@ -667,7 +696,7 @@ def _format_change_fee_j(order: dict, change_fee_info: dict) -> str:
 
 
 def _time_change_timing_label(service_date: date, today: date = None) -> str:
-    today = today or date.today()
+    today = today or today_taipei()
     if service_date and service_date <= today:
         return "當天"
     return "服務前"
@@ -1026,6 +1055,7 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
         ws.add_rows(needed_rows - ws.row_count)
 
     written = 0
+    written_pending_charges = []
     errors = []
     for i, row in enumerate(rows):
         target_row = start_row + i
@@ -1036,11 +1066,45 @@ def append_rows_to_sheet(region: str, rows: list, ui_logger=None):
             ws.update_acell(f"AD{target_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
             ws.update_acell(f"AE{target_row}", "建立異動")
             written += 1
+            if row.get("B") == STATUS_PENDING_CHARGE:
+                written_pending_charges.append(row)
             log(f"✅ 已寫入第 {target_row} 列：{row.get('G', '')}")
         except Exception as e:
             errors.append(f"第 {target_row} 列（{row.get('G','')}）寫入失敗：{e}")
 
-    return {"written": written, "errors": errors, "start_row": start_row}
+    atm_result = {"pasted": 0, "start_row": None}
+    if written_pending_charges:
+        try:
+            from . import atm
+
+            atm_rows = []
+            for row in written_pending_charges:
+                service_date_match = re.search(r"(\d{4})[-/.](\d{1,2})", str(row.get("I", "")))
+                year_month = (
+                    f"{service_date_match.group(1)}.{int(service_date_match.group(2)):02d}"
+                    if service_date_match else ""
+                )
+                atm_rows.append({
+                    "year_month": year_month,
+                    "order_no": row.get("G", ""),
+                    "name": row.get("H", ""),
+                    "amount": row.get("N", 0),
+                })
+            atm_result = atm.append_change_order_charges(
+                region=region,
+                rows=atm_rows,
+                ui_logger=ui_logger,
+            )
+        except Exception as exc:
+            errors.append(f"ATM 工作表同步失敗：{exc}")
+
+    return {
+        "written": written,
+        "errors": errors,
+        "start_row": start_row,
+        "atm_pasted": atm_result["pasted"],
+        "atm_start_row": atm_result["start_row"],
+    }
 
 
 # ============================================================
@@ -1186,6 +1250,21 @@ def _control_context(el) -> str:
     return " ".join(dict.fromkeys(parts))
 
 
+def _extract_purchase_state(soup: BeautifulSoup) -> dict:
+    """從 Vue data() 的 purchase JSON 讀取後台真實值。"""
+    html = str(soup)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\bpurchase\s*:\s*", html):
+        start = match.end()
+        try:
+            value, _ = decoder.raw_decode(html[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def _read_form_state(soup: BeautifulSoup) -> tuple[dict, dict]:
     """
     讀取後台表單現值。checkbox/radio 只有原本 checked 的才放入 form_data，
@@ -1228,6 +1307,25 @@ def _read_form_state(soup: BeautifulSoup) -> tuple[dict, dict]:
             if control["checked"]:
                 form_data[name] = value or "1"
         else:
+            form_data[name] = value
+
+    # radio 與 Vue 綁定欄位的真值不一定反映在靜態 HTML；用 purchase JSON 覆蓋。
+    purchase_state = _extract_purchase_state(soup)
+    if not purchase_state:
+        raise RuntimeError("無法讀取後台 purchase 真實資料，為避免覆蓋加收／退款另一側，停止回填")
+    json_backed_fields = {
+        "isCharge", "chargeDate", "chargePayment", "chargeInvoiceDate",
+        "chargeAmount", "chargeInvoice", "chargeNote",
+        "isRefund", "refundDate", "refundPayment", "refundPayway",
+        "refundAmount", "refundNumber", "refundInvoiceDate",
+        "refundInvoiceAmount", "refundInvoice", "refundNote", "progress",
+    }
+    for name in json_backed_fields:
+        if name in purchase_state:
+            value = purchase_state.get(name)
+            value = "" if value is None else str(value)
+            if re.fullmatch(r"\s*\{\{\s*[^{}]+\s*\}\}\s*", value):
+                value = ""
             form_data[name] = value
 
     return form_data, controls
@@ -1485,7 +1583,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
 
     if status in STATUS_PENDING_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "1", ui_logger=ui_logger)
-        _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
@@ -1507,7 +1604,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_PENDING_REFUND_ALIASES:
-        _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
         _set_radio_value(form_data, controls, "isRefund", "1", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_REFUND_DATE, refund_date,
@@ -1529,7 +1625,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
 
     if status in STATUS_DONE_CHARGE_ALIASES:
         _set_radio_value(form_data, controls, "isCharge", "2", ui_logger=ui_logger)
-        _set_radio_value(form_data, controls, "isRefund", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
                    keywords=["加收日期", "收款日期", "收款時間"], fallback_name="chargeDate", ui_logger=ui_logger)
@@ -1551,7 +1646,6 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_DONE_REFUND_ALIASES:
-        _set_radio_value(form_data, controls, "isCharge", "0", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
 
         refund_amount = _parse_money_value(_sheet_cell(raw, "S"))
@@ -1626,16 +1720,39 @@ def sync_one_to_purchase_edit(item: dict, session: requests.Session, ui_logger=N
     return True
 
 
-def mark_sheet_row_done(region: str, sheet_row: int, kind: str, ui_logger=None):
-    """回填成功後只標記處理時間，不改 B 欄狀態。"""
+def mark_sheet_row_done(region: str, sheet_row: int, status: str, ui_logger=None):
+    """回填成功後標記處理時間；儲值金待處理狀態同步改為完成狀態。"""
     def log(msg):
         if ui_logger:
             ui_logger(msg)
 
     ws = get_worksheet(region)
-    ws.update_acell(f"AD{sheet_row}", datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"))
-    ws.update_acell(f"AE{sheet_row}", "更新系統")
-    log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
+    done_status = STATUS_AFTER_SYNC.get(status, status)
+    update_status = f"更新系統（B欄：{done_status}）"
+    updated_at = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    updates = [
+        {"range": f"AD{sheet_row}", "values": [[updated_at]]},
+        {"range": f"AE{sheet_row}", "values": [[update_status]]},
+    ]
+    if done_status != status:
+        updates.insert(0, {"range": f"B{sheet_row}", "values": [[done_status]]})
+
+    try:
+        ws.batch_update(updates)
+    except gspread.exceptions.APIError as exc:
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 403:
+            account = _service_account_email or "憑證未提供 client_email"
+            raise RuntimeError(
+                f"Google Sheet 無編輯權限（服務帳號：{account}）。"
+                f"請將「{region}」清潔異動試算表分享為編輯者。"
+            ) from exc
+        raise
+
+    if done_status != status:
+        log(f"✅ Sheet 第 {sheet_row} 列 B 欄已由「{status}」改為「{done_status}」，並標記回填時間")
+    else:
+        log(f"✅ Sheet 第 {sheet_row} 列已標記系統回填時間與更新狀態（B 欄狀態不變）")
 
 
 # ============================================================
@@ -1657,7 +1774,7 @@ def sync_pending_rows(region: str, selected_rows: list, session: requests.Sessio
         result["processed"] += 1
         try:
             sync_one_to_purchase_edit(item, session=session, ui_logger=ui_logger)
-            mark_sheet_row_done(region, item["sheet_row"], item["kind"], ui_logger=ui_logger)
+            mark_sheet_row_done(region, item["sheet_row"], item["status"], ui_logger=ui_logger)
             result["success"] += 1
         except Exception as e:
             result["failed"] += 1

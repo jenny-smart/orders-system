@@ -1,10 +1,15 @@
 # ============================================================
 # 檔名：ordersapp.py
-# 版本：v8.76
+# 版本：v8.78
 # 模組：服務訂單系統主畫面
-# 最後更新：2026-08-14
+# 最後更新：2026-09-06
 #
 # Change Log
+# v8.78
+# - 修正 Streamlit 更新後仍快取舊版 orders.py 時，主程式直接匯入新函式而啟動失敗。
+# - 缺少必要函式時自動重載 orders.py；若部署檔案確實不完整，顯示缺少的函式名稱。
+# v8.77
+# - 補齊「批次建單優化」「檸檬保留單建單」「檸檬保留單取消」選單與路由。
 # v8.76
 # - 功能選單全面重新分組與精簡文字說明：原本 24 項依開發先後順序累積，
 #   讀起來凌亂，部分說明落落長。改成依使用情境分成 6 大類依序排列：
@@ -385,16 +390,64 @@
 # v7.7 - 儲值金補價差拆兩段按鈕
 # ============================================================
 # -*- coding: utf-8 -*-
-__version__ = "8.76"
+__version__ = "8.78"
 
 import html
+import importlib
 import re
 import json
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import date, timedelta, datetime
 
-from orders import run_process_web, get_region_by_address, run_standalone_consistency_check, run_backend_calendar_consistency_check, get_calendar_compare_allowed_region, find_orders_without_line_link, find_pending_stored_value_orders, add_bonus_note_to_order, apply_bonus_notes, load_worksheet, fetch_member_edit_page, submit_member_preferences, fetch_recent_service_records
+try:
+    import orders as orders_core
+except Exception as e:
+    st.error(f"orders.py 載入失敗：{type(e).__name__}: {e}")
+    st.stop()
+
+_REQUIRED_ORDERS_NAMES = [
+    "run_process_web",
+    "get_region_by_address",
+    "run_standalone_consistency_check",
+    "run_backend_calendar_consistency_check",
+    "get_calendar_compare_allowed_region",
+    "find_orders_without_line_link",
+    "find_pending_stored_value_orders",
+    "add_bonus_note_to_order",
+    "apply_bonus_notes",
+    "load_worksheet",
+    "fetch_member_edit_page",
+    "submit_member_preferences",
+    "fetch_recent_service_records",
+]
+
+# Streamlit 可能在 GitHub 更新後沿用記憶體中的舊版 orders 模組。只有在偵測到
+# 函式不完整時才重載一次，避免新版 ordersapp.py 因直接 from-import 而啟動失敗。
+_missing_orders_names = [
+    name for name in _REQUIRED_ORDERS_NAMES if not hasattr(orders_core, name)
+]
+if _missing_orders_names:
+    try:
+        orders_core = importlib.reload(orders_core)
+    except Exception as e:
+        st.error(f"orders.py 重新載入失敗：{type(e).__name__}: {e}")
+        st.stop()
+    _missing_orders_names = [
+        name for name in _REQUIRED_ORDERS_NAMES if not hasattr(orders_core, name)
+    ]
+
+if _missing_orders_names:
+    st.error(
+        "orders.py 目前版本不完整，請確認 Streamlit 已部署 GitHub main 最新版本。"
+        + "\n缺少："
+        + "、".join(_missing_orders_names)
+    )
+    st.stop()
+
+for _name in _REQUIRED_ORDERS_NAMES:
+    globals()[_name] = getattr(orders_core, _name)
+
 from env import GOOGLE_CALENDAR_MAP
 from weekend_reminders import (
     upcoming_weekend, previous_workday, find_paid_weekend_orders,
@@ -405,6 +458,9 @@ from weekend_reminders import (
 from cleaner_reminders import find_paid_cleaner_reminders
 from accounts import ACCOUNTS
 from memo_system.ui import render_memo_system
+import batch_booking_optimized
+import cloud_batch_booking_ui
+import reserve_menu
 
 try:
     import quick_order as qo
@@ -819,6 +875,12 @@ FUNCTION_OPTIONS = [
     # ---------- A. 建單／成單流程 ----------
     ("批次建單：從 Google Sheet 逐列建立訂單、寄確認信、同步日曆。",
      "orders", "批次建單（Google Sheet）"),
+    ("批次建單優化：會員一次選日期區間與多個時段，集中查班後批次建立訂單。",
+     "orders", "批次建單優化"),
+    ("批次建單優化＋雲端批次成單：沿用批次優化核心，由雲端背景持續成單至完成。",
+     "orders", "批次建單優化＋雲端批次成單"),
+    ("檸檬保留單建單：依日期區間、時段與保留率分析班表並批次成立保留單。",
+     "orders", "檸檬保留單建單"),
     ("建立舊客訂單：電話查會員、帶入歷史資料建單；需求搜尋整合在此流程內。",
      "orders", "建立舊客訂單"),
     ("建立新客訂單：貼上制式文字拆成欄位，供客服修改後複製，不直接送單。",
@@ -832,6 +894,8 @@ FUNCTION_OPTIONS = [
     # ---------- B. 訂單附屬功能 ----------
     ("取消訂單：依電話、服務月份／日期區間與付款狀態搜尋訂單，處理退款與備註。",
      "orders", "取消訂單"),
+    ("檸檬保留單取消：依期間、複選時段與客人備註安全篩選並批次取消保留單。",
+     "orders", "檸檬保留單取消"),
     ("VIP 訂單／Google 日曆同步：同時查詢後台訂單與 Google 日曆，支援異動日期／時段、"
      "取消／暫停、新增或修改日曆事件。",
      "orders", "VIP 訂單／Google 日曆同步"),
@@ -893,11 +957,11 @@ _MEMO_SECTION_MAP = {
 # 改選功能項目，不會誤跑到任何功能。
 _CATEGORY_HEADERS_BY_INDEX = {
     0: "A. 建單／成單流程",
-    6: "B. 訂單附屬功能",
-    12: "C. 稽核比對工具",
-    15: "D. LINE 通知／提醒",
-    18: "E. 會員／客戶管理",
-    21: "F. 財務功能",
+    9: "B. 訂單附屬功能",
+    16: "C. 稽核比對工具",
+    19: "D. LINE 通知／提醒",
+    22: "E. 會員／客戶管理",
+    25: "F. 財務功能",
 }
 _menu_display_options = []
 _menu_option_targets = []  # 與 _menu_display_options 一一對應；None 代表該列是標題列
@@ -935,6 +999,22 @@ if _system_key == "memo":
         shared_backend_password=backend_password,
         shared_env=env,
     )
+    st.stop()
+
+if mode == "批次建單優化":
+    batch_booking_optimized.render(backend_email, backend_password, env)
+    st.stop()
+
+if mode == "批次建單優化＋雲端批次成單":
+    cloud_batch_booking_ui.render(env)
+    st.stop()
+
+if mode == "檸檬保留單建單":
+    reserve_menu.render_reserve_create(backend_email, backend_password, env)
+    st.stop()
+
+if mode == "檸檬保留單取消":
+    reserve_menu.render_reserve_cancel(backend_email, backend_password, env)
     st.stop()
 
 # =========================================================
@@ -1121,23 +1201,24 @@ if mode == "批次建單（Google Sheet）":
         total_fail = 0
         total_processed = 0
         with st.spinner("執行中，請稍候…"):
-            for row_no in target_rows:
-                ui_log(f"▶ 開始執行第 {row_no} 列…")
-                try:
-                    result = run_process_web(
-                        env_name=env, region=region,
-                        backend_email=backend_email.strip(), backend_password=backend_password.strip(),
-                        sheet_name=sheet_name.strip(), start_row=row_no, end_row=row_no,
-                        selected_actions=selected_actions, logger=ui_log,
-                        allow_auto_lemon_shift=batch_allow_auto_lemon,
-                    )
-                    if isinstance(result, dict):
-                        total_success += result.get("success_count", 0)
-                        total_fail += result.get("fail_count", 0)
-                        total_processed += result.get("total_processed", 0)
-                except Exception as e:
-                    total_fail += 1
-                    ui_log(f"❌ 第 {row_no} 列失敗：{e}")
+            row_label = "、".join(map(str, target_rows))
+            ui_log(f"▶ 指定列 {row_label}，依列號逐筆單筆成單，不分組…")
+            try:
+                result = run_process_web(
+                    env_name=env, region=region,
+                    backend_email=backend_email.strip(), backend_password=backend_password.strip(),
+                    sheet_name=sheet_name.strip(), start_row=min(target_rows), end_row=max(target_rows),
+                    selected_actions=selected_actions, logger=ui_log,
+                    allow_auto_lemon_shift=batch_allow_auto_lemon,
+                    selected_rows=target_rows,
+                )
+                if isinstance(result, dict):
+                    total_success += result.get("success_count", 0)
+                    total_fail += result.get("fail_count", 0)
+                    total_processed += result.get("total_processed", 0)
+            except Exception as e:
+                total_fail += len(target_rows)
+                ui_log(f"❌ 批次執行失敗：{e}")
         ui_log("===== 建單流程執行完成 =====")
         ui_log("===== 全部執行完成 =====")
 
@@ -1219,11 +1300,14 @@ elif mode == "後台／Google 日曆雙向比對":
         "以 Google 日曆事件的時間與顏色為比對基準（沿用既有慣例：紫色＝未安排、"
         "黃色＝已安排、綠色＝暫停），只有黃色事件代表「已安排／應該已成單」，"
         "才會拿來跟後台已付款訂單互相比對。",
+        "後台反查以該月份日曆曾出現的人員為母名單，非日曆管理客戶不列異常。",
+        "日曆姓名後方的「-XXXX」視為地址標籤，例如「陳靜萱-文山區」會和後台文山區地址配對。",
         "方向一（後台有、日曆沒有）：後台這段服務日期區間內的已付款訂單，"
         "找不到同一人／地址／日期時段完全相符的黃色日曆事件。",
         "方向二（日曆有、後台沒有）：日曆這段期間的黃色事件，找不到日期／時段"
         "且同一人／地址／日期時段相符的後台已付款訂單。",
         "後台若同一人／地址／日期時段出現多筆訂單，也會另外列為異常。",
+        "同一筆不一致只會顯示一次，不會在兩個方向重複列錯。",
         "只能比對已設定 Google Calendar ID 的區域（目前為：" + "、".join(GOOGLE_CALENDAR_MAP.keys()) + "）。",
     ])
 
@@ -1274,7 +1358,7 @@ elif mode == "後台／Google 日曆雙向比對":
             if _backend_missing:
                 st.error(f"⚠️ 後台有、日曆沒有：{len(_backend_missing)} 筆")
                 for _p in _backend_missing:
-                    st.warning(f"訂單 {_p.get('order_no')}：{_p.get('issue')}")
+                    st.warning(_p.get("issue"))
             if _calendar_missing:
                 st.error(f"⚠️ 日曆有、後台沒有：{len(_calendar_missing)} 筆")
                 for _p in _calendar_missing:
