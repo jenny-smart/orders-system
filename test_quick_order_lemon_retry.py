@@ -48,3 +48,45 @@ class LemonRetryTest(unittest.TestCase):
              patch.object(q.orders, 'ensure_lemon_cleaner_shifts', return_value={'success': True}) as batch:
             q.ensure_lemon_cleaner_shifts('session', 'base', '2026-09-26', '09:00-12:00', '2')
             batch.assert_called_once_with('session', 'base', '2026-09-26', '09:00-12:00', '2')
+
+    def test_retry_refreshes_correct_payment_route(self):
+        for payway in ('儲值金', '信用卡', 'ATM'):
+            with self.subTest(payway=payway), \
+                 patch.object(q.orders, 'get_all_sections_raw', side_effect=['[]', AVAILABLE]), \
+                 patch.object(q, 'ensure_lemon_cleaner_shifts', return_value={'success': True}), \
+                 patch.object(q, '_get_booking_token_for_payway', return_value='fresh') as refresh:
+                q._query_booking_slot_with_lemon_retry('s', 'base', payway, {'person': '2'}, 'old', SLOT, True)
+                refresh.assert_called_once_with('s', 'base', payway)
+
+    def test_makeup_orders_forward_auto_shift_switch_to_shared_order(self):
+        ctx = {'region': '台北', 'lookup': {}, 'address': '地址', 'member': {},
+               'plan': {'coupon_a': 100, 'coupon_b': 100}, 'today_str': '2026-09-14',
+               'date_e': '2026-10-14', 'prefix_a': 'a', 'prefix_b': 'b'}
+        for fn in (q.stored_value_makeup_create_stored_order, q.stored_value_makeup_create_paid_order):
+            for enabled in (False, True):
+                with self.subTest(fn=fn.__name__, enabled=enabled), \
+                     patch.object(q, '_stored_value_makeup_context', return_value=ctx), \
+                     patch.object(q, 'create_coupon', return_value={'coupon_code': 'test'}), \
+                     patch.object(q, 'quick_create_order', side_effect=RuntimeError('shared order')) as create:
+                    with self.assertRaisesRegex(RuntimeError, 'shared order'):
+                        fn(env_name='dev', backend_email='', backend_password='', phone='',
+                           clean_type_id='1', service_date='2026-09-26', period_s='09:00-12:00',
+                           hour='3', person='2', allow_auto_lemon_shift=enabled)
+                    self.assertEqual(create.call_args.kwargs['allow_auto_lemon_shift'], enabled)
+
+    def test_conversion_uses_shared_order_without_separate_address_lookup(self):
+        class ReachedSharedOrder(BaseException):
+            pass
+        stage = {'lemon_result_a': {'success': True}, 'session': object(), 'base_url': 'base',
+                 'env_name': 'dev', 'order_no_a': 'TT0001', 'address_a': '新地址', 'payway_a': '儲值金',
+                 'region_a': '台北', 'clean_type_id': '1', 'lookup_result': {},
+                 'member_payload': {'member': {}}, 'service_amount_a_int': 0, 'person_a': '2'}
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), \
+                 patch.object(q, 'geocode_address', side_effect=AssertionError('separate geocode')), \
+                 patch.object(q, 'quick_create_order', side_effect=ReachedSharedOrder) as create:
+                with self.assertRaises(ReachedSharedOrder):
+                    q.convert_order_stage2_create_new_orders(stage, [{'date_s': '2026-09-26',
+                        'period_s': '09:00-12:00', 'hour': '3', 'person': '2', 'allow_lemon': enabled}])
+                self.assertEqual(create.call_args.kwargs['allow_auto_lemon_shift'], enabled)
+                self.assertEqual(create.call_args.kwargs['address'], '新地址')

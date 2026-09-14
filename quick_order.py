@@ -2822,25 +2822,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
     service_amount_a_int = stage1_result["service_amount_a_int"]
     person_a = stage1_result["person_a"]
 
-    member = member_payload.get("member", {})
-    best_addr = pick_best_address_info(member_payload, address_a)
-    if not best_addr:
-        raise Exception(f"找不到地址資料：{address_a}")
-    selected_address = str(best_addr.get("address") or address_a).strip()
-    geo_lat, geo_lng = geocode_address(selected_address)
-    if geo_lat and geo_lng:
-        best_addr["lat"] = geo_lat
-        best_addr["lng"] = geo_lng
-    token_for_calc = _get_booking_token_for_payway(session, base_url, payway_a)
-    addr_check = check_contain(
-        session, member.get("member_id", ""), selected_address,
-        best_addr.get("lat", ""), best_addr.get("lng", ""), token_for_calc, clean_type_id,
-    )
-    if addr_check:
-        area_info = addr_check.get("area") if isinstance(addr_check.get("area"), dict) else {}
-        if area_info:
-            best_addr["area_id"] = area_info.get("area_id", best_addr.get("area_id"))
-            best_addr["company_id"] = area_info.get("company_id", best_addr.get("company_id"))
+    # 地址與補班由下方 quick_create_order 共用流程處理。
 
     today_str = date.today().strftime("%Y-%m-%d")
     new_order_results = []
