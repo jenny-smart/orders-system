@@ -32,6 +32,8 @@ on:
     paths:
       - "*.py"
       - "!env.py"
+      - "requirements.txt"
+      - "packages.txt"
       - "memo_system/*.py"
       - "!memo_system/env.py"
   workflow_dispatch: {}
@@ -77,11 +79,17 @@ jobs:
             echo "已同步：$f"
           done
 
+      - name: 同步後台地址瀏覽器依賴
+        run: |
+          touch tool-system/requirements.txt tool-system/packages.txt
+          grep -qxF 'playwright>=1.48,<2' tool-system/requirements.txt || printf '\nplaywright>=1.48,<2\n' >> tool-system/requirements.txt
+          grep -qxF 'chromium' tool-system/packages.txt || printf '\nchromium\n' >> tool-system/packages.txt
+
       - name: 檢查是否有變動
         id: diff
         run: |
           cd tool-system
-          git add tools/orders_system
+          git add tools/orders_system requirements.txt packages.txt
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
