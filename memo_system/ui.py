@@ -1679,9 +1679,10 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             for item in pending:
                 status = item.get("status") or ("待收款" if item["kind"] == "charge" else "待退款")
                 checked = st.checkbox(f"{item['order_no']}（{status}，Sheet 第 {item['sheet_row']} 列）", value=True, key=f"co_pick_{item['sheet_row']}")
-                detail = f"H 欄姓名：{item.get('customer_name','')}　｜　J 欄：{item.get('j_note','')}"
+                detail = f"H 欄客戶姓名：{item.get('customer_name','')}　｜　J 欄：{item.get('j_note','')}"
                 if item.get("kind") == "refund": detail += f"　｜　Y 欄：{item.get('refund_invoice_type','')}"
                 st.caption(detail)
+                st.caption(f"K 欄註記：{item.get('k_note','') or '（空白）'}")
                 if checked: selected.append(item)
             st.metric("已勾選筆數", len(selected))
             st.markdown('<div class="warn-strip"><b>送出前請確認</b><ul><li>金額正確</li><li>日期正確</li><li>B 欄狀態正確</li></ul></div>', unsafe_allow_html=True)
