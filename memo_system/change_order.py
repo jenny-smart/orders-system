@@ -461,6 +461,14 @@ def _extract_service_date(date_cell_text: str):
         return None
 
 
+def _member_phone_from_link(tag):
+    from urllib.parse import urlparse, parse_qs
+    if tag is None:
+        return ''
+    keyword = parse_qs(urlparse(tag.get('href', '')).query).get('keyword', [''])[0]
+    return keyword if re.fullmatch(r'0[0-9]{8,9}', keyword) else ''
+
+
 def _parse_order_row(row) -> dict:
     """ 解析 /purchase 查詢結果頁裡的單一筆 <tr>，回傳訂單基本資料 dict（找不到訂單編號則回傳 None） """
     checkbox = row.select_one('input[name="purchase_id[]"]')
@@ -518,6 +526,7 @@ def _parse_order_row(row) -> dict:
         "purchase_id": purchase_id,
         "order_no": order_no,
         "customer_name": customer_name,
+        "phone": _member_phone_from_link(name_tag),
         "line_url": line_url,
         "period_text": period_text,
         "service_hours": _parse_period_hours(period_text),
@@ -610,6 +619,7 @@ def fetch_upcoming_paid_orders_by_phone(phone: str, session: requests.Session, u
     for row in rows:
         info = _parse_order_row(row)
         if info:
+            info["phone"] = phone
             parsed.append(info)
 
     result = _select_change_order_candidates(parsed)
@@ -724,7 +734,7 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
 
     workday_note = _workday_note({"workdays": workdays})
 
-    if order.get("payway") == "儲值金":
+    if pricing_tier(order) == "vip":
         hours = order.get("service_hours", 0)
         person = change_person or order.get("cleaner_count", 0)
         unit = (hours * person) / 2
@@ -745,6 +755,9 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
     else:
         rate = 0.5 if tier == "near" else (0.3 if tier == "far" else 0)
         service_amount = get_service_amount(order)
+        from service_pricing import load_config, unit_price
+        if load_config()['enabled']:
+            service_amount = round(unit_price(service_date, pricing_tier(order)) * order.get('service_hours', 0) * (change_person or order.get('cleaner_count', 0)))
         change_fee = round(service_amount * rate)
         if tier == "free":
             calc_note = (
@@ -753,8 +766,7 @@ def calc_change_fee(order: dict, service_date: date, change_person: int = None,
             )
         else:
             calc_note = (
-                f"{workday_note}，一般客：(總金額{_money_int(order.get('total', 0))} "
-                f"− 車馬費{get_travel_fee(order)}) = {service_amount} × "
+                f"{workday_note}，非VIP：服務計費基礎 {service_amount} × "
                 f"{int(rate*100)}% = ${change_fee}"
             )
         unit = None
@@ -777,9 +789,45 @@ def calc_refund_amount(order: dict, change_fee: int) -> int:
     return max(get_service_amount(order) - _money_int(change_fee), 0)
 
 
+def refresh_pricing_balance(order, session):
+    """Query the account before fee calculation; never infer VIP from payment."""
+    from service_pricing import load_config, account_balance
+    if not load_config()['enabled']:
+        return
+    phone = order.get('phone', '')
+    if not phone:
+        raise ValueError('此訂單查無會員電話，請改用電話查詢後試算')
+    response = session.get(f'{BASE_URL}/booking/single', timeout=20)
+    response.raise_for_status()
+    token_tag = BeautifulSoup(response.text, 'html.parser').select_one('input[name="_token"]')
+    if not token_tag:
+        raise ValueError('會員餘額查詢登入失效，請重新登入')
+    response = session.post(f'{BASE_URL}/ajax/get_member', data={
+        '_token': token_tag.get('value', ''), 'phone': phone, 'clean_type_id': '1',
+    }, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get('return_code') != '0000':
+        raise ValueError('會員餘額查詢失敗')
+    order['pricing_balance'] = str(account_balance(payload))
+
+
+def pricing_tier(order):
+    from service_pricing import load_config, customer_tier
+    if load_config()['enabled']:
+        return customer_tier('existing', order.get('pricing_balance'))
+    return 'vip' if order.get('payway') == '儲值金' else 'regular'
+
+
+def day_type_price_difference(service_date, order):
+    from service_pricing import unit_price
+    tier = pricing_tier(order)
+    return unit_price(service_date, tier, weekend=True) - unit_price(service_date, tier, weekend=False)
+
+
 def _customer_type_from_order(order: dict) -> str:
     """Google Sheet F 欄客戶類別：付款方式為儲值金寫 VIP，其他一律寫一般客。"""
-    return "VIP" if str((order or {}).get("payway") or "").strip() == "儲值金" else "一般客"
+    return "VIP" if pricing_tier(order or {}) == "vip" else "一般客"
 
 
 # ============================================================
@@ -856,13 +904,14 @@ TIME_RATE_WEEKEND = 700  # 週末／例假日每人時
 TIME_RATE_DAY_TYPE_DIFF = TIME_RATE_WEEKEND - TIME_RATE_WEEKDAY  # 平日/週末互轉每人時差額
 
 
-def calc_time_change_fee(service_date: date, hours: float, person: int) -> dict:
+def calc_time_change_fee(service_date: date, hours: float, person: int, order=None) -> dict:
     """
     加時／減時金額試算：平日每人時 $600，週末／例假日每人時 $700。
     回傳 dict: {amount, rate, is_weekend, calc_note}
     """
     is_weekend = _is_weekend_or_holiday(service_date) if service_date else False
-    rate = TIME_RATE_WEEKEND if is_weekend else TIME_RATE_WEEKDAY
+    from service_pricing import unit_price
+    rate = unit_price(service_date, pricing_tier(order or {}), weekend=is_weekend)
     amount = round((hours or 0) * (person or 0) * rate)
     day_label = "週末/例假日" if is_weekend else "平日"
     calc_note = f"{day_label}：{hours}小時 × {person}人 × ${rate}/人時 = ${amount}"

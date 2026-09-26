@@ -1430,6 +1430,10 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
     def apply_refund_fee_on_service_amount(order, fee_info):
         info = dict(fee_info or {})
         workdays = int(info.get("workdays", 0) or 0)
+        from service_pricing import load_config
+        if load_config()['enabled']:
+            info['refund_amount'] = max(change_order.get_service_amount(order) - info['change_fee'], 0)
+            return info
         if (order or {}).get("payway") == "儲值金":
             return info
         total = _order_money(order, "total", 0)
@@ -1553,7 +1557,8 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             manual_amount = None
             if is_manual_refund: manual_amount = st.number_input("退款金額", min_value=0, step=50, value=0, key="co_manual_amount")
         with c2:
-            customer_type = st.selectbox("客戶類別", ["一般", "VIP"], key="co_customer_type")
+            customer_type = "一般"
+            st.caption("啟用自訂價格後，客戶類別依會員儲值金（含購物金）餘額自動判定。")
             default_service_date = selected_orders[0].get("service_date") or change_order.today_taipei()
             service_date_input = st.date_input("服務日期（用於計算工作天數／平日假日）", value=default_service_date, key="co_service_date")
             service_note = st.text_input("後台備註（寫入 K 欄）", placeholder="例：客通知停水異動服務", key="co_service_note")
@@ -1564,21 +1569,22 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             try:
                 co_log("===== 開始試算 ====="); calc_rows = []
                 for order in selected_orders:
+                    change_order.refresh_pricing_balance(order, get_session(ui_logger=co_log))
                     if scenario == "僅開車馬費發票":
                         calc_rows.append(change_order.build_fare_row(order, service_date=service_date_input)); continue
                     if scenario == "加時(待收款)":
-                        time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
+                        time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person, order=order)
                         row = change_order.build_addtime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
                     if scenario == "減時(待退款)":
-                        time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person)
+                        time_fee_info = change_order.calc_time_change_fee(service_date_input, hours=change_hours, person=change_person, order=order)
                         row = change_order.build_reducetime_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)
                         calc_rows.append(apply_time_change_label(row, scenario, time_change_timing)); continue
                     if scenario == "異動平日轉週末(待收款)":
-                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.TIME_RATE_DAY_TYPE_DIFF, label="平日轉週末每人時差額")
+                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.day_type_price_difference(service_date_input, order), label="平日轉週末每人時差額")
                         calc_rows.append(change_order.build_weekday_to_weekend_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "異動週末轉平日(待退款)":
-                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.TIME_RATE_DAY_TYPE_DIFF, label="週末轉平日每人時差額")
+                        time_fee_info = change_order.calc_flat_person_hour_fee(hours=order.get("service_hours", 0), person=order.get("cleaner_count", 0), rate=change_order.day_type_price_difference(service_date_input, order), label="週末轉平日每人時差額")
                         calc_rows.append(change_order.build_weekend_to_weekday_row(order, time_fee_info, service_note, customer_type=customer_type, service_date=service_date_input)); continue
                     if scenario == "客訴(待退款)":
                         calc_rows.append(change_order.build_manual_refund_row(order, manual_amount, change_order.TYPE_COMPLAINT_REFUND, service_note, customer_type=customer_type, service_date=service_date_input)); continue
