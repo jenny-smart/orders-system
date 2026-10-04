@@ -36,6 +36,11 @@ on:
         required: false
         default: "false"
         type: string
+      retry_failed:
+        description: Confirm adjustments and retry failed rows
+        required: false
+        default: "false"
+        type: boolean
 concurrency:
   group: optimized-cloud-batch-booking-prod
   cancel-in-progress: false
@@ -73,3 +78,4 @@ jobs:
           --filter-mode "${{ inputs.filter_mode }}"
           --region "${{ inputs.region }}"
           --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
+          --retry-failed "${{ inputs.retry_failed }}"
