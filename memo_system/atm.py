@@ -228,8 +228,13 @@ def _get_gspread_client():
     except Exception:
         local_credentials_file = ""
     credentials_file = str(local_credentials_file or memo.GOOGLE_SERVICE_ACCOUNT_FILE).strip()
+    from pathlib import Path
+    credentials_path = Path(credentials_file).expanduser()
+    if not credentials_path.is_absolute() and not credentials_path.is_file():
+        from accounts import LOCAL_ACCOUNTS_FILE
+        credentials_path = LOCAL_ACCOUNTS_FILE.parent / credentials_path
     creds = Credentials.from_service_account_file(
-        credentials_file,
+        str(credentials_path),
         scopes=scopes,
     )
     return gspread.authorize(creds)
@@ -1276,7 +1281,7 @@ def append_change_order_charges(region: str, rows: List[Dict], ui_logger=None) -
     return result
 
 
-def run_scheduled_unpaid_sync(ui_logger=None) -> Dict:
+def run_scheduled_unpaid_sync(ui_logger=None, date_until: Optional[str] = None) -> Dict:
     """沿用 ATM 對帳查詢／貼上功能，排程同步台北與台中待付款清單。"""
     log = make_logger(ui_logger)
     results = {}
@@ -1300,12 +1305,16 @@ def run_scheduled_unpaid_sync(ui_logger=None) -> Dict:
 
             memo.set_runtime_credentials(email, password)
             session = memo.login(ui_logger=ui_logger)
-            rows = search_atm_unpaid_orders(session=session, ui_logger=ui_logger)
-            results[region] = paste_atm_unpaid_list(
-                region=region,
-                rows=rows,
-                ui_logger=ui_logger,
-            )
+            try:
+                rows = search_atm_unpaid_orders(
+                    session=session, date_until=date_until or today_tw().isoformat(),
+                    ui_logger=ui_logger,
+                )
+                results[region] = paste_atm_unpaid_list(
+                    region=region, rows=rows, ui_logger=ui_logger,
+                )
+            finally:
+                session.close()
         except Exception as exc:
             errors.append(f"{region}：{exc}")
             log(f"❌ {region}：{exc}")
@@ -1320,4 +1329,5 @@ if __name__ == "__main__":
 
     if "--scheduled-unpaid" not in sys.argv:
         raise SystemExit("請指定 --scheduled-unpaid")
-    run_scheduled_unpaid_sync()
+    from .atm_schedule import main
+    main()

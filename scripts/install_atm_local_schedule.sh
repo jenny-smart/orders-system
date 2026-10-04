@@ -37,14 +37,25 @@ payload = {
     "EnvironmentVariables": {
         "LEMON_ACCOUNTS_FILE": accounts_file,
     },
-    "StartCalendarInterval": [
-        {"Hour": 8, "Minute": 0},
-        {"Hour": 15, "Minute": 0},
-    ],
+    "StartCalendarInterval": [],
     "StandardOutPath": log_path,
     "StandardErrorPath": log_path,
     "ProcessType": "Background",
 }
+import os
+os.chdir(repo_dir)
+sys.path.insert(0, repo_dir)
+from memo_system.atm_schedule import load_config, scheduled_slots
+config, calendar = load_config()
+from datetime import datetime
+from zoneinfo import ZoneInfo
+assert datetime.now(ZoneInfo(config["timezone"])).date().isoformat() in calendar["days"], "請先更新辦公日曆"
+payload["StartCalendarInterval"] = [
+    {"Hour": slot // 60, "Minute": slot % 60}
+    for slot in scheduled_slots(config)
+]
+if os.getenv("ATM_SCHEDULE_CONFIG"):
+    payload["EnvironmentVariables"]["ATM_SCHEDULE_CONFIG"] = os.environ["ATM_SCHEDULE_CONFIG"]
 with open(plist_path, "wb") as handle:
     plistlib.dump(payload, handle)
 PY
@@ -52,6 +63,6 @@ PY
 launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$UID" "$PLIST_PATH"
 
-echo "已安裝 ATM 本機排程：每日 08:00、15:00"
+echo "已安裝 ATM 本機排程：依設定檔執行，週末／國定假日／補假自動略過"
 echo "帳密來源：$ACCOUNTS_FILE"
 echo "執行記錄：$LOG_PATH"
