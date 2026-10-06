@@ -1561,6 +1561,7 @@ def render_memo_system(forced_main_section=None, shared_backend_email=None, shar
             st.caption("啟用自訂價格後，客戶類別依會員儲值金（含購物金）餘額自動判定。")
             default_service_date = selected_orders[0].get("service_date") or change_order.today_taipei()
             service_date_input = st.date_input("服務日期（用於計算工作天數／平日假日）", value=default_service_date, key="co_service_date")
+            st.caption("異動超過台灣時間 17:30，視為次一工作天處理；週末及例假日不計入工作天。")
             service_note = st.text_input("後台備註（寫入 K 欄）", placeholder="例：客通知停水異動服務", key="co_service_note")
 
         calc_btn = st.button("🧮 試算", use_container_width=True, disabled=not st.session_state.credentials_ready)
