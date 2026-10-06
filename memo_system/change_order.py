@@ -119,9 +119,9 @@ import json
 import re
 import math
 import os
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 from bs4 import BeautifulSoup
@@ -426,14 +426,31 @@ def _is_weekend_or_holiday(d: date) -> bool:
     return not _is_workday(d)
 
 
-def _count_workdays_before(service_date: date, today: date = None) -> int:
+def _change_processing_date(notified_at: Union[date, datetime] = None) -> date:
+    """台灣時間超過 17:30，或非工作日通知，順延至下一工作日。"""
+    notified_at = notified_at if notified_at is not None else datetime.now(ZoneInfo("Asia/Taipei"))
+    if isinstance(notified_at, datetime):
+        if notified_at.tzinfo is not None:
+            notified_at = notified_at.astimezone(ZoneInfo("Asia/Taipei"))
+        processing_date = notified_at.date()
+        if notified_at.time() > time(17, 30):
+            processing_date += timedelta(days=1)
+    else:
+        processing_date = notified_at
+    while not _is_workday(processing_date):
+        processing_date += timedelta(days=1)
+    return processing_date
+
+
+def _count_workdays_before(service_date: date, today: Union[date, datetime] = None) -> int:
     """
     計算通知日到服務日前一日之間還剩幾個工作天（不含服務日）。
-    通知日若為工作日則計入；若為週末或例假日，從下一個工作日開始計算。
+    超過台灣時間 17:30 或遇週末、例假日，以次一工作日為處理日。
+    處理日若為工作日則計入；傳入純日期時視為當日上班時間。
     例：2026-06-21（日）異動 2026-06-23（二），只算 2026-06-22（一）= 1 天。
     當天/已過去 -> 0
     """
-    today = today or today_taipei()
+    today = _change_processing_date(today)
     if service_date <= today:
         return 0
     days = 0
@@ -718,7 +735,7 @@ def calc_fare(order: dict) -> int:
 
 
 def calc_change_fee(order: dict, service_date: date, change_person: int = None,
-                     today: date = None) -> dict:
+                     today: Union[date, datetime] = None) -> dict:
     """
     依「服務日距今工作天數」+「客戶類別（儲值金/一般）」計算異動費。
     change_person / change_hours：若是儲值金客，異動的人數與時數（若未提供，預設用原訂單人數與時數）
