@@ -385,7 +385,7 @@ STATUS_AFTER_SYNC = {
     "待返儲值金": "已返儲值金",
 }
 STATUS_STAFF_TIME_CHANGE = {"專員服務時間異動"}
-STATUS_FARE_INVOICE_ONLY = {"車馬費發票"}
+STATUS_FARE_INVOICE_ONLY = {"車馬費發票", "已處理發票"}
 SYNC_STATUSES = {
     *STATUS_PENDING_CHARGE_ALIASES,
     *STATUS_PENDING_REFUND_ALIASES,
@@ -1558,6 +1558,8 @@ def _row_amount(row: list, status: str) -> str:
         return _sheet_cell(row, "N")
     if _row_kind(status) == "refund":
         return _sheet_cell(row, "S")
+    if status == "已處理發票":
+        return _sheet_cell(row, "K") or _sheet_cell(row, "O")
     if _row_kind(status) in {"charge_note", "finance_note"}:
         return _sheet_cell(row, "K")
     return ""
@@ -1655,8 +1657,11 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_FARE_INVOICE_ONLY:
-        if backend_note:
-            _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, backend_note,
+        finance_note = backend_note
+        if status == "已處理發票" and not finance_note and charge_invoice:
+            finance_note = f"已處理發票：{charge_invoice}"
+        if finance_note:
+            _prepend_field(form_data, controls, FIELD_FINANCE_NOTE, finance_note,
                            keywords=["財務備註"], ui_logger=ui_logger)
         return
 
