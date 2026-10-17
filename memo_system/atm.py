@@ -219,6 +219,10 @@ def _get_gspread_client():
         if raw_json:
             service_account_info = json.loads(raw_json)
 
+    if service_account_info is None:  # 部署端（例如 tool-system 排程）提供的服務帳號
+        from . import host
+        service_account_info = host.lookup_service_account()
+
     if service_account_info is not None:
         creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
         return gspread.authorize(creds)
@@ -289,6 +293,12 @@ def _atm_sheet_config(region: str) -> Dict:
     spreadsheet_id = _secret_text(f"ATM_{prefix}_SPREADSHEET_ID")
     gid_text = _secret_text(f"ATM_{prefix}_GID")
     worksheet_title = _secret_text(f"ATM_{prefix}_WORKSHEET_TITLE") or ATM_WORKSHEET_TITLE
+    if not spreadsheet_id:  # 部署端設定（例如 tool-system）
+        from . import host
+        fallback = host.lookup_region_sheet("ATM", region) or {}
+        spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
+        gid_text = str(fallback.get("gid") or gid_text or "").strip()
+        worksheet_title = fallback.get("worksheet_title") or worksheet_title
     if not spreadsheet_id:
         try:
             from . import env as local_env
