@@ -80,6 +80,19 @@ def _secret_text(key: str) -> str:
     return str(os.getenv(key, "") or "").strip()
 
 
+def _year_root_id(kind: str, region: str, spreadsheet_id: str) -> str:
+    """依主控表「年度根目錄設定」的模式切換年度檔；原設定／比對時回傳原本的 ID。"""
+    try:
+        from year_roots import choose_file_id
+    except Exception:
+        return spreadsheet_id
+    if kind == "ATM":
+        category, index = ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
+    else:
+        category, index = ("服務異動", 0) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
+    return choose_file_id(category, region, spreadsheet_id, file_index=index)
+
+
 def _sheet_config(region: str) -> Dict:
     if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"不支援的地區：{region}")
@@ -98,6 +111,7 @@ def _sheet_config(region: str) -> Dict:
             worksheet_title = WORKSHEET_TITLE
         else:
             raise ValueError(f"Secrets 尚未設定「{region}」付款比對分頁 GID 或名稱")
+    spreadsheet_id = _year_root_id("ATM", region, spreadsheet_id)
     return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 

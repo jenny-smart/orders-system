@@ -245,6 +245,19 @@ def _secret_value(key, default=""):
     return str(os.getenv(key, default) or default).strip()
 
 
+def _year_root_id(kind: str, region: str, spreadsheet_id: str) -> str:
+    """依主控表「年度根目錄設定」的模式切換年度檔；原設定／比對時回傳原本的 ID。"""
+    try:
+        from year_roots import choose_file_id
+    except Exception:
+        return spreadsheet_id
+    if kind == "ATM":
+        category, index = ("名冊薪資", 1) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
+    else:
+        category, index = ("服務異動", 0) if region in ("桃園", "新竹") else ("內勤工作表單", 0)
+    return choose_file_id(category, region, spreadsheet_id, file_index=index)
+
+
 def _sheet_config(region: str) -> dict:
     if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"不支援的地區：{region}（目前支援：{list(REGION_SECRET_PREFIX.keys())}）")
@@ -258,6 +271,7 @@ def _sheet_config(region: str) -> dict:
         gid = int(gid_text) if gid_text else None
     except ValueError as exc:
         raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
+    spreadsheet_id = _year_root_id("CHANGE", region, spreadsheet_id)
     return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
 
 
@@ -419,7 +433,12 @@ def _parse_period_hours(period_text: str) -> float:
 
 
 def _is_workday(d: date) -> bool:
-    return d.weekday() < 5 and d not in TAIWAN_PUBLIC_HOLIDAYS
+    # 依年份自動抓政府辦公日曆；抓不到時退回上方內建的 2026 年清單
+    try:
+        import tw_holidays
+    except Exception:
+        return d.weekday() < 5 and d not in TAIWAN_PUBLIC_HOLIDAYS
+    return tw_holidays.is_workday(d, TAIWAN_PUBLIC_HOLIDAYS)
 
 
 def _is_weekend_or_holiday(d: date) -> bool:
