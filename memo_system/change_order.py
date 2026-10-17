@@ -265,6 +265,12 @@ def _sheet_config(region: str) -> dict:
     spreadsheet_id = _secret_value(f"CHANGE_ORDER_{prefix}_SPREADSHEET_ID")
     gid_text = _secret_value(f"CHANGE_ORDER_{prefix}_GID")
     worksheet_title = _secret_value(f"CHANGE_ORDER_{prefix}_WORKSHEET_TITLE", "清潔異動")
+    if not spreadsheet_id:  # 沒有 secrets 時改用部署端設定（例如 tool-system 主控表「清潔異動設定」）
+        from . import host
+        fallback = host.lookup_region_sheet("CHANGE", region) or {}
+        spreadsheet_id = str(fallback.get("spreadsheet_id") or "").strip()
+        gid_text = str(fallback.get("gid") or gid_text or "").strip()
+        worksheet_title = fallback.get("worksheet_title") or worksheet_title
     if not spreadsheet_id:
         raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID")
     try:
@@ -286,16 +292,13 @@ def _get_gspread_client():
     if _gspread_client is not None:
         return _gspread_client
 
-    if st is None:
-        raise RuntimeError("找不到 streamlit，無法讀取 st.secrets 取得 Google 憑證")
-
     sa_info = None
 
     # 依序嘗試這幾個 key（實際命名以 memo.py 為準：GOOGLE_SERVICE_ACCOUNT 是 TOML 區塊）
     # 與 memo.py 保持一致，避免同時存在兩組憑證時選到未被分享 Sheet 的帳號。
     for key in ("gcp_service_account", "GOOGLE_SERVICE_ACCOUNT"):
         try:
-            block = st.secrets.get(key, None)
+            block = st.secrets.get(key, None) if st is not None else None
         except Exception:
             block = None
 
@@ -311,6 +314,10 @@ def _get_gspread_client():
             sa_info = dict(block)
         break
 
+    if not sa_info:  # 沒有 Streamlit secrets（例如排程）時改用部署端提供的服務帳號
+        from . import host
+        sa_info = host.lookup_service_account()
+
     if not sa_info:
         raise RuntimeError(
             "找不到 Google 服務帳號憑證，請確認 secrets.toml 裡有 [GOOGLE_SERVICE_ACCOUNT] "
@@ -321,6 +328,22 @@ def _get_gspread_client():
     creds = Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
     _gspread_client = gspread.authorize(creds)
     return _gspread_client
+
+
+def supported_regions() -> list:
+    """有設定清潔異動試算表的地區（secrets 或部署端設定）。"""
+    from . import host
+    configured = host.lookup_regions("CHANGE")
+    if configured is not None:
+        return [r for r in configured if r in REGION_SECRET_PREFIX]
+    result = []
+    for region in REGION_SECRET_PREFIX:
+        try:
+            _sheet_config(region)
+        except Exception:
+            continue
+        result.append(region)
+    return result
 
 
 def get_worksheet(region: str, tab_name: str = "清潔異動"):
@@ -953,14 +976,15 @@ TIME_RATE_DAY_TYPE_DIFF = TIME_RATE_WEEKEND - TIME_RATE_WEEKDAY  # 平日/週末
 
 def calc_time_change_fee(service_date: date, hours: float, person: int, order=None) -> dict:
     """
-    加時／減時金額試算：平日每人時 $600，週末／例假日每人時 $700。
+    加時／減時金額試算：單價依服務金額設定（預設平日 $600、週末 $700）。
+    價格分類只看星期：週一～週五為平日、週六日為週末；國定假日不改變價格分類。
     回傳 dict: {amount, rate, is_weekend, calc_note}
     """
-    is_weekend = _is_weekend_or_holiday(service_date) if service_date else False
+    is_weekend = service_date.weekday() >= 5 if service_date else False
     from service_pricing import unit_price
     rate = unit_price(service_date, pricing_tier(order or {}), weekend=is_weekend)
     amount = round((hours or 0) * (person or 0) * rate)
-    day_label = "週末/例假日" if is_weekend else "平日"
+    day_label = "週末" if is_weekend else "平日"
     calc_note = f"{day_label}：{hours}小時 × {person}人 × ${rate}/人時 = ${amount}"
     return {
         "amount": amount,
