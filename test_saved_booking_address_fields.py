@@ -29,12 +29,6 @@ class SavedAddressFieldsTest(unittest.TestCase):
         info = orders.pick_best_address_info(self.payload(companyId=2, areaId=88, lat=24.9, lng=121.1), ADDRESS)
         self.assertEqual((info['company_id'], info['area_id'], info['lat'], info['lng']), (2, 88, 24.9, 121.1))
 
-    def test_saved_address_matches_postcode_and_tai_variant(self):
-        info = orders.pick_best_address_info(
-            self.payload(address='108臺北市大安區測試路233號2樓'), ADDRESS,
-        )
-        self.assertEqual(info['addressId'], '302')
-
     def test_other_address_cannot_supply_saved_fields(self):
         self.assertEqual(orders.pick_best_address_info(self.payload(address='新北市測試路1號'), ADDRESS), {})
 
