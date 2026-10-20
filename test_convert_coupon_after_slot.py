@@ -52,11 +52,11 @@ class LazyDiscountCodeTest(unittest.TestCase):
 
 class CouponTitleTest(unittest.TestCase):
     def test_title_is_customer_name(self):
-        self.assertEqual(q._coupon_title({"member": {"name": "吳惠盟"}}, "LC00216063"), "吳惠盟")
-        self.assertEqual(q._coupon_title({"name": "陳佳吟"}, "0910828425"), "陳佳吟")
+        self.assertEqual(q._coupon_title({"member": {"name": "吳惠盟"}}, "LC00216063"), "吳惠盟6063")
+        self.assertEqual(q._coupon_title({"name": "陳佳吟"}, "", "0910828425"), "陳佳吟8425")
 
-    def test_title_falls_back_when_name_missing(self):
-        self.assertEqual(q._coupon_title({"member": {}}, "0910828425"), "0910828425")
+    def test_title_without_name_uses_tail_only(self):
+        self.assertEqual(q._coupon_title({"member": {}}, "TT00217663"), "7663")
 
 
 if __name__ == "__main__":
