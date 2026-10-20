@@ -2047,6 +2047,13 @@ def _get_newest_coupon_code(session, base_url, prefix):
         return ""
 
 
+def _coupon_title(member_or_payload, fallback=""):
+    """優惠券標題一律用訂購人姓名；查不到姓名時才用 fallback。"""
+    data = member_or_payload or {}
+    member = data.get("member", data) if isinstance(data, dict) else {}
+    return str((member or {}).get("name") or "").strip() or str(fallback or "").strip()
+
+
 def _build_coupon_via_session(session, base_url, title, discount, date_s, date_e, prefix, piece, regions, service_items):
     """用既有 session 建優惠券，不重新登入。回傳實際優惠碼字串。"""
     coupon_add_url = f"{base_url}{COUPON_ADD_URL_PATH}"
@@ -2989,17 +2996,17 @@ def convert_order(
     today_str = date.today().strftime("%Y-%m-%d")
     coupon_prefix = order_no_a[-4:]
     coupon_discount = int(float(str(service_amount_a).replace(",", "")))
+    token_booking = get_csrf_token(session)
+    member_payload = get_member(session, phone_a, token_booking, clean_type_id)
+    if not member_payload:
+        raise Exception(f"電話 {phone_a} 查無會員資料")
     coupon_code = _build_coupon_via_session(
-        session, base_url, title=f"訂單轉換-{order_no_a}",
+        session, base_url, title=_coupon_title(member_payload, phone_a),
         discount=coupon_discount, date_s=today_str, date_e=service_date_a,
         prefix=coupon_prefix, piece=2, regions=["台北", "台中"], service_items=["居家清潔", "裝修細清"],
     )
     if not coupon_code or coupon_code == coupon_prefix:
         raise Exception(f"折價券建立失敗，請至後台確認")
-    token_booking = get_csrf_token(session)
-    member_payload = get_member(session, phone_a, token_booking, clean_type_id)
-    if not member_payload:
-        raise Exception(f"電話 {phone_a} 查無會員資料")
     lookup_result = {"session": session, "token": token_booking, "phone": phone_a, "member_payload": member_payload, "base_url": base_url, "env_name": env_name}
     order_b_result = quick_create_order(
         env_name=env_name, payway=payway_a, region=region_a, lookup_result=lookup_result,
@@ -3223,7 +3230,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
                     return ""
                 code = _build_coupon_via_session(
                     session, base_url,
-                    title=f"訂單轉換-{order_no_a}-B{idx+1}",
+                    title=_coupon_title(member_payload, order_no_a),
                     discount=coupon_discount,
                     date_s=today_str, date_e=new_date_s,
                     prefix=coupon_prefix, piece=1,
@@ -4644,7 +4651,7 @@ def stored_value_makeup_create_stored_order(
 
     def _make_coupon_a():
         # 步驟 10：查到班表時段後才建立優惠券A，查無時段不留下沒用到的券。
-        coupon_a.update(create_coupon(env_name, backend_email, backend_password, title=f"儲值金清零-{phone}", discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services) or {})
+        coupon_a.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], phone), discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services) or {})
         return coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
 
     stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_a, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
@@ -4689,7 +4696,7 @@ def stored_value_makeup_create_paid_order(
         # 步驟 10：查到班表時段後才建立優惠券B。
         if ctx["balance"] <= 0:
             return ""
-        coupon_b.update(create_coupon(env_name, backend_email, backend_password, title=f"儲值金補價差客付-{phone}", discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services) or {})
+        coupon_b.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], phone), discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services) or {})
         return coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
 
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
