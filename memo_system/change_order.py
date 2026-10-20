@@ -245,20 +245,22 @@ def _secret_value(key, default=""):
     return str(os.getenv(key, default) or default).strip()
 
 
+CHANGE_TAB_TITLE = "清潔異動"
+
+
+def _change_root_category(region: str) -> str:
+    """桃園／新竹的清潔異動在「服務異動」年度檔，其餘地區在「內勤工作表單」。"""
+    return "服務異動" if region in ("桃園", "新竹") else "內勤工作表單"
+
+
 def _sheet_config(region: str) -> dict:
+    """清潔異動一律依年度根目錄找當年度檔（不讀 secrets 的試算表 ID／GID）。"""
     if region not in REGION_SECRET_PREFIX:
         raise ValueError(f"不支援的地區：{region}（目前支援：{list(REGION_SECRET_PREFIX.keys())}）")
-    prefix = REGION_SECRET_PREFIX[region]
-    spreadsheet_id = _secret_value(f"CHANGE_ORDER_{prefix}_SPREADSHEET_ID")
-    gid_text = _secret_value(f"CHANGE_ORDER_{prefix}_GID")
-    worksheet_title = _secret_value(f"CHANGE_ORDER_{prefix}_WORKSHEET_TITLE", "清潔異動")
-    if not spreadsheet_id:
-        raise ValueError(f"Secrets 尚未設定「{region}」清潔異動試算表 ID")
-    try:
-        gid = int(gid_text) if gid_text else None
-    except ValueError as exc:
-        raise ValueError(f"Secrets 的「{region}」清潔異動 GID 必須是整數") from exc
-    return {"spreadsheet_id": spreadsheet_id, "gid": gid, "worksheet_title": worksheet_title}
+    from year_roots import root_file_id
+
+    spreadsheet_id = root_file_id(_change_root_category(region), region)
+    return {"spreadsheet_id": spreadsheet_id, "gid": None, "worksheet_title": CHANGE_TAB_TITLE}
 
 
 def _get_gspread_client():
@@ -272,16 +274,13 @@ def _get_gspread_client():
     if _gspread_client is not None:
         return _gspread_client
 
-    if st is None:
-        raise RuntimeError("找不到 streamlit，無法讀取 st.secrets 取得 Google 憑證")
-
     sa_info = None
 
     # 依序嘗試這幾個 key（實際命名以 memo.py 為準：GOOGLE_SERVICE_ACCOUNT 是 TOML 區塊）
     # 與 memo.py 保持一致，避免同時存在兩組憑證時選到未被分享 Sheet 的帳號。
     for key in ("gcp_service_account", "GOOGLE_SERVICE_ACCOUNT"):
         try:
-            block = st.secrets.get(key, None)
+            block = st.secrets.get(key, None) if st is not None else None
         except Exception:
             block = None
 
@@ -297,6 +296,10 @@ def _get_gspread_client():
             sa_info = dict(block)
         break
 
+    if not sa_info:  # 沒有 Streamlit secrets（例如排程）時改用部署端提供的服務帳號
+        from . import host
+        sa_info = host.lookup_service_account()
+
     if not sa_info:
         raise RuntimeError(
             "找不到 Google 服務帳號憑證，請確認 secrets.toml 裡有 [GOOGLE_SERVICE_ACCOUNT] "
@@ -309,11 +312,35 @@ def _get_gspread_client():
     return _gspread_client
 
 
+def supported_regions() -> list:
+    """有清潔異動的地區：部署端有指定就用指定的，否則看年度根目錄設定有登記的地區。"""
+    from . import host
+    configured = host.lookup_regions("CHANGE")
+    if configured is not None:
+        return [r for r in configured if r in REGION_SECRET_PREFIX]
+    try:
+        from year_roots import find_rule, get_year_roots
+        roots = get_year_roots()
+    except Exception:
+        roots = None
+    if roots is None:
+        return list(REGION_SECRET_PREFIX)
+    return [r for r in REGION_SECRET_PREFIX
+            if find_rule(roots.rules, _change_root_category(r), r) is not None]
+
+
+def _find_change_tab(titles: list, wanted: str = "清潔異動"):
+    """先找「清潔異動」；沒有時找唯一一個「…訂單金流…異動表」（桃園／新竹的服務異動檔）。"""
+    if wanted in titles:
+        return wanted
+    matches = [t for t in titles if "訂單金流" in t and "異動表" in t]
+    return matches[0] if len(matches) == 1 else None
+
+
 def get_worksheet(region: str, tab_name: str = "清潔異動"):
     """
     依地區回傳對應的 gspread worksheet 物件。
-    優先用 gid（SHEET_GIDS）精準定位分頁；若該地區沒有設定 gid，
-    退而用 tab_name 嘗試找同名分頁，最後 fallback 用該試算表第一個分頁。
+    檔案依年度根目錄找，分頁依名稱找；找不到就報錯（不會改用第一個分頁，避免寫錯分頁）。
     """
     config = _sheet_config(region)
     client = _get_gspread_client()
@@ -321,19 +348,18 @@ def get_worksheet(region: str, tab_name: str = "清潔異動"):
         sh = client.open_by_key(config["spreadsheet_id"])
     except gspread.exceptions.SpreadsheetNotFound as exc:
         raise RuntimeError(
-            f"無法開啟「{region}」清潔異動試算表。請確認試算表 ID 正確，且已分享給目前的 Google 服務帳號（編輯者權限）。"
+            f"無法開啟「{region}」清潔異動試算表（{config['spreadsheet_id']}），請確認已分享給目前的 Google 服務帳號（編輯者權限）。"
         ) from exc
 
-    gid = config["gid"]
-    if gid is not None:
-        for ws in sh.worksheets():
-            if ws.id == gid:
-                return ws
-
-    try:
-        return sh.worksheet(config["worksheet_title"] or tab_name)
-    except gspread.exceptions.WorksheetNotFound:
-        return sh.get_worksheet(0)
+    worksheets = sh.worksheets()
+    title = _find_change_tab([ws.title for ws in worksheets], tab_name or config["worksheet_title"])
+    for ws in worksheets:
+        if title and ws.title == title:
+            return ws
+    raise RuntimeError(
+        f"「{region}」清潔異動試算表「{sh.title}」找不到「{tab_name}」分頁"
+        f"（也沒有唯一的「訂單金流…異動表」分頁），請確認分頁名稱"
+    )
 
 
 # ============================================================
@@ -419,7 +445,12 @@ def _parse_period_hours(period_text: str) -> float:
 
 
 def _is_workday(d: date) -> bool:
-    return d.weekday() < 5 and d not in TAIWAN_PUBLIC_HOLIDAYS
+    # 依年份自動抓政府辦公日曆；抓不到時退回上方內建的 2026 年清單
+    try:
+        import tw_holidays
+    except Exception:
+        return d.weekday() < 5 and d not in TAIWAN_PUBLIC_HOLIDAYS
+    return tw_holidays.is_workday(d, TAIWAN_PUBLIC_HOLIDAYS)
 
 
 def _is_weekend_or_holiday(d: date) -> bool:
@@ -934,14 +965,15 @@ TIME_RATE_DAY_TYPE_DIFF = TIME_RATE_WEEKEND - TIME_RATE_WEEKDAY  # 平日/週末
 
 def calc_time_change_fee(service_date: date, hours: float, person: int, order=None) -> dict:
     """
-    加時／減時金額試算：平日每人時 $600，週末／例假日每人時 $700。
+    加時／減時金額試算：單價依服務金額設定（預設平日 $600、週末 $700）。
+    價格分類只看星期：週一～週五為平日、週六日為週末；國定假日不改變價格分類。
     回傳 dict: {amount, rate, is_weekend, calc_note}
     """
-    is_weekend = _is_weekend_or_holiday(service_date) if service_date else False
+    is_weekend = service_date.weekday() >= 5 if service_date else False
     from service_pricing import unit_price
     rate = unit_price(service_date, pricing_tier(order or {}), weekend=is_weekend)
     amount = round((hours or 0) * (person or 0) * rate)
-    day_label = "週末/例假日" if is_weekend else "平日"
+    day_label = "週末" if is_weekend else "平日"
     calc_note = f"{day_label}：{hours}小時 × {person}人 × ${rate}/人時 = ${amount}"
     return {
         "amount": amount,

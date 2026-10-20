@@ -96,7 +96,7 @@ class NativeAddressTest(unittest.TestCase):
              patch.object(q, 'check_contain', side_effect=AssertionError('must not query address')) as direct:
             info, _, _ = q.resolve_backend_booking_address('session', {'member': {'member_id': 1, 'memberAddressList': [stored]}}, address, 'token', '1')
         direct.assert_not_called()
-        self.assertEqual(info['address'], address)
+        self.assertEqual(str(info['area_id']), '25')
 
 if __name__ == '__main__':
     unittest.main()

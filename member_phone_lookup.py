@@ -75,17 +75,12 @@ class MemberClient:
         self.base = base_url.rstrip('/')
         self.cache = {}
         try:
-            page = self.session.get(self.base + '/login', timeout=30)
-            page.raise_for_status()
-            token = BeautifulSoup(page.text, 'html.parser').select_one('input[name="_token"]')
-            if not token:
-                raise ValueError('無法取得登入頁。')
-            response = self.session.post(self.base + '/login', data={
-                '_token': token.get('value', ''), 'email': email, 'password': password,
-            }, timeout=30)
-            response.raise_for_status()
-            if '/login' in urlparse(response.url).path:
-                raise ValueError('後台登入失敗。')
+            from lemon_backend_login import login as backend_login
+
+            try:
+                backend_login(self.session, email, password, login_url=self.base + '/login', timeout=30)
+            except RuntimeError as exc:
+                raise ValueError(f'後台登入失敗。{exc}') from exc
         except Exception:
             self.session.close()
             raise
@@ -233,6 +228,9 @@ def column_letter(number):
     return value
 
 
+DEFAULT_TAB_TITLE = '評價預約'
+
+
 def open_sheet_target(url):
     from orders import build_gsheet_client
     parsed = urlparse(url.strip())
@@ -243,8 +241,25 @@ def open_sheet_target(url):
     gid = parse_qs(parsed.fragment).get('gid', parse_qs(parsed.query).get('gid', ['']))[0]
     if gid and not gid.isdigit():
         raise ValueError('分頁 gid 格式錯誤。')
-    ws = book.get_worksheet_by_id(int(gid)) if gid else book.get_worksheet(0)
+    if gid:
+        ws = book.get_worksheet_by_id(int(gid))
+    else:
+        # 網址沒帶 gid 時依名稱找預設分頁（換年 GID 會變）；找不到就報錯，不改用第一個分頁
+        titles = [w.title for w in book.worksheets()]
+        if DEFAULT_TAB_TITLE not in titles:
+            raise ValueError(f'試算表找不到「{DEFAULT_TAB_TITLE}」分頁，請在網址帶上 gid。')
+        ws = book.worksheet(DEFAULT_TAB_TITLE)
     return book, ws
+
+
+def default_sheet_url():
+    """預設名單：今年台北內勤工作表單（依年度根目錄找）的「評價預約」分頁；找不到回傳空字串。"""
+    try:
+        from year_roots import root_file_id
+
+        return f'https://docs.google.com/spreadsheets/d/{root_file_id("內勤工作表單", "台北")}/edit'
+    except Exception:
+        return ''
 
 
 def load_sheet_columns(url, header_row=1):
