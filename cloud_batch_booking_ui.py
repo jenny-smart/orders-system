@@ -122,6 +122,8 @@ def _render_live_progress(run):
     if total:
         st.progress(min(snapshot['processed'] / total, 1.0),
                     text=f"本次處理 {snapshot['processed']}／{total} 列")
+    if snapshot.get('held'):
+        st.info(f"先不約略過 {snapshot['held']} 列（預約條件標示「先不約」，本次不約；列號見日誌）")
     if run.get('status') != 'completed' and snapshot['rows']:
         st.write(f"目前處理列號：{snapshot['rows']}")
     if run.get('status') == 'completed' and run.get('conclusion') != 'success':
@@ -221,6 +223,9 @@ def _render_cloud_status():
         if summary is not None:
             attempted, success, failed, remaining = summary
             message = f"已執行完成：處理 {attempted} 列，成功 {success} 列，失敗 {failed} 列，尚待處理 {remaining} 列。"
+            held = (st.session_state.get(f"cloud_live_{run['id']}_{run.get('run_attempt', 1)}") or {}).get('held', 0)
+            if held:
+                message += f"先不約略過 {held} 列。"
             if conclusion == "cancelled":
                 st.warning("雲端批次已取消。" + message)
             elif failed:

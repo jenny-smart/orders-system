@@ -36,7 +36,7 @@ def _region_credentials(region: str, fallback_email: str, fallback_password: str
 
 def render_optimized_like_batch(backend_email: str, backend_password: str, env: str) -> None:
     import batch_booking_optimized as batch_opt
-    from selected_row_status_guard import _auto_filter_rows
+    from selected_row_status_guard import _auto_filter_rows, _held_for_request
 
     st = batch_opt.st
     batch_opt.step("4", "執行設定")
@@ -85,13 +85,14 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
         log_box.text("\n\n".join(logs[-160:]))
 
     try:
-        requested_rows = set(_parse_rows(batch_opt, row_spec))
+        explicit_rows = _parse_rows(batch_opt, row_spec)
+        requested_rows = set(explicit_rows)
         if auto_no_slot:
             requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "no_schedule", region=region, allow_failed=True))
         if auto_missing_o:
             requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "missing_order", region=region, allow_failed=True))
         requested_rows = sorted(requested_rows)
-        if not requested_rows:
+        if not requested_rows and not (auto_no_slot or auto_missing_o):
             raise ValueError("沒有指定列號，也沒有自動篩選到符合條件的列。")
 
         candidates = batch_opt._load_candidates(sheet_name)
@@ -107,11 +108,19 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
                 continue
             target_rows.append(row_no)
 
+        modes = [mode for mode, on in (("no_schedule", auto_no_slot), ("missing_order", auto_missing_o)) if on]
+        held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, modes)
+        invalid = [row_no for row_no in invalid if row_no not in set(held)]
+        if held:
+            ui_log(f"⏭️ 先不約略過 {len(held)} 列：" + "、".join(map(str, held)))
         if invalid:
             ui_log("⏭️ 略過不符合執行條件列：" + "、".join(map(str, invalid)))
         if region_mismatch:
             ui_log(f"⏭️ 略過非{region}列：" + "、".join(map(str, region_mismatch)))
         if not target_rows:
+            if held:
+                st.info(f"先不約略過 {len(held)} 列，沒有其他符合執行條件的列。")
+                return
             raise ValueError("指定範圍內沒有符合執行條件的列。")
 
         email, password = _region_credentials(region, backend_email, backend_password)
@@ -125,7 +134,8 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
             selected_actions=selected_actions, logger=ui_log,
             allow_auto_lemon_shift=allow_auto_lemon, selected_rows=target_rows,
         ) or {}
-        st.success(f"執行完成：成功 {int(result.get('success_count', 0) or 0)}，失敗 {int(result.get('fail_count', 0) or 0)}，略過 {len(invalid) + len(region_mismatch)}。")
+        st.success(f"執行完成：成功 {int(result.get('success_count', 0) or 0)}，失敗 {int(result.get('fail_count', 0) or 0)}，"
+                   f"先不約略過 {len(held)}，其他略過 {len(invalid) + len(region_mismatch)}。")
     except Exception as exc:
         ui_log(f"❌ 執行失敗：{exc}")
         st.error(f"執行失敗：{exc}")

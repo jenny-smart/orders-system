@@ -44,3 +44,23 @@ def test_all_batch_runners_share_recover_filter(monkeypatch):
     assert remaining == [2] and recovered == [] and blocked == []
     assert any('第 3 列不建單：先不約' in line for line in logs)
     assert any('第 4 列不建單：狀態為「待確認」' in line for line in logs)
+
+
+def test_held_rows_match_filters_used_by_all_three_batches(monkeypatch):
+    from types import SimpleNamespace
+    import selected_row_status_guard as guard
+    hold = '先不約：2026大掃除 V 欄為 FALSE，尚未確認'
+    rows = [{**BASE, '__sheet_row__': 2, '預約條件': hold, '原因': '無班表', '結果': '失敗'},
+            {**BASE, '__sheet_row__': 3, '預約條件': hold, '原因': '找不到訂單編號', '結果': ''},
+            {**BASE, '__sheet_row__': 4, '預約條件': hold, '狀態': '暫停', '結果': ''},
+            {**BASE, '__sheet_row__': 5, '預約條件': hold, '訂單編號': 'LC1', '結果': ''},
+            {**BASE, '__sheet_row__': 6, '結果': ''}]
+    monkeypatch.setattr(guard, '_load_worksheet_unique', lambda name: (None, pd.DataFrame(rows)))
+    batch = SimpleNamespace(_text=lambda v: str(v or '').strip(), get_region_by_address=lambda address, accounts: '台北')
+    assert guard._held_rows(batch, 's') == [3]
+    assert guard._held_rows(batch, 's', allow_failed=True) == [2, 3]
+    assert guard._held_rows(batch, 's', 'no_schedule', allow_failed=True) == [2]
+    assert guard._held_rows(batch, 's', 'missing_order', allow_failed=True) == [3]
+    assert guard._held_rows(batch, 's', region='台中', allow_failed=True) == []
+    assert guard._held_for_request(batch, 's', '台北', rows=[3, 6]) == [3]
+    assert guard._held_for_request(batch, 's', '台北', modes=['no_schedule']) == [2]

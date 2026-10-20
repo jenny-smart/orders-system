@@ -10,7 +10,7 @@ import booking_eligibility
 
 def test_failed_rows_excluded_from_candidates_and_auto_filters():
     source = Path(__file__).parent / 'selected_row_status_guard.py'
-    names = {'_scalar', 'normalize_status', '_first_series', '_safe_load_candidates', '_auto_filter_rows'}
+    names = {'_scalar', 'normalize_status', '_first_series', '_safe_load_candidates', '_auto_filter_rows', '_mode_mask'}
     tree = ast.parse(source.read_text())
     base = {'姓名': '王小明', '電話': '0912345678', '地址': '台北市',
             '日期': '2026-11-10', '開始時間': '09:00', '結束時間': '12:00',

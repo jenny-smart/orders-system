@@ -458,7 +458,6 @@ from weekend_reminders import (
 )
 from cleaner_reminders import find_paid_cleaner_reminders
 from accounts import ACCOUNTS
-from booking_eligibility import can_create_order
 from memo_system.ui import render_memo_system
 import batch_booking_optimized
 import cloud_batch_booking_ui
@@ -783,32 +782,20 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
+def _shared_auto_filter(sheet_name, region, mode, candidate_rows=None):
+    """與批次建單優化、雲端批次共用同一自動篩選條件。"""
+    from selected_row_status_guard import _auto_filter_rows
+    rows = _auto_filter_rows(batch_booking_optimized, sheet_name, mode, region=region, allow_failed=True)
+    candidate_set = {int(x) for x in (candidate_rows or [])}
+    return [row for row in rows if not candidate_set or row in candidate_set]
+
+
 def find_no_slot_rows(sheet_name, region, candidate_rows=None):
-    _, df = load_worksheet(sheet_name)
-    candidate_set = set(candidate_rows or [])
-    if candidate_set:
-        df = df[df["__sheet_row__"].isin(candidate_set)]
-    rows = []
-    for _, row in df.iterrows():
-        reason_text = f"{row.get('原因', '')} {row.get('沒班表日期', '')}"
-        if can_create_order(row) and "無班表" in str(reason_text):
-            if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
-                rows.append(int(row["__sheet_row__"]))
-    return rows
+    return _shared_auto_filter(sheet_name, region, "no_schedule", candidate_rows)
 
 
 def find_missing_order_in_o_rows(sheet_name, region, candidate_rows=None):
-    _, df = load_worksheet(sheet_name)
-    candidate_set = set(candidate_rows or [])
-    if candidate_set:
-        df = df[df["__sheet_row__"].isin(candidate_set)]
-    rows = []
-    for _, row in df.iterrows():
-        o_text = str(row.iloc[14] if len(row) > 14 else "")
-        if can_create_order(row) and not re.search(r"(LC|TT|KK)\d+", o_text):
-            if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
-                rows.append(int(row["__sheet_row__"]))
-    return rows
+    return _shared_auto_filter(sheet_name, region, "missing_order", candidate_rows)
 
 
 def format_log_message(msg):
@@ -1196,6 +1183,15 @@ if mode == "批次建單（Google Sheet）":
             except Exception as e:
                 st.error(f"自動篩選列號失敗：{e}"); st.stop()
             if not target_rows:
+                try:
+                    from selected_row_status_guard import _held_for_request
+                    modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
+                    held_only = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, modes=modes,
+                                                  mode_scope=candidate_rows or None)
+                except Exception:
+                    held_only = []
+                if held_only:
+                    st.info(f"先不約略過 {len(held_only)} 列（{'、'.join(map(str, held_only))}），沒有其他符合自動篩選條件的列。"); st.stop()
                 st.info("沒有符合自動篩選條件的列。"); st.stop()
         else:
             try:
@@ -1210,6 +1206,19 @@ if mode == "批次建單（Google Sheet）":
         total_success = 0
         total_fail = 0
         total_processed = 0
+        try:
+            from selected_row_status_guard import _held_for_request
+            if auto_no_slot_rows or auto_missing_o_rows:
+                modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
+                held_rows = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, modes=modes,
+                                              mode_scope=candidate_rows or None)
+            else:
+                held_rows = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, target_rows)
+        except Exception as e:
+            held_rows = []
+            ui_log(f"⚠️ 無法計算先不約列數：{e}")
+        if held_rows:
+            ui_log(f"⏭️ 先不約略過 {len(held_rows)} 列：" + "、".join(map(str, held_rows)))
         with st.spinner("執行中，請稍候…"):
             row_label = "、".join(map(str, target_rows))
             ui_log(f"▶ 指定列 {row_label}，依列號逐筆單筆成單，不分組…")
@@ -1235,16 +1244,19 @@ if mode == "批次建單（Google Sheet）":
         with result_container:
             st.markdown("<hr>", unsafe_allow_html=True)
             step("4", "執行結果")
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("執行筆數", total_processed)
             c2.metric("成功", total_success)
             c3.metric("失敗", total_fail)
+            c4.metric("先不約略過", len(held_rows))
             if total_fail == 0 and total_processed > 0:
                 st.success(f"✅ 全部完成，共處理 **{total_processed}** 筆，成功 **{total_success}** 筆。")
             elif total_fail > 0:
                 st.warning(f"⚠️ 執行完成，但有 **{total_fail}** 筆失敗，請查看執行過程。")
             else:
                 st.info("執行完成，無資料被處理。")
+            if held_rows:
+                st.info(f"先不約略過 {len(held_rows)} 列（預約條件標示「先不約」）：" + "、".join(map(str, held_rows)))
 
 
 

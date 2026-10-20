@@ -9,7 +9,7 @@ from accounts import ACCOUNTS
 import batch_booking_optimized as batch_opt
 from orders import get_region_by_address
 from batch_recovery_meta import install_patch as install_recovery_meta_patch
-from selected_row_status_guard import install_patch as install_selected_row_status_guard, _auto_filter_rows, _safe_load_candidates
+from selected_row_status_guard import install_patch as install_selected_row_status_guard, _auto_filter_rows, _held_rows, _safe_load_candidates
 from hybrid_batch_runner import run_process_web_hybrid
 
 install_selected_row_status_guard()
@@ -46,6 +46,15 @@ def load_pending(sheet_name: str, excluded=None, filter_mode: str = "all", selec
     return result
 
 
+def held_rows(sheet_name: str, filter_mode: str = "all", selected_region: str = "", retry_failed=False):
+    """先不約略過的列；顯示用，失敗時不影響成單。"""
+    try:
+        return _held_rows(batch_opt, sheet_name, filter_mode, selected_region or None, allow_failed=retry_failed)
+    except Exception as exc:
+        print(f"HELD_UNAVAILABLE: 無法計算先不約列數：{exc}", flush=True)
+        return []
+
+
 def run(sheet_name: str, chunk_size=50, max_rows=0, pause_seconds=5, filter_mode="all", selected_region="", allow_auto_lemon=False, retry_failed=False) -> int:
     attempted = set()
     success_total = fail_total = 0
@@ -59,6 +68,10 @@ def run(sheet_name: str, chunk_size=50, max_rows=0, pause_seconds=5, filter_mode
     while True:
         pending = load_pending(sheet_name, attempted, filter_mode, selected_region, allow_auto_lemon, retry_failed)
         if target_total is None:
+            held = held_rows(sheet_name, filter_mode, selected_region, retry_failed)
+            progress.held = len(held)
+            if held:
+                print(f"HELD 先不約略過 {len(held)} 列：{','.join(map(str, held))}", flush=True)
             candidate_total = len(pending)
             target_total = min(len(pending), max_rows) if max_rows else len(pending)
             progress.publish('準備成單', 0, 0, 0, len(pending), target_total)
@@ -125,7 +138,7 @@ def run(sheet_name: str, chunk_size=50, max_rows=0, pause_seconds=5, filter_mode
     remaining = len(load_pending(sheet_name, attempted, filter_mode, selected_region, allow_auto_lemon, retry_failed))
     progress.publish('完成' if not fail_total else '部分失敗', processed, success_total, fail_total,
                      remaining, target_total or 0)
-    print(f"FINISH attempted={len(attempted)} success={success_total} fail={fail_total} remaining={remaining}", flush=True)
+    print(f"FINISH attempted={len(attempted)} success={success_total} fail={fail_total} remaining={remaining} held={progress.held}", flush=True)
     return 0 if fail_total == 0 else 2
 
 

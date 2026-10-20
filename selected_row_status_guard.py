@@ -4,7 +4,7 @@ from __future__ import annotations
 import types
 import pandas as pd
 import orders
-from booking_eligibility import HOLD_COLUMN, can_create_order, can_process_row, normalize_status
+from booking_eligibility import HOLD_COLUMN, can_create_order, can_process_row, hold_reason, normalize_status
 
 _INSTALLED = False
 _ORIGINAL_LOAD_WORKSHEET = orders.load_worksheet
@@ -66,12 +66,42 @@ def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=Fal
     work = work[work.apply(can_create_order, axis=1).astype(bool)].copy() if len(work) else work.copy()
     if region:
         work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1)].copy()
+    mask = _mode_mask(batch_opt, work, mode)
+    return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
+
+
+def _mode_mask(batch_opt, work, mode):
     reason = work.get("原因", pd.Series("", index=work.index)).map(batch_opt._text)
     no_schedule_date = work.get("沒班表日期", pd.Series("", index=work.index)).map(batch_opt._text)
-    if mode == "no_schedule": mask = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
-    elif mode == "missing_order": mask = reason.str.contains("找不到訂單編號|未產生新訂單編號", regex=True, na=False)
-    else: mask = pd.Series(False, index=work.index)
-    return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
+    no_schedule = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
+    missing_order = reason.str.contains("找不到訂單編號|未產生新訂單編號", regex=True, na=False)
+    if mode == "all": return pd.Series(True, index=work.index)
+    if mode == "no_schedule": return no_schedule
+    if mode == "missing_order": return missing_order
+    if mode == "both": return no_schedule | missing_order
+    return pd.Series(False, index=work.index)
+
+
+def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True):
+    """指定列號＋自動篩選共同的先不約列；三種批次結果都以此顯示「先不約略過 N 列」。"""
+    held = set(_held_rows(batch_opt, sheet_name, "all", region, allow_failed, rows=rows)) if rows else set()
+    for mode in modes:
+        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope))
+    return sorted(held)
+
+
+def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None):
+    """若沒有「先不約」就會成為建單候選的列號；三種批次用來顯示「先不約略過 N 列」。"""
+    _, df = _load_worksheet_unique(sheet_name)
+    if df.empty: return []
+    work = df.copy()
+    if rows is not None: work = work[work["__sheet_row__"].astype(int).isin({int(x) for x in rows})]
+    held = work.apply(lambda row: bool(hold_reason(row)) and can_create_order({**row.to_dict(), HOLD_COLUMN: ""}), axis=1) if len(work) else pd.Series(dtype=bool)
+    work = work[held.astype(bool)] if len(work) else work
+    if not allow_failed and "結果" in work.columns: work = work[work["結果"].map(normalize_status).ne("失敗")]
+    if region: work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1).astype(bool)] if len(work) else work
+    if not len(work): return []
+    return sorted(work.loc[_mode_mask(batch_opt, work, mode), "__sheet_row__"].astype(int).tolist())
 
 
 def _update_sheet_rows_first_header(ws, row_results):
