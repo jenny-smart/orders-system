@@ -110,18 +110,18 @@ def query_native_address(
             page.goto(origin + '/booking/single', wait_until='domcontentloaded')
             if '/login' in page.url:
                 raise RuntimeError('後台地址查詢登入已失效')
-            for selector, value in (('#member_id', member_id), ('#clean_type_id', clean_type_id)):
-                page.locator(selector).evaluate('(el, value) => { el.value = value; }', str(value))
             try:
+                # 照後台畫面順序：選購買項目後才出現手機欄，按「查詢會員」後才出現地址區塊
+                # 與「查詢地區」按鈕；購買項目要觸發 change，頁面（Vue）才會記住，否則重繪時被清空。
+                _select_option(page, '#clean_type_id', clean_type_id)
+                if address_id and not str(phone or '').strip():
+                    raise RuntimeError('既有地址必須先用手機查詢會員，不能改走地址輸入欄位')
+                page.locator('#phone').fill(str(phone))
+                page.locator('input.get_member').click()
+                page.wait_for_function("() => String((document.querySelector('#member_id') || {}).value || '').trim()")
+                # 舊客有上次訂單時，頁面會在查詢會員 300ms 後帶入上次的縣市／鄉鎮市區，等它跑完再操作。
+                page.wait_for_timeout(500)
                 if address_id:
-                    if not str(phone or '').strip():
-                        raise RuntimeError('既有地址必須先用手機查詢會員，不能改走地址輸入欄位')
-                    phone_input = page.locator('input[placeholder="手機"]')
-                    phone_input.evaluate(
-                        '(el, value) => { el.value = value; el.dispatchEvent(new Event("input", {bubbles:true})); el.dispatchEvent(new Event("change", {bubbles:true})); }',
-                        str(phone),
-                    )
-                    page.locator('input.get_member').click()
                     page.wait_for_function(
                         "addressId => Array.from(document.querySelectorAll('select[name=\"addressId\"] option')).some(o => o.value === String(addressId))",
                         str(address_id),
@@ -134,6 +134,7 @@ def query_native_address(
                 else:
                     # 下拉選單沒有該地址，才使用新地址欄位：先選縣市、再選鄉鎮市區，
                     # 剩餘地址填空白欄位，最後按後台自己的「查詢地區」。
+                    page.locator('#address').fill('')
                     if city:
                         _select_option(page, '#city', city)
                     if district or country_id:
@@ -148,10 +149,7 @@ def query_native_address(
                         except BrowserTimeout as exc:
                             raise RuntimeError(f'後台鄉鎮市區選單沒有「{target}」（{city}），尚未查班表') from exc
                         _select_option(page, '#area', target)
-                    page.locator('#address').evaluate(
-                        '(el, value) => { el.value = value; el.dispatchEvent(new Event("input", {bubbles:true})); el.dispatchEvent(new Event("change", {bubbles:true})); }',
-                        str(address_detail or address),
-                    )
+                    page.locator('#address').fill(str(address_detail or address))
                     # 「查詢地區」由後台頁面用 Google 地圖定位；地圖程式載入前按下不會有任何反應。
                     try:
                         page.wait_for_function(

@@ -17,7 +17,7 @@ class NativeAddressTest(unittest.TestCase):
         page.evaluate.return_value = {'area_id': '45', 'company_id': '1', 'lat': '25.1', 'lng': '121.1'}
         context.cookies.return_value = []
         with patch('playwright.sync_api.sync_playwright', driver):
-            result = query_native_address(requests.Session(), 'https://example.invalid', '1', '測試地址', '1')
+            result = query_native_address(requests.Session(), 'https://example.invalid', '1', '測試地址', '1', phone='0912345678')
         page.goto.assert_called_once_with('https://example.invalid/booking/single', wait_until='domcontentloaded')
         page.locator.assert_any_call('.check_contain')
         self.assertEqual(result['area']['area_id'], '45')
@@ -126,11 +126,18 @@ class NativeNewAddressFormTest(unittest.TestCase):
             query_native_address(
                 requests.Session(), 'https://example.invalid', '1', '台北市萬華區環河南路二段250巷', '1',
                 city='台北市', country_id='13', district='萬華區', address_detail='環河南路二段250巷',
+                phone='0912345678',
             )
         selectors = [c.args[0] for c in page.locator.call_args_list]
+        # 照後台畫面順序：購買項目 → 手機查詢會員（地址區塊才出現）→ 縣市 → 鄉鎮市區 → 地址 → 查詢地區
+        self.assertLess(selectors.index('#clean_type_id'), selectors.index('#phone'))
+        self.assertLess(selectors.index('input.get_member'), selectors.index('#city'))
         self.assertLess(selectors.index('#city'), selectors.index('#area'))
-        self.assertLess(selectors.index('#area'), selectors.index('#address'))
-        self.assertLess(selectors.index('#address'), selectors.index('.check_contain'))
+        last_address = len(selectors) - 1 - selectors[::-1].index('#address')
+        self.assertLess(selectors.index('#area'), last_address)
+        self.assertLess(last_address, selectors.index('.check_contain'))
         filled = [c.args[1] for c in page.locator.return_value.evaluate.call_args_list]
+        self.assertIn('1', filled)
         self.assertIn('萬華區', filled)
-        self.assertIn('環河南路二段250巷', filled)
+        typed = [c.args[0] for c in page.locator.return_value.fill.call_args_list]
+        self.assertEqual(typed, ['0912345678', '', '環河南路二段250巷'])
