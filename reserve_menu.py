@@ -280,11 +280,13 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
                     f"明細讀取失敗 {debug.get('detail_errors', 0)} 張。"
                 )
 
-    # 取消進度放在清單之前：全部取消完、清單變空時仍要顯示進度與結果。
-    _render_reserve_cancel_job(env, backend_email, backend_password, _env_label(env))
+    def _show_cancel_job():
+        # 取消進度放在選取區塊下方；清單已全部取消變空時，也要顯示進度與結果。
+        _render_reserve_cancel_job(env, backend_email, backend_password, _env_label(env))
 
     rows = st.session_state.get("reserve_menu_cancel_rows") or []
     if not rows:
+        _show_cancel_job()
         return
     df = pd.DataFrame(rows)
     cols = [c for c in ["service_date", "period", "order_no", "customer_memo", "cancel_eligible"] if c in df.columns]
@@ -296,8 +298,10 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     st.write(f"查到 **{len(rows)} 張**；目前符合安全取消條件 **{len(safe_rows)} 張**。")
     if st.session_state.get("reserve_menu_cancel_filter") == "全部（僅供查看）":
         st.warning("『全部（僅供查看）』不開放取消，請改用其他客人備註篩選後重新查詢。")
+        _show_cancel_job()
         return
     if not safe_rows:
+        _show_cancel_job()
         return
 
     st.markdown("#### 選擇要取消的保留單")
@@ -366,6 +370,7 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
         st.session_state.reserve_menu_cancel_result = []
         st.session_state.reserve_cancel_clear_selection = True
         st.rerun()
+    _show_cancel_job()
 
 
 CANCEL_CHUNK_SIZE = 3
