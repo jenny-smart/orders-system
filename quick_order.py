@@ -1751,12 +1751,16 @@ def _sections_on_date(raw, service_date):
         return ""
     if isinstance(data, dict):
         data = data.get("data") or data.get("result") or data.get("sections") or []
-    sections = [
-        str(item.get("section") or "").strip()
-        for item in (data if isinstance(data, list) else [])
-        if isinstance(item, dict) and str(item.get("date") or "").strip() == str(service_date)
-    ]
-    return "、".join(x for x in sections if x)
+    sections = []
+    for item in (data if isinstance(data, list) else []):
+        if not isinstance(item, dict) or str(item.get("date") or "").strip() != str(service_date):
+            continue
+        section = str(item.get("section") or "").strip()
+        cleaners = item.get("cleaner") or []
+        names = "、".join(str(x) for x in cleaners) if isinstance(cleaners, list) else str(cleaners)
+        if section:
+            sections.append(f"{section}（{names}）" if names else section)
+    return "；".join(sections)
 
 
 def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token, slot, allow_auto_lemon_shift):
@@ -1784,10 +1788,13 @@ def _query_booking_slot_with_lemon_retry(session, base_url, payway, data, token,
             if isinstance(item, dict):
                 details.append(f"{item.get('name', '')}：{item.get('reason') or item.get('message') or ''}")
         shift_message = "；".join(x for x in details if x)
+        period_of_slot = slot.split("_", 1)[1] if "_" in slot else ""
+        others = _sections_on_date(raw, service_date_of_slot)
         raise Exception(
-            f"後台未回傳可預約時段：{slot}。"
+            f"{service_date_of_slot} {period_of_slot}（{data.get('person', '')} 人）無可預約人力："
+            "後台查詢班表結果沒有這個時段。"
             + (f"補檸檬人結果：{shift_message}。" if shift_message else "")
-            + f"後台班表回傳 {service_date_of_slot} 的時段：{_sections_on_date(raw, service_date_of_slot) or '無'}"
+            + (f"當天可預約：{others}。" if others else "當天沒有任何可預約時段。")
         )
     return raw, token, pre
 
@@ -3283,9 +3290,9 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
             new_order_results.append({
                 "index": idx + 1, "date_s": new_date_s, "period_s": new_period_s,
                 "hour": new_hour, "person": new_person, "order_no": None,
-                "error": (
-                    f"{e}\n"
-                    f"🔧 第二段B{idx+1}：payway={payway_a}，coupon_prefix={locals().get('coupon_prefix', '')}，"
+                "error": str(e),
+                "debug": (
+                    f"第二段B{idx+1}：payway={payway_a}，coupon_prefix={locals().get('coupon_prefix', '')}，"
                     f"coupon_code={locals().get('coupon_code', '')}，coupon_discount={locals().get('coupon_discount', '')}，"
                     f"price_with_tax={locals().get('price_with_tax', '')}，remaining_coupon_budget={remaining_coupon_budget}"
                 ),

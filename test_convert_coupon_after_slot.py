@@ -47,7 +47,7 @@ class LazyDiscountCodeTest(unittest.TestCase):
 
     def test_sections_on_date_lists_backend_sections(self):
         raw = '[{"date":"2026-10-25","section":"08:30-12:30"},{"date":"2026-10-25","section":"14:00-18:00"},{"date":"2026-10-24","section":"09:00-12:00"}]'
-        self.assertEqual(q._sections_on_date(raw, "2026-10-25"), "08:30-12:30、14:00-18:00")
+        self.assertEqual(q._sections_on_date(raw, "2026-10-25"), "08:30-12:30；14:00-18:00")
 
 
 if __name__ == "__main__":
