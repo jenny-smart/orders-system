@@ -165,8 +165,11 @@ def render_reserve_create(backend_email: str, backend_password: str, env: str) -
     if st.button("確認建立檸檬保留單", type="primary", width="stretch", disabled=not confirm or total_orders <= 0, key="reserve_create_execute"):
         execution_status = st.status(f"已收到建立指令，準備建立 {total_orders} 張保留單…", expanded=True)
         try:
-            execution_status.write("正在逐日期／時段重新確認即時班表並建立訂單…")
-            with st.spinner(f"正在{machine}逐張重新確認班表並建立保留單..."):
+            if payway == "儲值金":
+                execution_status.write("照批次成單：每一輪先重新分析各日期剩餘未配班人數，再一次勾選所有日期時段送出…")
+            else:
+                execution_status.write("信用卡／ATM 一次只能送一個時段：逐日期／時段重新確認即時班表並建立訂單…")
+            with st.spinner(f"正在{machine}建立保留單..."):
                 result = create_reserve_orders_for_plan(env_name=env, lookup_result=lookup, region=region, address=address, plan_rows=selected_rows, payway=payway, continue_after_slot_error=True)
             st.session_state.reserve_menu_last_create = result
             execution_status.update(label=f"建立完成：成功 {result.get('success_count', 0)} / {result.get('target_orders', 0)} 張", state="complete", expanded=False)
