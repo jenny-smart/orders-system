@@ -1633,12 +1633,7 @@ def resolve_backend_booking_address(
         best_addr["country_id"] = best_addr.get("country_id") or address_parts.get("country_id", "")
         return best_addr, address_parts, {}
 
-    # 舊客下拉選單沒有相同地址時，視為新增地址，與新客相同操作後台原生查詢地區。
-    if not address_parts.get("city") or not address_parts.get("district"):
-        raise Exception(
-            f"地址「{selected_address}」缺少縣市或鄉鎮市區，無法在後台選擇縣市／鄉鎮市區，"
-            "已停止，請補上後再查詢（例：台北市萬華區…）。"
-        )
+    # 舊客下拉選單沒有相同地址時，才視為新增地址並操作後台原生查詢地區。
     _assert_address_region_resolved(address_parts, selected_address)
     member_id = str(member.get("member_id") or "")
     if not member_id:
