@@ -60,7 +60,47 @@ def test_held_rows_match_filters_used_by_all_three_batches(monkeypatch):
     assert guard._held_rows(batch, 's') == [3]
     assert guard._held_rows(batch, 's', allow_failed=True) == [2, 3]
     assert guard._held_rows(batch, 's', 'no_schedule', allow_failed=True) == [2]
-    assert guard._held_rows(batch, 's', 'missing_order', allow_failed=True) == [3]
+    # O 欄沒有單號就算；此表 O 欄空白，可用「（O欄空白）」勾選
+    assert guard._held_rows(batch, 's', 'missing_order', allow_failed=True) == [2, 3]
+    assert guard._held_rows(batch, 's', 'missing_order', allow_failed=True, o_texts=['（O欄空白）']) == [2, 3]
+    assert guard._held_rows(batch, 's', 'missing_order', allow_failed=True, o_texts=['系統未產生新訂單編號']) == []
     assert guard._held_rows(batch, 's', region='台中', allow_failed=True) == []
     assert guard._held_for_request(batch, 's', '台北', rows=[3, 6]) == [3]
     assert guard._held_for_request(batch, 's', '台北', modes=['no_schedule']) == [2]
+
+
+def test_o_text_options_and_filter_use_current_o_column(monkeypatch):
+    from types import SimpleNamespace
+    import selected_row_status_guard as guard
+    columns = ['服務人時', '備註', '姓名', '電話', '地址', '日期', '開始時間', '結束時間', '狀態', '購買項目', '簡訊', '客人備註',
+               '訂單編號', '結果', '原因', '預約條件']
+    def row(no, o, **extra):
+        values = {**BASE, '原因': o, '結果': '', **extra}
+        return [values.get(c, '') for c in columns] + [no]
+    rows = [row(2, '系統未產生新訂單編號'), row(3, '無訂單編號'), row(4, ''), row(5, '系統未產生新訂單編號'),
+            row(6, 'LC123 回填'), row(7, '無訂單編號', 狀態='暫停')]
+    df = pd.DataFrame(rows, columns=columns + ['__sheet_row__'])
+    monkeypatch.setattr(guard, '_load_worksheet_unique', lambda name: (None, df))
+    batch = SimpleNamespace(_text=lambda v: str(v or '').strip(), get_region_by_address=lambda address, accounts: '台北',
+                            REQUIRED_COLUMNS=['姓名', '電話', '地址', '日期', '開始時間', '結束時間', '狀態', '訂單編號'],
+                            _date_text=str, _time_text=str)
+    assert guard._o_text_options(batch, 's') == [('（O欄空白）', 1), ('系統未產生新訂單編號', 2), ('無訂單編號', 1)]
+    assert guard._auto_filter_rows(batch, 's', 'missing_order', allow_failed=True) == [2, 3, 4, 5]
+    assert guard._auto_filter_rows(batch, 's', 'missing_order', allow_failed=True, o_texts=['無訂單編號']) == [3]
+    assert guard._auto_filter_rows(batch, 's', 'missing_order', allow_failed=True,
+                                   o_texts=['（O欄空白）', '系統未產生新訂單編號']) == [2, 4, 5]
+
+
+def test_o_text_widget_lists_counts_and_returns_selection(monkeypatch):
+    from unittest.mock import MagicMock
+    import selected_row_status_guard as guard
+    st = MagicMock()
+    st.session_state = {}
+    st.button.return_value = False
+    st.multiselect.return_value = ['無訂單編號']
+    monkeypatch.setattr(guard, '_o_text_options', lambda *a, **k: [('（O欄空白）', 1), ('無訂單編號', 2)])
+    assert guard.render_o_text_filter(st, None, '台北202701', '台北', 'k') == ['無訂單編號']
+    label, options = st.multiselect.call_args.args
+    assert options == ['（O欄空白）', '無訂單編號'] and '都不選' in label
+    assert st.multiselect.call_args.kwargs['format_func']('無訂單編號') == '無訂單編號（2 列）'
+    assert guard.render_o_text_filter(st, None, '', '台北', 'k') == []

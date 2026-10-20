@@ -61,20 +61,48 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
     return work
 
 
-def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None):
-    work = candidates if candidates is not None else _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed)
+# 「O欄找不到訂單編號」：O 欄沒有單號；可再依 O 欄目前的文字勾選（都不選＝全部）。
+O_BLANK_OPTION = "（O欄空白）"
+_ORDER_NO_PATTERN = r"(?:LC|TT|KK)\d+"
+
+
+def _creatable(batch_opt, work, region=None):
     work = work[work.apply(can_create_order, axis=1).astype(bool)].copy() if len(work) else work.copy()
-    if region:
-        work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1)].copy()
-    mask = _mode_mask(batch_opt, work, mode)
+    if region and len(work):
+        work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1).astype(bool)].copy()
+    return work
+
+
+def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None, o_texts=None):
+    work = candidates if candidates is not None else _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed)
+    work = _creatable(batch_opt, work, region)
+    if not len(work): return []
+    mask = _mode_mask(batch_opt, work, mode, o_texts)
     return sorted(work.loc[mask, "__sheet_row__"].astype(int).tolist())
 
 
-def _mode_mask(batch_opt, work, mode):
+def _o_label(text):
+    return text or O_BLANK_OPTION
+
+
+def _o_text_options(batch_opt, sheet_name, region=None, allow_failed=True):
+    """目前可建單、O 欄沒有單號的列，其 O 欄文字與列數，供畫面勾選。"""
+    work = _creatable(batch_opt, _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed), region)
+    if not len(work): return []
+    o_col = work["__o_col__"].map(batch_opt._text)
+    o_col = o_col[~o_col.str.contains(_ORDER_NO_PATTERN, regex=True, na=False)]
+    counts = o_col.map(_o_label).value_counts()
+    return sorted(counts.items(), key=lambda item: (item[0] != O_BLANK_OPTION, -item[1], item[0]))
+
+
+def _mode_mask(batch_opt, work, mode, o_texts=None):
     reason = work.get("原因", pd.Series("", index=work.index)).map(batch_opt._text)
     no_schedule_date = work.get("沒班表日期", pd.Series("", index=work.index)).map(batch_opt._text)
     no_schedule = reason.str.contains("無班表|沒班表", regex=True, na=False) | no_schedule_date.ne("")
-    missing_order = reason.str.contains("找不到訂單編號|未產生新訂單編號", regex=True, na=False)
+    o_col = work.get("__o_col__", pd.Series("", index=work.index)).map(batch_opt._text)
+    missing_order = ~o_col.str.contains(_ORDER_NO_PATTERN, regex=True, na=False)
+    if o_texts:
+        missing_order &= o_col.map(_o_label).isin(set(o_texts))
     if mode == "all": return pd.Series(True, index=work.index)
     if mode == "no_schedule": return no_schedule
     if mode == "missing_order": return missing_order
@@ -82,26 +110,53 @@ def _mode_mask(batch_opt, work, mode):
     return pd.Series(False, index=work.index)
 
 
-def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True):
+def _held_for_request(batch_opt, sheet_name, region, rows=(), modes=(), mode_scope=None, allow_failed=True, o_texts=None):
     """指定列號＋自動篩選共同的先不約列；三種批次結果都以此顯示「先不約略過 N 列」。"""
     held = set(_held_rows(batch_opt, sheet_name, "all", region, allow_failed, rows=rows)) if rows else set()
     for mode in modes:
-        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope))
+        held.update(_held_rows(batch_opt, sheet_name, mode, region, allow_failed, rows=mode_scope, o_texts=o_texts))
     return sorted(held)
 
 
-def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None):
+def _held_rows(batch_opt, sheet_name, mode="all", region=None, allow_failed=False, rows=None, o_texts=None):
     """若沒有「先不約」就會成為建單候選的列號；三種批次用來顯示「先不約略過 N 列」。"""
     _, df = _load_worksheet_unique(sheet_name)
     if df.empty: return []
     work = df.copy()
+    work["__o_col__"] = df.iloc[:, 14].map(batch_opt._text) if df.shape[1] > 14 else ""
     if rows is not None: work = work[work["__sheet_row__"].astype(int).isin({int(x) for x in rows})]
     held = work.apply(lambda row: bool(hold_reason(row)) and can_create_order({**row.to_dict(), HOLD_COLUMN: ""}), axis=1) if len(work) else pd.Series(dtype=bool)
     work = work[held.astype(bool)] if len(work) else work
     if not allow_failed and "結果" in work.columns: work = work[work["結果"].map(normalize_status).ne("失敗")]
     if region: work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1).astype(bool)] if len(work) else work
     if not len(work): return []
-    return sorted(work.loc[_mode_mask(batch_opt, work, mode), "__sheet_row__"].astype(int).tolist())
+    return sorted(work.loc[_mode_mask(batch_opt, work, mode, o_texts), "__sheet_row__"].astype(int).tolist())
+
+
+def render_o_text_filter(st, batch_opt, sheet_name, region, key, allow_failed=True):
+    """三種批次共用：列出 O 欄目前文字讓使用者單選／多選／不選；回傳所選文字。"""
+    if not sheet_name:
+        st.caption("輸入工作表名稱後，會列出 O 欄目前的內容可勾選。")
+        return []
+    cache_key, scope = f"{key}_options", (sheet_name, region, allow_failed)
+    if st.button("重新讀取 O 欄內容", key=f"{key}_reload") or st.session_state.get(f"{cache_key}_scope") != scope:
+        try:
+            st.session_state[cache_key] = _o_text_options(batch_opt, sheet_name, region, allow_failed)
+            st.session_state[f"{cache_key}_scope"] = scope
+        except Exception as exc:
+            st.warning(f"無法讀取 O 欄內容：{exc}")
+            return []
+    options = st.session_state.get(cache_key) or []
+    counts = dict(options)
+    if not options:
+        st.caption("目前沒有 O 欄無單號的可建單列。")
+        return []
+    selected = st.multiselect(
+        "O 欄內容（可單選、多選；都不選＝全部沒有單號的列）", [text for text, _ in options],
+        format_func=lambda text: f"{text[:60]}{'…' if len(text) > 60 else ''}（{counts.get(text, 0)} 列）",
+        key=f"{key}_selected",
+    )
+    return [text for text in selected if text in counts]
 
 
 def _update_sheet_rows_first_header(ws, row_results):

@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from accounts import ACCOUNTS
 from batch_recovery_meta import install_patch as install_recovery_meta_patch
-from selected_row_status_guard import install_patch as install_selected_row_status_guard
+from selected_row_status_guard import install_patch as install_selected_row_status_guard, render_o_text_filter
 from batch_booking_safety import install_streamlit_batch_hooks
 
 install_selected_row_status_guard()
@@ -34,7 +34,7 @@ def _token():
     return ""
 
 
-def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False):
+def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon, retry_failed=False, o_texts=()):
     token = _token()
     if not token:
         raise RuntimeError("尚未設定 ORDERS_GITHUB_TOKEN；需提供可啟動 orders-system Actions 的 GitHub Token。")
@@ -51,6 +51,7 @@ def _dispatch(sheet, chunk_size, max_rows, filter_mode, region, allow_auto_lemon
             "filter_mode":filter_mode, "region":region,
             "allow_auto_lemon":"true" if allow_auto_lemon else "false",
             "retry_failed":"true" if retry_failed else "false",
+            "o_texts": json.dumps(list(o_texts or []), ensure_ascii=False),
             "pricing_json": json.dumps(load_config()),
         }},
         timeout=30,
@@ -285,6 +286,11 @@ def render(env: str):
         "自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號",
         value=False, key="optimized_cloud_missing_o",
     )
+    if auto_missing_o:
+        import batch_booking_optimized as batch_opt
+        o_texts = render_o_text_filter(st, batch_opt, sheet, region, "optimized_cloud_o_texts", allow_failed=retry_failed)
+    else:
+        o_texts = []
     c1, c2 = st.columns(2)
     chunk = c1.number_input("每輪最多處理列數", 1, 200, 50, 10, key="optimized_cloud_chunk")
     max_rows = c2.number_input("本次最多處理列數（0＝全部）", 0, 5000, 0, 10, key="optimized_cloud_max")
@@ -295,7 +301,7 @@ def render(env: str):
     if auto_missing_o:
         modes.append("missing_order")
     filter_mode = "both" if len(modes) == 2 else (modes[0] if modes else "all")
-    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed)
+    pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(o_texts))
     _sync_cloud_settings(pending_key + (int(chunk), int(max_rows)))
     st.caption("雲端預設略過 N 欄結果為「失敗」的列；調整後勾選「重試失敗列」，不必清空結果。要補檸檬人時請同時勾選上方補檸檬人選項。同一次執行中，每列處理後不會在下一輪重複執行。")
 
@@ -304,7 +310,7 @@ def render(env: str):
             from cloud_batch_booking import load_pending
             rows = [row_no for row_no, _, _ in load_pending(
                 sheet, filter_mode=filter_mode, selected_region=region, allow_auto_lemon=allow_auto_lemon,
-                retry_failed=retry_failed,
+                retry_failed=retry_failed, o_texts=o_texts,
             )]
             st.session_state.optimized_cloud_pending = len(rows)
             st.session_state.optimized_cloud_pending_rows = rows
@@ -320,7 +326,7 @@ def render(env: str):
     confirm = st.checkbox("我確認執行：建單＋寄確認信＋同步 Google 日曆", key="optimized_cloud_confirm")
     if st.button("🚀  開始雲端批次成單", type="primary", use_container_width=True, disabled=not(sheet and confirm), key="optimized_cloud_start"):
         try:
-            st.session_state['optimized_cloud_dispatch'] = _dispatch(sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed)
+            st.session_state['optimized_cloud_dispatch'] = _dispatch(sheet, int(chunk), int(max_rows), filter_mode, region, allow_auto_lemon, retry_failed, o_texts)
             st.success("已交給 GitHub Actions 雲端執行；可關閉瀏覽器或電腦。")
             st.markdown(f"[查看雲端執行進度](https://github.com/{REPO}/actions/workflows/{WORKFLOW})")
         except Exception as exc:

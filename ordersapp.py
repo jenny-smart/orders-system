@@ -782,10 +782,10 @@ def parse_row_input(row_text: str):
     return sorted(rows)
 
 
-def _shared_auto_filter(sheet_name, region, mode, candidate_rows=None):
+def _shared_auto_filter(sheet_name, region, mode, candidate_rows=None, o_texts=None):
     """與批次建單優化、雲端批次共用同一自動篩選條件。"""
     from selected_row_status_guard import _auto_filter_rows
-    rows = _auto_filter_rows(batch_booking_optimized, sheet_name, mode, region=region, allow_failed=True)
+    rows = _auto_filter_rows(batch_booking_optimized, sheet_name, mode, region=region, allow_failed=True, o_texts=o_texts)
     candidate_set = {int(x) for x in (candidate_rows or [])}
     return [row for row in rows if not candidate_set or row in candidate_set]
 
@@ -794,8 +794,8 @@ def find_no_slot_rows(sheet_name, region, candidate_rows=None):
     return _shared_auto_filter(sheet_name, region, "no_schedule", candidate_rows)
 
 
-def find_missing_order_in_o_rows(sheet_name, region, candidate_rows=None):
-    return _shared_auto_filter(sheet_name, region, "missing_order", candidate_rows)
+def find_missing_order_in_o_rows(sheet_name, region, candidate_rows=None, o_texts=None):
+    return _shared_auto_filter(sheet_name, region, "missing_order", candidate_rows, o_texts)
 
 
 def format_log_message(msg):
@@ -1153,6 +1153,8 @@ if mode == "批次建單（Google Sheet）":
     st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」欄不是「先不約」；先不約的列會略過並在執行過程註明原因。")
     auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
     auto_missing_o_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="auto_missing_o_rows")
+    from selected_row_status_guard import render_o_text_filter
+    o_texts = render_o_text_filter(st, batch_booking_optimized, sheet_name.strip(), region, "batch_o_texts") if auto_missing_o_rows else []
     st.markdown("<hr>", unsafe_allow_html=True)
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
@@ -1178,7 +1180,7 @@ if mode == "批次建單（Google Sheet）":
                 if auto_no_slot_rows:
                     target_set.update(find_no_slot_rows(sheet_name.strip(), region, candidate_rows))
                 if auto_missing_o_rows:
-                    target_set.update(find_missing_order_in_o_rows(sheet_name.strip(), region, candidate_rows))
+                    target_set.update(find_missing_order_in_o_rows(sheet_name.strip(), region, candidate_rows, o_texts))
                 target_rows = sorted(target_set)
             except Exception as e:
                 st.error(f"自動篩選列號失敗：{e}"); st.stop()
@@ -1187,7 +1189,7 @@ if mode == "批次建單（Google Sheet）":
                     from selected_row_status_guard import _held_for_request
                     modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
                     held_only = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, modes=modes,
-                                                  mode_scope=candidate_rows or None)
+                                                  mode_scope=candidate_rows or None, o_texts=o_texts)
                 except Exception:
                     held_only = []
                 if held_only:
@@ -1211,7 +1213,7 @@ if mode == "批次建單（Google Sheet）":
             if auto_no_slot_rows or auto_missing_o_rows:
                 modes = [m for m, on in (("no_schedule", auto_no_slot_rows), ("missing_order", auto_missing_o_rows)) if on]
                 held_rows = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, modes=modes,
-                                              mode_scope=candidate_rows or None)
+                                              mode_scope=candidate_rows or None, o_texts=o_texts)
             else:
                 held_rows = _held_for_request(batch_booking_optimized, sheet_name.strip(), region, target_rows)
         except Exception as e:
