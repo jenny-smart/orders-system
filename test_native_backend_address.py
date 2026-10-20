@@ -111,3 +111,26 @@ class PostalCodeAddressSplitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeNewAddressFormTest(unittest.TestCase):
+    def test_new_address_selects_city_district_fills_rest_then_clicks(self):
+        import requests
+        from backend_address_form import query_native_address
+        driver = MagicMock()
+        page = driver.return_value.__enter__.return_value.chromium.launch.return_value.new_context.return_value.new_page.return_value
+        page.url = 'https://example.invalid/booking/single'
+        page.evaluate.return_value = {'area_id': '45', 'company_id': '1'}
+        driver.return_value.__enter__.return_value.chromium.launch.return_value.new_context.return_value.cookies.return_value = []
+        with patch('playwright.sync_api.sync_playwright', driver):
+            query_native_address(
+                requests.Session(), 'https://example.invalid', '1', '台北市萬華區環河南路二段250巷', '1',
+                city='台北市', country_id='13', district='萬華區', address_detail='環河南路二段250巷',
+            )
+        selectors = [c.args[0] for c in page.locator.call_args_list]
+        self.assertLess(selectors.index('#city'), selectors.index('#area'))
+        self.assertLess(selectors.index('#area'), selectors.index('#address'))
+        self.assertLess(selectors.index('#address'), selectors.index('.check_contain'))
+        filled = [c.args[1] for c in page.locator.return_value.evaluate.call_args_list]
+        self.assertIn('萬華區', filled)
+        self.assertIn('環河南路二段250巷', filled)
