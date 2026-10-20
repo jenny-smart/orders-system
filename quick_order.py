@@ -2047,13 +2047,15 @@ def _get_newest_coupon_code(session, base_url, prefix):
         return ""
 
 
-def _coupon_title(member_or_payload, order_no="", fallback=""):
-    """優惠券標題＝訂購人姓名＋原訂單末4碼；沒有原訂單時用 fallback（手機）末4碼。"""
+def _coupon_title(member_or_payload, order_no="", fallback="", amount=""):
+    """優惠券標題＝訂購人姓名＋原訂單末4碼－面額；沒有原訂單時用 fallback（手機）末4碼。"""
     data = member_or_payload or {}
     member = data.get("member", data) if isinstance(data, dict) else {}
     name = str((member or {}).get("name") or "").strip()
     tail = str(order_no or fallback or "").strip()[-4:]
-    return f"{name}{tail}" if name else tail
+    title = f"{name}{tail}" if name else tail
+    amount_text = str(amount if amount not in (None, "") else "").strip()
+    return f"{title}-{amount_text}" if amount_text else title
 
 
 def _build_coupon_via_session(session, base_url, title, discount, date_s, date_e, prefix, piece, regions, service_items):
@@ -3003,7 +3005,7 @@ def convert_order(
     if not member_payload:
         raise Exception(f"電話 {phone_a} 查無會員資料")
     coupon_code = _build_coupon_via_session(
-        session, base_url, title=_coupon_title(member_payload, order_no_a, phone_a),
+        session, base_url, title=_coupon_title(member_payload, order_no_a, phone_a, coupon_discount),
         discount=coupon_discount, date_s=today_str, date_e=service_date_a,
         prefix=coupon_prefix, piece=2, regions=["台北", "台中"], service_items=["居家清潔", "裝修細清"],
     )
@@ -3232,7 +3234,7 @@ def convert_order_stage2_create_new_orders(stage1_result, new_orders):
                     return ""
                 code = _build_coupon_via_session(
                     session, base_url,
-                    title=_coupon_title(member_payload, order_no_a),
+                    title=_coupon_title(member_payload, order_no_a, amount=coupon_discount),
                     discount=coupon_discount,
                     date_s=today_str, date_e=new_date_s,
                     prefix=coupon_prefix, piece=1,
@@ -4653,7 +4655,7 @@ def stored_value_makeup_create_stored_order(
 
     def _make_coupon_a():
         # 步驟 10：查到班表時段後才建立優惠券A，查無時段不留下沒用到的券。
-        coupon_a.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], "", phone), discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services) or {})
+        coupon_a.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], "", phone, ctx["plan"]["coupon_a"]), discount=ctx["plan"]["coupon_a"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_a"], piece="1", regions=regions, service_items=services) or {})
         return coupon_a.get("coupon_code") or coupon_a.get("coupon_prefix") or ctx["prefix_a"]
 
     stored_order = quick_create_order(env_name=env_name, payway="儲值金", region=ctx["region"], lookup_result=ctx["lookup"], address=ctx["address"], clean_type_id=clean_type_id, date_s=service_date, period_s=period_s, hour=str(hour), person=str(person), discount_code=_make_coupon_a, pricing_balance=ctx["balance"], allow_auto_lemon_shift=bool(allow_auto_lemon_shift))
@@ -4698,7 +4700,7 @@ def stored_value_makeup_create_paid_order(
         # 步驟 10：查到班表時段後才建立優惠券B。
         if ctx["balance"] <= 0:
             return ""
-        coupon_b.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], stored_order_no, phone), discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services) or {})
+        coupon_b.update(create_coupon(env_name, backend_email, backend_password, title=_coupon_title(ctx["member"], stored_order_no, phone, ctx["plan"]["coupon_b"]), discount=ctx["plan"]["coupon_b"], date_s=ctx["today_str"], date_e=ctx["date_e"], prefix=ctx["prefix_b"], piece="1", regions=regions, service_items=services) or {})
         return coupon_b.get("coupon_code") or coupon_b.get("coupon_prefix") or ctx["prefix_b"]
 
     invoice = _invoice_payload(invoice_mode, member_email=ctx["member"].get("email") or "", mobile_carrier=mobile_carrier, company_title=company_title, company_no=company_no)
