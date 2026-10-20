@@ -134,3 +134,16 @@ class NativeNewAddressFormTest(unittest.TestCase):
         filled = [c.args[1] for c in page.locator.return_value.evaluate.call_args_list]
         self.assertIn('萬華區', filled)
         self.assertIn('環河南路二段250巷', filled)
+
+
+class MissingDistrictTest(unittest.TestCase):
+    def test_new_address_without_district_stops_before_browser(self):
+        payload = {"member": {"member_id": "1", "memberAddressList": []}}
+        with patch("backend_address_form.query_native_address") as native:
+            with self.assertRaisesRegex(Exception, "缺少縣市或鄉鎮市區"):
+                q.resolve_backend_booking_address(None, payload, "台北市環河南路二段250巷42弄5號", "t", "1", phone="0910000000")
+        native.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

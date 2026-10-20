@@ -38,11 +38,11 @@ class CalculationContractTest(unittest.TestCase):
                         {'session': object(), 'phone': '', 'member_payload': {'member': {
                             'member_id': '1',
                             'memberAddressList': [{
-                                'id': '7', 'address': '測試地址',
+                                'id': '7', 'address': '新北市中和區測試路1號',
                                 'areaId': '25', 'companyId': '1',
                             }],
                         }}},
-                        '測試地址', '1', '2026-09-26', '08:30-12:30', '4', person='2')
+                        '新北市中和區測試路1號', '1', '2026-09-26', '08:30-12:30', '4', person='2')
                 data = query.call_args.args[3]
                 self.assertEqual((data['hour'], data['person'], data['period_s']), ('4', '2', '08:30-12:30'))
                 self.assertEqual(data['price'], '2286')
