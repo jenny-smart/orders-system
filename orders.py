@@ -395,7 +395,9 @@ def normalize_text_for_parse(text):
 
 
 def normalize_addr_for_match(addr):
-    return re.sub(r"\s+", "", str(addr or "")).strip()
+    normalized = re.sub(r"\s+", "", str(addr or "")).strip().replace("臺", "台")
+    # 郵遞區號不是街址本體；使用者有無輸入 3、5或 6 碼都應命中同一個後台地址。
+    return re.sub(r"^\d{3}(?:\d{2,3})?(?=[^\d])", "", normalized)
 
 
 def same_address(a, b):
