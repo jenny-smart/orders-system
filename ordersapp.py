@@ -2968,7 +2968,7 @@ else:
     elif single_feature == "儲值金補價差":
         info_panel("流程說明", [
             "此功能拆成兩段：先成立儲值金折抵單，再成立客付補價差訂單。",
-            "兩段都可勾選安全自動補檸檬人；已有任何班別的專員一律跳過，不動其他客人已配班專員。",
+            "第一段儲值金清零單固定全部換成檸檬人，不足時自動補檸檬人班表；第二段客付單可勾選自動補檸檬人。已有任何班別的專員一律跳過，不動其他客人已配班專員。",
             "日期類型由服務日期自動判斷：週一到週五為平日，週六日為週末。",
             "儲值金清零單走 /booking/stored_value_routine，優惠券A = 服務總額 - 儲值金餘額；剩餘額用儲值金扣掉後歸零。",
             "補差價訂單走 /booking/single，優惠券B = 原儲值金餘額，付款方式限 ATM / 信用卡。",
@@ -3023,7 +3023,8 @@ else:
             sv_address = st.text_input("指定服務地址（留空則用會員第一個地址）", key="sv_auto_address")
         with opt2:
             sv_region = st.selectbox("適用地區", [""] + list(COUPON_COMPANY_ID_MAP.keys()), format_func=lambda x: x or "依地址自動判斷", key="sv_auto_region")
-        sv_allow_auto_lemon = st.checkbox("查無檸檬人時自動補檸檬人（不動其他客人已配班專員）", value=False, key="sv_allow_auto_lemon")
+        st.caption("第一段儲值金清零單固定全部換成檸檬人；不足時系統會自動補檸檬人班表。")
+        sv_allow_auto_lemon = st.checkbox("第二段客付單：若無人力，自動補檸檬人（不動其他客人已配班專員）", value=False, key="sv_allow_auto_lemon")
         st.markdown("<hr>", unsafe_allow_html=True)
         step("5", "第一段：建立儲值金清零訂單")
         sv_stored_total_preview = sv_unit_price * sv_person_hours
@@ -3038,14 +3039,14 @@ else:
                 st.error("請輸入客人手機號碼")
             else:
                 try:
-                    with st.spinner("第一段執行中：查儲值金 → 建優惠券A → 建儲值金清零訂單 → 用既有班表換檸檬人…"):
+                    with st.spinner("第一段執行中：查儲值金 → 查班表 → 建優惠券A → 建儲值金清零訂單 → 換成檸檬人（不足時自動補檸檬人班表）…"):
                         stored_stage = stored_value_makeup_create_stored_order(
                             env_name=env, backend_email=backend_email.strip(), backend_password=backend_password.strip(),
                             phone=sv_phone.strip(), clean_type_id=CLEAN_TYPE_ID_MAP[sv_ctype],
                             service_date=sv_svc_date.strftime("%Y-%m-%d"), period_s=sv_svc_period,
                             hour=str(sv_svc_hour), person=str(int(sv_svc_person)),
                             address=sv_address.strip(), region=sv_region, coupon_prefix_base=sv_phone.strip(),
-                            allow_auto_lemon_shift=sv_allow_auto_lemon,
+                            allow_auto_lemon_shift=True,
                         )
                     st.session_state.sv_stored_stage = stored_stage
                     st.session_state.sv_paid_stage = {}
