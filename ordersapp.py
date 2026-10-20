@@ -458,6 +458,7 @@ from weekend_reminders import (
 )
 from cleaner_reminders import find_paid_cleaner_reminders
 from accounts import ACCOUNTS
+from booking_eligibility import can_create_order
 from memo_system.ui import render_memo_system
 import batch_booking_optimized
 import cloud_batch_booking_ui
@@ -789,10 +790,8 @@ def find_no_slot_rows(sheet_name, region, candidate_rows=None):
         df = df[df["__sheet_row__"].isin(candidate_set)]
     rows = []
     for _, row in df.iterrows():
-        status = str(row.get("狀態", "")).strip()
-        order_no = str(row.get("訂單編號", "")).strip()
         reason_text = f"{row.get('原因', '')} {row.get('沒班表日期', '')}"
-        if status == "未安排" and not order_no and "無班表" in str(reason_text):
+        if can_create_order(row) and "無班表" in str(reason_text):
             if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
                 rows.append(int(row["__sheet_row__"]))
     return rows
@@ -805,10 +804,8 @@ def find_missing_order_in_o_rows(sheet_name, region, candidate_rows=None):
         df = df[df["__sheet_row__"].isin(candidate_set)]
     rows = []
     for _, row in df.iterrows():
-        status = str(row.get("狀態", "")).strip()
-        order_no = str(row.get("訂單編號", "")).strip()
         o_text = str(row.iloc[14] if len(row) > 14 else "")
-        if status == "未安排" and not order_no and not re.search(r"(LC|TT|KK)\d+", o_text):
+        if can_create_order(row) and not re.search(r"(LC|TT|KK)\d+", o_text):
             if get_region_by_address(str(row.get("地址", "")), ACCOUNTS) == region:
                 rows.append(int(row["__sheet_row__"]))
     return rows
@@ -1166,6 +1163,7 @@ if mode == "批次建單（Google Sheet）":
     st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
     batch_allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key="batch_allow_auto_lemon")
     st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
+    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」欄不是「先不約」；先不約的列會略過並在執行過程註明原因。")
     auto_no_slot_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="auto_no_slot_rows")
     auto_missing_o_rows = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="auto_missing_o_rows")
     st.markdown("<hr>", unsafe_allow_html=True)

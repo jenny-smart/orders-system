@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+import booking_eligibility
+
 
 def test_failed_rows_excluded_from_candidates_and_auto_filters():
     source = Path(__file__).parent / 'selected_row_status_guard.py'
@@ -19,8 +21,10 @@ def test_failed_rows_excluded_from_candidates_and_auto_filters():
         {**base, '__sheet_row__': 4, '結果': ' 失敗\u200b '},
         {**base, '__sheet_row__': 5, '結果': '', '狀態': '已安排'},
         {**base, '__sheet_row__': 6, '結果': '失敗', '訂單編號': 'LC123'},
+        {**base, '__sheet_row__': 7, '結果': '', '預約條件': '先不約：2026大掃除 V 欄為 FALSE，尚未確認'},
     ]
-    namespace = {'pd': pd, 're': re, '_load_worksheet_unique': lambda _: (None, pd.DataFrame(rows))}
+    namespace = {'pd': pd, 're': re, '_load_worksheet_unique': lambda _: (None, pd.DataFrame(rows)),
+                 **{k: getattr(booking_eligibility, k) for k in ('HOLD_COLUMN', 'can_create_order', 'can_process_row', 'normalize_status')}}
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[]), str(source), 'exec'), namespace)
     batch = SimpleNamespace(REQUIRED_COLUMNS=list(base), _text=lambda v: str(v or '').strip(),
                             _date_text=str, _time_text=str)

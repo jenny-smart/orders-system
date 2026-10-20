@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """批次建單共用防呆：欄位去重、候選條件、回填欄位定位、無班表補檸檬人重試。"""
 from __future__ import annotations
-import re
 import types
 import pandas as pd
 import orders
+from booking_eligibility import HOLD_COLUMN, can_create_order, can_process_row, normalize_status
 
 _INSTALLED = False
 _ORIGINAL_LOAD_WORKSHEET = orders.load_worksheet
@@ -16,11 +16,6 @@ def _scalar(value):
     if isinstance(value, pd.Series): return value.iloc[0] if len(value) else ""
     if isinstance(value, (list, tuple)): return value[0] if value else ""
     return value
-
-
-def normalize_status(value) -> str:
-    text = str(_scalar(value) or "").replace("\u00a0", " ").replace("\ufeff", "").replace("\u200b", "")
-    return re.sub(r"\s+", "", text)
 
 
 def _dedupe_dataframe(df):
@@ -39,12 +34,11 @@ def _first_series(df, name):
 
 
 def _should_process_row(row):
-    order_no = str(_scalar(row.get("訂單編號", "")) or "").strip()
-    return bool(order_no) or normalize_status(row.get("狀態", "")) == "未安排"
+    return can_process_row(row)
 
 
 def _should_create_order(row):
-    return not str(_scalar(row.get("訂單編號", "")) or "").strip() and normalize_status(row.get("狀態", "")) == "未安排"
+    return can_create_order(row)
 
 
 def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
@@ -55,11 +49,10 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
     work = pd.DataFrame(index=df.index); work["__sheet_row__"] = _first_series(df, "__sheet_row__")
     for col in batch_opt.REQUIRED_COLUMNS: work[col] = _first_series(df, col).map(batch_opt._text)
     work["__o_col__"] = df.iloc[:, 14].map(batch_opt._text) if df.shape[1] > 14 else ""
-    for col in ("結果", "原因", "沒班表日期"): work[col] = _first_series(df, col).map(batch_opt._text) if col in df.columns else ""
+    for col in ("結果", "原因", "沒班表日期", HOLD_COLUMN): work[col] = _first_series(df, col).map(batch_opt._text) if col in df.columns else ""
     required_ok = work["姓名"].ne("") & work["電話"].ne("") & work["地址"].ne("") & work["日期"].ne("") & work["開始時間"].ne("") & work["結束時間"].ne("")
     # 雲端預設排除失敗列；本機入口或雲端明確確認重試時傳入 allow_failed=True。
-    create_ok = (work["狀態"].map(normalize_status).eq("未安排")
-                 & work["訂單編號"].eq("")
+    create_ok = (work.apply(can_create_order, axis=1).astype(bool)
                  & (allow_failed | work["結果"].map(normalize_status).ne("失敗")))
     work = work[required_ok & (create_ok | work["訂單編號"].ne(""))].copy().reset_index(drop=True)
     work["日期顯示"] = work["日期"].map(batch_opt._date_text)
@@ -70,7 +63,7 @@ def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False):
 
 def _auto_filter_rows(batch_opt, sheet_name, mode, region=None, allow_failed=False, candidates=None):
     work = candidates if candidates is not None else _safe_load_candidates(batch_opt, sheet_name, allow_failed=allow_failed)
-    work = work[work["狀態"].map(normalize_status).eq("未安排") & work["訂單編號"].eq("")].copy()
+    work = work[work.apply(can_create_order, axis=1).astype(bool)].copy() if len(work) else work.copy()
     if region:
         work = work[work.apply(lambda row: batch_opt.get_region_by_address(batch_opt._text(row.get("地址")), __import__("accounts").ACCOUNTS) == region, axis=1)].copy()
     reason = work.get("原因", pd.Series("", index=work.index)).map(batch_opt._text)

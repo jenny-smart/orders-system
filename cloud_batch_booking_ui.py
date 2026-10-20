@@ -271,6 +271,7 @@ def render(env: str):
         value=False, key="optimized_cloud_retry_failed",
         help="已補班、要自動補檸檬人，或客人已重新儲值時勾選；仍依區域及篩選條件選取未安排、訂單編號空白的列。",
     )
+    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」欄不是「先不約」；先不約的列會略過並在執行過程註明原因。")
     auto_no_slot = st.checkbox(
         "自動篩選：狀態未安排＋訂單編號空白＋無班表",
         value=False, key="optimized_cloud_no_schedule",
