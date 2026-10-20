@@ -3077,6 +3077,19 @@ else:
                 st.success(lemon_r.get("message", "已改為檸檬人"))
             else:
                 st.error(lemon_r.get("message", "現有班表無足夠檸檬人，已停止第二段，請手動處理"))
+                if so.get("order_no") and st.button(
+                    f"🍋 重新將 {so.get('order_no')} 換成檸檬人（會先補檸檬人班表）",
+                    use_container_width=True, key="sv_retry_lemon_btn",
+                ):
+                    try:
+                        with st.spinner("補檸檬人班表並換成檸檬人中…"):
+                            stored_stage["lemon_result"] = qo.stored_value_makeup_retry_lemon(
+                                env, backend_email.strip(), backend_password.strip(), stored_stage,
+                            ) or {}
+                        st.session_state.sv_stored_stage = stored_stage
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"換成檸檬人失敗：{e}")
             step("6", "第二段：建立客付補價差訂單")
             st.markdown(f'<div class="hint-box">客付補價差單會建立優惠券B，面額為原儲值金餘額 <b>{stored_stage["balance"]}</b> 元，付款方式為 <b>{sv_customer_payway}</b>。</div>', unsafe_allow_html=True)
             _sv_stage_ready = bool(lemon_r.get("success"))
