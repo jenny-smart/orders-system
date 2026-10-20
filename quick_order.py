@@ -1792,8 +1792,11 @@ def quick_create_order(
     if not member_payload:
         raise Exception("此電話查無會員資料，請先走新客人資訊收集流程建立會員後再建單")
     member = member_payload.get("member", {})
+    # 每筆都重新查詢會員再比對地址下拉：同一次建立多筆時，第 1 筆新增的地址
+    # 已存進後台下拉，後續各筆要選該 addressId。價格仍用原本查詢時的餘額。
+    address_payload = (get_member(session, phone, token, clean_type_id) if phone else None) or member_payload
     best_addr, address_parts, addr_check = resolve_backend_booking_address(
-        session, member_payload, address, token, clean_type_id, phone=phone,
+        session, address_payload, address, token, clean_type_id, phone=phone,
     )
     address_for_lookup = str(best_addr.get("address") or address).strip()
     address_for_submit = address_for_lookup
