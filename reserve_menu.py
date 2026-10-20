@@ -189,7 +189,8 @@ def _render_reserve_create_job(env, lookup, region, address) -> None:
     st.markdown("#### 3. 建立進度")
     st.progress(
         min(1.0, job.get("success_count", 0) / max(1, job["target_orders"])),
-        text=f"已完成 {job['round']} 輪；成功 {job.get('success_count', 0)} / {job['target_orders']} 張；尚餘 {left} 張",
+        text=(f"已完成 {job['round']} 輪；成功 {job.get('success_count', 0)} / {job['target_orders']} 張；"
+              f"待建 {left} 張；已停止 {job.get('stopped_orders', 0)} 張（原因見下表 message 欄）"),
     )
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -205,9 +206,16 @@ def _render_reserve_create_job(env, lookup, region, address) -> None:
     if status == "paused":
         st.warning(f"已暫停：第 {job['round']} 輪完成後停止，尚餘 {left} 張未建。按「繼續生成」會先重新分析剩餘人力再接著建。")
     elif status == "done":
-        st.success(f"建立完成：成功 {job.get('success_count', 0)} / {job['target_orders']} 張，共 {job['round']} 輪。")
+        stopped = job.get("stopped_orders", 0)
+        msg = f"建立完成：成功 {job.get('success_count', 0)} / {job['target_orders']} 張，共 {job['round']} 輪。"
+        if stopped:
+            st.warning(msg + f" 有 {stopped} 張因時段停止未建立，原因見下表 message 欄。")
+        else:
+            st.success(msg)
     if job["results"]:
-        st.dataframe(pd.DataFrame(job["results"]), width="stretch", hide_index=True)
+        df = pd.DataFrame(job["results"])
+        front = [c for c in ("success", "round", "service_date", "period", "order_no", "staff", "message") if c in df.columns]
+        st.dataframe(df[front + [c for c in df.columns if c not in front]], width="stretch", hide_index=True)
     if status == "running":
         st.info(f"正在執行第 {job['round'] + 1} 輪：重新分析各日期剩餘人力後送出…（按「暫停生成」會在本輪結束後暫停）")
         try:
