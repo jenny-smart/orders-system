@@ -41,6 +41,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      o_texts:
+        description: JSON list of selected O-column texts for missing_order; empty means all
+        required: false
+        default: "[]"
+        type: string
 concurrency:
   group: optimized-cloud-batch-booking-prod
   cancel-in-progress: false
@@ -70,6 +75,7 @@ jobs:
           KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
           KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          O_TEXTS_JSON: ${{ inputs.o_texts }}
         run: >-
           python cloud_batch_booking.py
           --sheet "${{ inputs.sheet_name }}"
