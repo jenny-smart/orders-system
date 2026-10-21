@@ -46,6 +46,11 @@ on:
         required: false
         default: "[]"
         type: string
+      stages:
+        description: JSON list of booking stages (可約/改加/已確認/未回覆) to book this run
+        required: false
+        default: '["可約"]'
+        type: string
 concurrency:
   group: optimized-cloud-batch-booking-prod
   cancel-in-progress: false
@@ -76,6 +81,7 @@ jobs:
           KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
           O_TEXTS_JSON: ${{ inputs.o_texts }}
+          STAGES_JSON: ${{ inputs.stages }}
         run: >-
           python cloud_batch_booking.py
           --sheet "${{ inputs.sheet_name }}"
