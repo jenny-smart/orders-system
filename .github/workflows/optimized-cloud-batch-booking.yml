@@ -47,7 +47,7 @@ on:
         default: "[]"
         type: string
       stages:
-        description: JSON list of booking stages (可約/改加/已確認/未回覆) to book this run
+        description: JSON list of booking stages (可約/改加/人時不足/已確認/未回覆) to book this run
         required: false
         default: '["可約"]'
         type: string
