@@ -383,3 +383,6 @@ def render(env: str):
 
     st.markdown("<hr>", unsafe_allow_html=True)
     _render_cloud_status()
+    # 頁面底部留白：進度區每 15 秒更新時高度會變，且右下角有 Streamlit 浮動列，
+    # 留白讓進度一定能完整捲到畫面內。
+    st.markdown('<div style="height:240px"></div>', unsafe_allow_html=True)
