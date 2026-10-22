@@ -132,5 +132,20 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(len(self.posted), 2)
 
 
+class CopyResultsTests(unittest.TestCase):
+    def test_tsv_has_original_and_new_date_period(self):
+        results = [
+            {"order_no": "LC1", "name": "王小明", "phone": "0912345678", "service_date_before": "2026-10-23",
+             "period": "08:30-12:30", "success": True, "new_date": "2027-03-02", "message": "已移到"},
+            {"order_no": "LC2", "name": "李\t大", "phone": "", "service_date_before": "2026-10-23",
+             "period": "09:00-12:00", "success": False, "new_date": "", "message": "無法安排"},
+        ]
+        lines = tt.results_tsv(results).split("\n")
+        self.assertEqual(lines[0].split("\t")[:7], ["訂單編號", "姓名", "電話", "原日期", "原時段", "新日期", "新時段"])
+        self.assertEqual(lines[1].split("\t")[:8],
+                         ["LC1", "王小明", "0912345678", "2026-10-23", "08:30-12:30", "2027-03-02", "08:30-12:30", "成功"])
+        self.assertEqual(lines[2].split("\t")[3:8], ["2026-10-23", "09:00-12:00", "", "", "失敗"])
+
+
 if __name__ == "__main__":
     unittest.main()

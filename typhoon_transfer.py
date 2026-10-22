@@ -255,3 +255,34 @@ def transfer_typhoon_orders(env_name, backend_email, backend_password, typhoon_d
             result = {"success": False, "new_date": "", "message": str(exc), "attempts": []}
         results.append({**row, **result})
     return results
+
+
+RESULT_COPY_HEADERS = ["訂單編號", "姓名", "電話", "原日期", "原時段", "新日期", "新時段", "結果", "說明"]
+
+
+def result_copy_rows(results):
+    """移轉結果整理成原日期／時段與移轉後日期／時段。"""
+    return [
+        {
+            "訂單編號": r.get("order_no", ""),
+            "姓名": r.get("name", ""),
+            "電話": r.get("phone", ""),
+            "原日期": r.get("service_date_before", ""),
+            "原時段": r.get("period", ""),
+            "新日期": r.get("new_date", "") if r.get("success") else "",
+            "新時段": r.get("period", "") if r.get("success") else "",
+            "結果": "成功" if r.get("success") else "失敗",
+            "說明": r.get("message", ""),
+        }
+        for r in results
+    ]
+
+
+def results_tsv(results):
+    """Tab 分隔文字，貼到 Google Sheets 會自動分欄。"""
+    lines = ["\t".join(RESULT_COPY_HEADERS)]
+    for row in result_copy_rows(results):
+        lines.append("\t".join(
+            str(row.get(h, "") or "").replace("\t", " ").replace("\n", " ") for h in RESULT_COPY_HEADERS
+        ))
+    return "\n".join(lines)
