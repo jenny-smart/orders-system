@@ -257,7 +257,7 @@ def transfer_typhoon_orders(env_name, backend_email, backend_password, typhoon_d
     return results
 
 
-RESULT_COPY_HEADERS = ["訂單編號", "姓名", "電話", "LINE@連結", "原日期", "原時段", "新日期", "新時段", "結果", "說明"]
+RESULT_COPY_HEADERS = ["訂單編號", "姓名", "電話", "LINE@連結", "地址", "原日期", "原時段", "新日期", "新時段", "結果", "說明"]
 
 
 def result_copy_rows(results):
@@ -268,6 +268,7 @@ def result_copy_rows(results):
             "姓名": r.get("name", ""),
             "電話": r.get("phone", ""),
             "LINE@連結": r.get("line_url", ""),
+            "地址": r.get("address", ""),
             "原日期": r.get("service_date_before", ""),
             "原時段": r.get("period", ""),
             "新日期": r.get("new_date", "") if r.get("success") else "",
