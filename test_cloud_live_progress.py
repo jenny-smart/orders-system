@@ -213,3 +213,17 @@ def test_rows_with_different_people_are_not_grouped_together():
     three = hybrid._phone_address_group_key({**base, "服務人時": "3人3小時"})
     assert usual != three
     assert usual == hybrid._phone_address_group_key({**base, "服務人時": "2人"})
+
+
+def test_latest_run_falls_back_when_filtered_list_is_empty():
+    import cloud_batch_booking_ui as ui
+    responses = {True: {"workflow_runs": []}, False: {"workflow_runs": [{"id": 17}]}}
+    calls = []
+
+    def get(path):
+        calls.append(path)
+        return MagicMock(json=MagicMock(return_value=responses["branch=main" in path]))
+
+    with patch.object(ui, '_github_get', side_effect=get):
+        assert ui._latest_run() == {"id": 17}
+    assert len(calls) == 2

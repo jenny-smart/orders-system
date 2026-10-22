@@ -81,6 +81,9 @@ def _latest_run():
     runs = _github_get(
         f"actions/workflows/{WORKFLOW}/runs?per_page=1&branch=main&event=workflow_dispatch"
     ).json().get("workflow_runs", [])
+    if not runs:
+        # GitHub 的篩選查詢偶爾會暫時回傳空清單（執行中的也一樣）；改查不篩選的最新一筆。
+        runs = _github_get(f"actions/workflows/{WORKFLOW}/runs?per_page=1").json().get("workflow_runs", [])
     return runs[0] if runs else None
 
 
