@@ -3,13 +3,14 @@
 
 流程（由上而下逐筆，各筆移到自己原本的時段）：
 1. 後台訂單以「服務日期起迄＝颱風假＋已付款」搜尋，依列表由上而下排序。
-2. 每筆訂單從移轉區間第一天開始試：開啟後台「修改日期」頁，日期下拉選單
-   沒有這天就跳下一天；再用後台查詢班表確認該日「完整同時段」人力足夠，
-   才送出修改日期（日期＋原時段，時段一定相同）。
+2. 每筆訂單從移轉區間第一天開始試：讀後台「修改日期」頁內嵌的可選清單
+   （就是日期／時間下拉選單的內容），日期選得到、時間也選得到「同一時段」，
+   就送出修改日期（日期＋原時段，時段一定相同）；否則跳下一天。
 3. 送出後回查訂單，服務日期與時段確實變成目標日期／原時段才算成功；
    否則視為該日無法安排，換下一天。整個區間都排不進去就列為失敗，訂單不動。
 """
 
+import json
 import re
 from datetime import date, datetime, timedelta
 
@@ -149,30 +150,25 @@ def find_typhoon_orders(env_name, backend_email, backend_password, typhoon_date,
 
 
 def parse_change_date_page(html_text):
-    """解析「修改日期」頁：日期下拉選單可選日期，以及頁面內若有的各日可選時段。
+    """解析「修改日期」頁內嵌的可選清單（頁面 JS 用它填日期／時間下拉選單）。
 
-    回傳 (dates, sections)；dates 為 None 代表頁面沒有可解析的日期選單。
+    回傳 {日期: {時段: [專員...]}}；找不到清單時拋錯，不猜測。
     """
-    soup = BeautifulSoup(html_text or "", "html.parser")
-    dates = None
-    select = soup.find("select", attrs={"name": "date"})
-    if select is not None:
-        dates = set()
-        for option in select.find_all("option"):
-            match = re.search(r"\d{4}-\d{2}-\d{2}", option.get("value") or option.get_text())
-            if match:
-                dates.add(match.group(0))
-    sections = {}
-    pattern = re.compile(
-        r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]*?"section"\s*:\s*"([^"]+)"'
-        r'|"section"\s*:\s*"([^"]+)"[^{}]*?"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"'
-    )
-    for match in pattern.finditer(html_text or ""):
-        day = match.group(1) or match.group(4)
-        period = _compact_period(match.group(2) or match.group(3))
+    match = re.search(r"var\s+json\s*=\s*'(.*?)';", html_text or "", re.S)
+    if not match:
+        raise RuntimeError("修改日期頁找不到可選日期清單，未修改")
+    try:
+        items = json.loads(match.group(1))
+    except Exception as exc:
+        raise RuntimeError(f"修改日期頁的可選日期清單無法解析，未修改：{exc}")
+    options = {}
+    for item in items if isinstance(items, list) else []:
+        day = str(item.get("date") or "").strip()
+        period = _compact_period(item.get("section"))
         if day and period:
-            sections.setdefault(day, set()).add(period)
-    return dates, sections
+            cleaners = item.get("cleaner") or []
+            options.setdefault(day, {})[period] = list(cleaners) if isinstance(cleaners, list) else []
+    return options
 
 
 def _change_date_options(session, base_url, order_no, phone=""):
@@ -195,36 +191,10 @@ def _order_now_at(session, order_no, date_s, period):
     return service_date == date_s and _compact_period(period_raw) == period, service_date, _compact_period(period_raw)
 
 
-def _period_hours(period):
-    start, end = _period_sort_key(period)
-    hours = (end - start) / 60
-    return int(hours - 1 if hours >= 7 else hours)
-
-
 def _staff_names(staff):
     if not staff or staff == "無人力":
         return []
     return [name for name in re.split(r"\s*[Xx×]\s*", staff) if name.strip()]
-
-
-def check_slot_available(session, base_url, env_name, row, day):
-    """用後台查詢班表（get_section）確認該日、完整同時段有足夠人力。"""
-    token = orders.get_csrf_token(session)
-    member_payload = orders.get_member(session, row["phone"], token, row.get("clean_type_id", "1"))
-    if not member_payload:
-        raise RuntimeError(f"電話 {row['phone']} 查無會員資料")
-    lookup = {
-        "session": session, "token": token, "phone": row["phone"],
-        "member_payload": member_payload, "base_url": base_url, "env_name": env_name,
-    }
-    hours = _period_hours(row["period"])
-    result = qo.quick_check_available_slots(
-        env_name=env_name, payway=row.get("payway") or "儲值金", lookup_result=lookup,
-        address=row.get("address", ""), clean_type_id=row.get("clean_type_id", "1"),
-        date_s=day, hour=str(hours), person=str(row.get("person") or 2),
-        periods=[row["period"]], period_hours={row["period"]: hours},
-    )
-    return bool(result and result[0].get("available"))
 
 
 def transfer_one_order(session, base_url, env_name, row, dates):
@@ -232,22 +202,16 @@ def transfer_one_order(session, base_url, env_name, row, dates):
     order_no, period = row["order_no"], row["period"]
     attempts = []
     try:
-        available_dates, sections = _change_date_options(session, base_url, order_no, row.get("phone", ""))
+        options = _change_date_options(session, base_url, order_no, row.get("phone", ""))
     except Exception as exc:
         return {"success": False, "new_date": "", "message": str(exc), "attempts": attempts}
     for day in dates:
-        if available_dates is not None and day not in available_dates:
+        if day not in options:
             attempts.append(f"{day} 不在修改日期選單")
             continue
-        if day in sections and period not in sections[day]:
-            attempts.append(f"{day} 無 {period} 時段")
+        if period not in options[day]:
+            attempts.append(f"{day} 無 {period} 時段（可選：{'、'.join(sorted(options[day]))}）")
             continue
-        try:
-            if not check_slot_available(session, base_url, env_name, row, day):
-                attempts.append(f"{day} {period} 人力不足")
-                continue
-        except Exception as exc:
-            return {"success": False, "new_date": "", "message": f"查詢班表失敗，未修改：{exc}", "attempts": attempts}
         ok, msg = qo._update_order_service_date(session, base_url, order_no, day, period, phone=row.get("phone", ""))
         try:
             block = qo._fetch_purchase_block_for_order_no(session, order_no)
