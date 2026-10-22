@@ -184,9 +184,9 @@ def test_hybrid_runner_stops_before_next_group_when_paused():
     import pandas as pd
     import hybrid_batch_runner as hybrid
     rows = pd.DataFrame([
-        {"__sheet_row__": 2, "姓名": "甲", "電話": "0911111111", "地址": "台北市A", "訂單編號": ""},
-        {"__sheet_row__": 3, "姓名": "乙", "電話": "0922222222", "地址": "台北市B", "訂單編號": ""},
-        {"__sheet_row__": 4, "姓名": "丙", "電話": "0933333333", "地址": "台北市C", "訂單編號": ""},
+        {"__sheet_row__": 2, "姓名": "甲", "服務人時": "2人", "開始時間": "9:00", "結束時間": "12:00", "電話": "0911111111", "地址": "台北市A", "訂單編號": ""},
+        {"__sheet_row__": 3, "姓名": "乙", "服務人時": "2人", "開始時間": "9:00", "結束時間": "12:00", "電話": "0922222222", "地址": "台北市B", "訂單編號": ""},
+        {"__sheet_row__": 4, "姓名": "丙", "服務人時": "2人", "開始時間": "9:00", "結束時間": "12:00", "電話": "0933333333", "地址": "台北市C", "訂單編號": ""},
     ])
     created = []
     checks = iter([False, True])
@@ -204,3 +204,12 @@ def test_hybrid_runner_stops_before_next_group_when_paused():
             selected_rows=[2, 3, 4], should_stop=lambda: next(checks))
     assert created == [2]
     assert result['paused'] is True and result['total_processed'] == 1
+
+
+def test_rows_with_different_people_are_not_grouped_together():
+    import hybrid_batch_runner as hybrid
+    base = {"電話": "0986838278", "地址": "台北市文山區試院路102-2號15樓", "開始時間": "14:00", "結束時間": "17:00"}
+    usual = hybrid._phone_address_group_key({**base, "服務人時": ""})
+    three = hybrid._phone_address_group_key({**base, "服務人時": "3人3小時"})
+    assert usual != three
+    assert usual == hybrid._phone_address_group_key({**base, "服務人時": "2人"})

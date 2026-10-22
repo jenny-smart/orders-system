@@ -22,10 +22,17 @@ _orders.ORDERS_UPDATED_AT = "2026-09-07"
 
 
 def _phone_address_group_key(row):
-    """優化／雲端模式只依電話＋地址分組。"""
+    """優化／雲端模式依電話＋地址＋人數＋時數分組。
+
+    同組送單時人數、時數都取第一列；例如平日 2人3小時、某天 3人3小時，必須分開，
+    否則 3 人那天會被當成 2 人建單。
+    """
+    people, hours = _orders.parse_service_human_hour(row.get("服務人時", ""), row.get("開始時間", ""), row.get("結束時間", ""))
     return (
         _orders.normalize_phone(row.get("電話", "")),
         _orders.normalize_addr_for_match(row.get("地址", "")),
+        str(people),
+        str(hours),
     )
 
 
