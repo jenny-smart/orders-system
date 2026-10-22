@@ -50,6 +50,44 @@ class ReserveAddressTest(unittest.TestCase):
             self.assertEqual(ra.cleanup_after_cancel("dev", "e", "p", [{"ok": True, "address": "x"}]), [])
         lister.assert_not_called()
 
+    def _counts(self, pages):
+        """pages：每頁的訂單卡片 (服務日期, 付款狀態, 地址)。"""
+        from types import SimpleNamespace
+        calls = []
+
+        def get(url, params=None, **kw):
+            calls.append(params)
+            page = int(params["page"])
+            return SimpleNamespace(status_code=200, text=str(page))
+
+        def cards(text):
+            return [{"lines": [], "info": info} for info in (pages[int(text) - 1] if int(text) <= len(pages) else [])]
+
+        def item(block):
+            date, status, address = block["info"]
+            return {"phone": "0939592628", "service_date": date, "payment_status": status, "address": address}
+
+        session = SimpleNamespace(get=get)
+        with patch.object(ra.co, "_new_logged_in_session", return_value=(session, "https://x")), \
+                patch.object(ra.orders, "extract_order_cards_from_purchase_html", side_effect=cards), \
+                patch.object(ra.co, "_order_from_block", side_effect=item), \
+                patch.object(ra, "_today", return_value="2026-12-01"):
+            return ra.active_order_counts("dev", "e", "p"), calls
+
+    def test_active_counts_use_phone_only_and_filter_locally(self):
+        future = [("2026-12-10", "已付款", "新北市A路1號")] * 18 + [
+            ("2026-12-05", "取消訂單", "新北市B路2號"), ("2026-11-30", "已付款", "新北市C路3號")]
+        (counts, complete), calls = self._counts([future, [("2026-11-01", "已付款", "新北市D路4號")] * 20])
+        self.assertTrue(complete)
+        self.assertEqual(counts, {ra.address_key("新北市A路1號"): 18})
+        self.assertEqual(calls[0]["clean_date_s"], "")  # 不送日期篩選
+        self.assertEqual(calls[0]["orderBy"], "date_clean:desc")
+
+    def test_no_orders_at_all_is_not_treated_as_complete(self):
+        (counts, complete), _ = self._counts([[]])
+        self.assertEqual((counts, complete), ({}, False))
+        self.assertTrue(all(p["處理"] == "跳過" for p in ra.plan_cleanup(["新北市A路1號"], counts, complete)))
+
 
 if __name__ == "__main__":
     unittest.main()

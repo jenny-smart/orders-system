@@ -496,10 +496,18 @@ def render_reserve_address_cleanup(backend_email: str, backend_password: str, en
         return
     confirm = st.checkbox(f"我確認要在{_env_label(env)}刪除以上 {len(targets)} 個地址", key="reserve_address_confirm")
     if st.button("確認刪除地址", type="primary", width="stretch", disabled=not confirm, key="reserve_address_delete"):
-        with st.spinner(f"正在逐一刪除 {len(targets)} 個地址…"):
+        with st.spinner(f"正在重新確認訂單並逐一刪除 {len(targets)} 個地址…"):
             try:
-                st.session_state.reserve_address_result = reserve_address.delete_member_addresses(
-                    env, backend_email.strip(), backend_password.strip(), targets, phone.strip())
+                # 讀取清單後可能又有新訂單：按確認時重新檢查，只刪仍然沒有訂單的地址。
+                counts, complete = reserve_address.active_order_counts(
+                    env, backend_email.strip(), backend_password.strip(), phone.strip())
+                recheck = reserve_address.plan_cleanup(targets, counts, complete)
+                still = [item["地址"] for item in recheck if item["處理"] == reserve_address.DELETE]
+                deleted = reserve_address.delete_member_addresses(
+                    env, backend_email.strip(), backend_password.strip(), still, phone.strip())
+                st.session_state.reserve_address_result = deleted + [
+                    {"地址": item["地址"], "結果": "未刪除", "說明": item["原因"]}
+                    for item in recheck if item["處理"] != reserve_address.DELETE]
             except Exception as exc:
                 st.session_state.reserve_address_result = [{"地址": "", "結果": "失敗", "說明": str(exc)}]
         st.session_state.pop("reserve_address_plan", None)

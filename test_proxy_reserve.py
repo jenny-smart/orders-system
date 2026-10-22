@@ -42,6 +42,14 @@ class ProxyReserveTest(unittest.TestCase):
         pr.apply(df)
         self.assertNotEqual(orders.build_group_key(df.iloc[0]), orders.build_group_key(df.iloc[1]))
 
+    def test_checked_row_without_name_is_rejected(self):
+        df = pd.DataFrame([{"姓名": " ", "電話": "0912345678", "代客保留": "TRUE"},
+                           {"姓名": "", "電話": "0922333444", "代客保留": ""}])
+        pr.apply(df)
+        with self.assertRaises(ValueError):
+            pr.proxy_name(df.iloc[0])
+        self.assertEqual(pr.proxy_name(df.iloc[1]), "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,27 +97,40 @@ def list_member_addresses(env_name, backend_email, backend_password, phone=RESER
 
 
 def active_order_counts(env_name, backend_email, backend_password, phone=RESERVE_PHONE) -> Tuple[Dict[str, int], bool]:
-    """今天以後、未取消的訂單數（依地址）；第二個值＝是否讀完全部頁數。"""
+    """今天以後、未取消的訂單數（依地址）；第二個值＝是否確定讀完。
+
+    後台 /purchase 同時送電話與日期篩選可能整個失效、回傳空結果（見 cancel_order.find_orders），
+    所以只用電話篩選、依服務日期新到舊排序，日期與付款狀態在這裡自己比對。
+    一張訂單都讀不到時不當作「已讀完」，避免把還在使用的地址刪掉。
+    """
     session, base_url = co._new_logged_in_session(env_name, backend_email, backend_password)
+    today = _today()
     counts: Counter = Counter()
+    seen = 0
     for page in range(1, MAX_ORDER_PAGES + 1):
         params = dict(co.PURCHASE_FILTER_PARAMS_TEMPLATE)
-        params.update({"phone": phone, "clean_date_s": _today(), "clean_date_e": "2099-12-31", "page": str(page)})
+        params.update({"phone": phone, "orderBy": "date_clean:desc", "page": str(page)})
         resp = session.get(f"{base_url}/purchase", params=params, headers=orders.HEADERS, allow_redirects=True)
         if resp.status_code != 200:
             return dict(counts), False
         blocks = orders.extract_order_cards_from_purchase_html(resp.text)
+        seen += len(blocks)
+        page_dates = []
         for block in blocks:
             item = co._order_from_block(block) or {}
             if item.get("phone") and item["phone"] != phone:
                 continue
-            if item.get("payment_status") in INACTIVE_PAYMENT_STATUS:
+            service_date = str(item.get("service_date") or "")
+            if service_date:
+                page_dates.append(service_date)
+            if service_date < today or item.get("payment_status") in INACTIVE_PAYMENT_STATUS:
                 continue
-            address = orders._calchk_address_from_lines(block.get("lines", []))
+            address = item.get("address") or orders._calchk_address_from_lines(block.get("lines", []))
             if address:
                 counts[address_key(address)] += 1
-        if len(blocks) < 20:
-            return dict(counts), True
+        # 依服務日期新到舊：最後一頁，或整頁都已早於今天，就不會再有今天以後的訂單。
+        if len(blocks) < 20 or (page_dates and max(page_dates) < today):
+            return dict(counts), seen > 0
     return dict(counts), False
 
 

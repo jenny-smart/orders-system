@@ -15,6 +15,7 @@ PROXY_COLUMN = "代客保留"
 RESERVE_PHONE = "0939592628"
 MEMO_PREFIX = "代客保留："
 NAME_KEY = "__proxy_name__"
+FLAG_KEY = "__proxy__"
 CUSTOMER_PHONE_KEY = "__customer_phone__"
 _CHECKED = {"TRUE", "V", "Y", "YES", "1", "是", "✓", "✔", "☑", "勾"}
 
@@ -32,6 +33,7 @@ def apply(df):
     if df is None or PROXY_COLUMN not in getattr(df, "columns", []):
         return df
     mask = df[PROXY_COLUMN].map(is_checked)
+    df[FLAG_KEY] = mask
     df[NAME_KEY] = ""
     df[CUSTOMER_PHONE_KEY] = ""
     if mask.any():
@@ -42,8 +44,12 @@ def apply(df):
 
 
 def proxy_name(row) -> str:
-    """代客保留列回傳客人姓名；一般列回傳空字串。"""
+    """代客保留列回傳客人姓名；一般列回傳空字串。打勾但沒有姓名時報錯，不建沒有備註的單。"""
     try:
-        return str(row.get(NAME_KEY, "") or "").strip()
+        name = str(row.get(NAME_KEY, "") or "").strip()
+        flagged = bool(row.get(FLAG_KEY, False))
     except AttributeError:
         return ""
+    if flagged and not name:
+        raise ValueError("代客保留列沒有姓名，無法寫入「代客保留：姓名」備註；請補上姓名後再建單")
+    return name
