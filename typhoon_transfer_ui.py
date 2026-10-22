@@ -27,7 +27,7 @@ def _rows_to_frame(rows):
 def render(backend_email, backend_password, env):
     st.caption(
         "依颱風假當天的時段，逐筆用後台「修改日期」移到移轉區間：先選日期、時段維持原時段。"
-        "同一時段依順序排入，第一天排不下才換下一天。"
+        "名單為後台「服務日期＋已付款」搜尋結果由上而下的順序，依序排入，第一天排不下才換下一天。"
     )
     c1, c2 = st.columns(2)
     with c1:
@@ -63,14 +63,14 @@ def render(backend_email, backend_password, env):
         return
     debug = st.session_state.get("tt_debug", {})
     typhoon_date = st.session_state.get("tt_loaded_date", "")
-    st.caption(f"後台：{debug.get('base_url', '')}｜{typhoon_date} 共 {len(rows)} 筆服務訂單（已排除取消／退款）")
+    st.caption(f"後台：{debug.get('base_url', '')}｜{typhoon_date} 共 {len(rows)} 筆已付款服務訂單")
     if debug.get("hit_page_limit"):
         st.warning("查詢已達頁數上限，名單可能不完整，請到後台確認。")
     if not rows:
-        st.success("颱風假當天沒有需要移轉的訂單。")
+        st.success("颱風假當天沒有已付款的服務訂單。")
         return
 
-    st.markdown("**移轉名單**（可取消勾選，或改「順序」調整同時段的排入先後）")
+    st.markdown("**移轉名單**（依後台列表由上而下；可取消勾選，或改「順序」調整先後）")
     edited = st.data_editor(
         _rows_to_frame(rows), hide_index=True, use_container_width=True, key="tt_editor",
         disabled=["時段", "訂單編號", "姓名", "電話", "人數", "專員", "付款狀態"],
@@ -96,8 +96,7 @@ def render(backend_email, backend_password, env):
 
     by_order = {row["order_no"]: row for row in rows}
     selected = edited[edited["移轉"]].copy()
-    selected["_period_key"] = selected["時段"].map(tt._period_sort_key)
-    selected = selected.sort_values(["_period_key", "順序"])
+    selected = selected.sort_values("順序", kind="stable")
     plan = [by_order[no] for no in selected["訂單編號"]]
 
     confirm = st.checkbox(f"確認要把 {len(plan)} 筆訂單的服務日期改到 {dates[0]}～{dates[-1]}（時段不變）", key="tt_confirm")
@@ -137,4 +136,3 @@ def render(backend_email, backend_password, env):
             }
             for r in results
         ]), hide_index=True, use_container_width=True)
-        st.caption("Google 日曆事件不會自動移動，請另外調整；也請記得通知客人新的服務日期。")

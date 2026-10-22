@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """颱風假訂單移轉：把颱風假當天的訂單，依時段逐筆用後台「修改日期」移到移轉區間。
 
-流程（每個時段各自依序）：
-1. 查颱風假當天的服務訂單（排除取消訂單／已退款）。
+流程（由上而下逐筆，各筆移到自己原本的時段）：
+1. 後台訂單以「服務日期起迄＝颱風假＋已付款」搜尋，依列表由上而下排序。
 2. 每筆訂單從移轉區間第一天開始試：開啟後台「修改日期」頁，日期下拉選單
    沒有這天就跳下一天；再用後台查詢班表確認該日「完整同時段」人力足夠，
    才送出修改日期（日期＋原時段，時段一定相同）。
@@ -122,26 +122,29 @@ def _order_row_from_block(block, typhoon_date):
 
 
 def find_typhoon_orders(env_name, backend_email, backend_password, typhoon_date, max_pages=40):
-    """查颱風假當天所有服務訂單，依時段開始時間、訂單編號排序。"""
+    """後台訂單以服務日期起迄＝颱風假、已付款搜尋，依後台列表由上而下的順序回傳。"""
     typhoon_date = _parse_date(typhoon_date).strftime("%Y-%m-%d")
     session, base_url = _login(env_name, backend_email, backend_password)
     found = {}
     hit_page_limit = True
     for page in range(1, max_pages + 1):
         params = dict(qo.PURCHASE_FILTER_PARAMS_TEMPLATE)
-        params.update({"clean_date_s": typhoon_date, "clean_date_e": typhoon_date, "page": str(page)})
+        params.update({
+            "clean_date_s": typhoon_date, "clean_date_e": typhoon_date,
+            "purchase_status": qo.PURCHASE_STATUS_PAID, "page": str(page),
+        })
         resp = session.get(orders.PURCHASE_URL, params=params, headers=orders.HEADERS, allow_redirects=True)
         if resp.status_code != 200:
             raise RuntimeError(f"訂單查詢失敗（HTTP {resp.status_code}）")
         blocks = orders.extract_order_cards_from_purchase_html(resp.text)
         for block in blocks:
             row = _order_row_from_block(block, typhoon_date)
-            if row and row["order_no"]:
-                found[row["order_no"]] = row
+            if row and row["order_no"] and row["payment_status"] == "已付款":
+                found.setdefault(row["order_no"], row)
         if len(blocks) < 20:
             hit_page_limit = False
             break
-    rows = sorted(found.values(), key=lambda r: (_period_sort_key(r["period"]), r["order_no"]))
+    rows = list(found.values())
     return rows, {"base_url": base_url, "hit_page_limit": hit_page_limit}
 
 

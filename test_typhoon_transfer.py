@@ -46,6 +46,29 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(sections, {"2027-03-01": {"09:00-12:00"}})
 
 
+class FindOrdersTests(unittest.TestCase):
+    def test_paid_search_keeps_backend_top_to_bottom_order(self):
+        blocks = [
+            _block("LC9", "2026-10-23", "09:00 - 12:00"),
+            _block("LC3", "2026-10-23", "08:30 - 12:30"),
+            _block("LC5", "2026-10-23", "08:30 - 12:30", status="待付款"),
+            _block("LC1", "2026-10-23", "08:30 - 12:30"),
+        ]
+        calls = []
+
+        class Session:
+            def get(self, url, params=None, **kwargs):
+                calls.append(params)
+                return type("R", (), {"status_code": 200, "text": ""})()
+
+        with patch.object(tt, "_login", lambda *a: (Session(), "https://x")), \
+                patch.object(tt.orders, "extract_order_cards_from_purchase_html", lambda html: blocks):
+            rows, _ = tt.find_typhoon_orders("dev", "a", "b", "2026/10/23")
+        self.assertEqual([r["order_no"] for r in rows], ["LC9", "LC3", "LC1"])
+        self.assertEqual(calls[0]["purchase_status"], "1")
+        self.assertEqual((calls[0]["clean_date_s"], calls[0]["clean_date_e"]), ("2026-10-23", "2026-10-23"))
+
+
 class TransferTests(unittest.TestCase):
     def setUp(self):
         self.row = {
