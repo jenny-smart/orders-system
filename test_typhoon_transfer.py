@@ -24,9 +24,11 @@ class ParsingTests(unittest.TestCase):
             tt.parse_date_range("2027/03/05-2027/03/01")
 
     def test_target_dates_weekdays_only(self):
-        with patch.object(tt, "_is_workday", lambda d: d.weekday() < 5):
-            days = tt.target_dates("2027-02-26", "2027-03-02", "與颱風假相同（平日／假日）", "2026-10-23")
+        # 3/1 為補假但價格算平日，仍要排入
+        days = tt.target_dates("2027-02-26", "2027-03-02", "與颱風假相同（平日／週末）", "2026-10-23")
         self.assertEqual(days, ["2027-02-26", "2027-03-01", "2027-03-02"])
+        weekend = tt.target_dates("2027-02-26", "2027-03-02", "與颱風假相同（平日／週末）", "2026-10-24")
+        self.assertEqual(weekend, ["2027-02-27", "2027-02-28"])
 
     def test_order_row_skips_cancelled_and_other_dates(self):
         row = tt._order_row_from_block(_block("LC1", "2026-10-23", "08:30 - 12:30"), "2026-10-23")

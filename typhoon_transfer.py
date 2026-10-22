@@ -23,7 +23,7 @@ import quick_order as qo
 
 SKIPPED_ORDER_STATUSES = {"取消訂單", "已退款"}
 CLEAN_TYPE_ID_MAP = {"居家清潔": "1", "辦公室清潔": "2", "裝修細清": "3"}
-DAY_TYPES = ["與颱風假相同（平日／假日）", "只排平日", "只排假日", "不限"]
+DAY_TYPES = ["與颱風假相同（平日／週末）", "只排平日", "只排週末", "不限"]
 
 
 def _compact_period(value):
@@ -57,23 +57,20 @@ def parse_date_range(text):
 
 
 def _is_workday(day):
-    try:
-        from tw_holidays import is_workday
-        return is_workday(day)
-    except Exception:
-        return day.weekday() < 5
+    """價格只分平日（週一～五）與週末（週六、日）；國定假日、補假照平日算。"""
+    return day.weekday() < 5
 
 
 def target_dates(start, end, day_type="不限", typhoon_date=None):
     """移轉區間內依日別篩選後的候選日期（由早到晚）。"""
     start, end = _parse_date(start), _parse_date(end)
     if day_type == DAY_TYPES[0]:
-        day_type = "只排平日" if typhoon_date and _is_workday(_parse_date(typhoon_date)) else "只排假日"
+        day_type = "只排平日" if typhoon_date and _is_workday(_parse_date(typhoon_date)) else "只排週末"
     days = []
     current = start
     while current <= end:
         workday = _is_workday(current)
-        if day_type == "不限" or (day_type == "只排平日" and workday) or (day_type == "只排假日" and not workday):
+        if day_type == "不限" or (day_type == "只排平日" and workday) or (day_type == "只排週末" and not workday):
             days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
     return days

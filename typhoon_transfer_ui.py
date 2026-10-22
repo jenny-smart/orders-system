@@ -35,7 +35,7 @@ def render(backend_email, backend_password, env, copy_button=None):
     with c2:
         range_text = st.text_input("移轉日期區間", value="", placeholder="2027/03/01-2027/03/05", key="tt_range")
     day_type = st.selectbox("移轉日別", tt.DAY_TYPES, key="tt_day_type",
-                            help="平日／假日價格不同，預設只移到與颱風假相同日別的日期。")
+                            help="平日（週一～五，國定假日也算平日）與週末（週六、日）價格不同，預設只移到與颱風假相同日別的日期。")
 
     if st.button("🔍 查詢颱風假當天訂單", type="primary", use_container_width=True, key="tt_search"):
         if not backend_email.strip() or not backend_password.strip():
