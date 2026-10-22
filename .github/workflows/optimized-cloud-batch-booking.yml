@@ -1,4 +1,5 @@
 name: Optimized Cloud Batch Booking
+run-name: Optimized Cloud Batch Booking (${{ inputs.env || 'prod' }}) ${{ inputs.sheet_name }}
 on:
   workflow_dispatch:
     inputs:
@@ -51,8 +52,13 @@ on:
         required: false
         default: '["可約"]'
         type: string
+      env:
+        description: prod / dev（dev 只建單，使用工作表副本）
+        required: false
+        default: "prod"
+        type: string
 concurrency:
-  group: optimized-cloud-batch-booking-prod
+  group: optimized-cloud-batch-booking-${{ inputs.env == 'dev' && 'dev' || 'prod' }}
   cancel-in-progress: false
 jobs:
   booking:
@@ -91,3 +97,4 @@ jobs:
           --region "${{ inputs.region }}"
           --allow-auto-lemon "${{ inputs.allow_auto_lemon }}"
           --retry-failed "${{ inputs.retry_failed }}"
+          --env "${{ inputs.env == 'dev' && 'dev' || 'prod' }}"
