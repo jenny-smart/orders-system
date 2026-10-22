@@ -8,7 +8,7 @@ import streamlit as st
 
 from accounts import ACCOUNTS
 from orders import get_region_by_address
-from reserve_cancel import SYSTEM_RESERVE_MEMO, cancel_reserve_orders, find_reserve_orders
+from reserve_cancel import PROXY_FILTER, SYSTEM_RESERVE_MEMO, cancel_reserve_orders, find_reserve_orders
 from reserve_optimizer import (
     PERIOD_HOURS,
     RESERVE_PHONE_DEFAULT,
@@ -230,7 +230,8 @@ def _render_reserve_create_job(env, lookup, region, address) -> None:
 
 def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -> None:
     st.markdown("### 🗑️ 檸檬保留單取消")
-    st.caption("依期間、複選時段與客人備註篩選保留單，再勾選實際要取消的訂單。取消前會重新檢查最新客人備註。")
+    st.caption("依期間、複選時段與客人備註篩選保留單，再勾選實際要取消的訂單。取消前會重新檢查最新客人備註。"
+               "代客保留請選「代客保留（客人備註含關鍵字）」，輸入例如「代客保留：王小明」。")
     if not _require_supported_env(env):
         return
     phone, lookup = _common_member_header(env, backend_email, backend_password)
@@ -242,7 +243,11 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
     with c2:
         cancel_end = st.date_input("取消查詢結束日期", value=date(2026, 9, 30), key="reserve_cancel_end")
     cancel_periods = st.multiselect("取消查詢時段（可複選；不選代表全部時段）", list(PERIOD_HOURS.keys()), default=[], key="reserve_cancel_periods")
-    memo_filter = st.selectbox("客人備註篩選", ["僅系統保留單", "系統保留單或空白", "僅空白", "全部（僅供查看）"], index=0, key="reserve_cancel_memo_filter")
+    memo_filter = st.selectbox("客人備註篩選", ["僅系統保留單", "系統保留單或空白", "僅空白", PROXY_FILTER, "全部（僅供查看）"], index=0, key="reserve_cancel_memo_filter")
+    memo_keyword = ""
+    if memo_filter == PROXY_FILTER:
+        memo_keyword = st.text_input("客人備註關鍵字（需含「代客保留」）", value="代客保留：", key="reserve_cancel_memo_keyword",
+                                     help="例如「代客保留：王小明」只找王小明；只填「代客保留」會找出所有代客保留單。取消後客人備註前面加「取消」。")
 
     if st.button("查詢可取消保留單", width="stretch", key="reserve_cancel_search"):
         search_status = st.status("已收到查詢指令，正在搜尋保留單…", expanded=True)
@@ -256,6 +261,7 @@ def render_reserve_cancel(backend_email: str, backend_password: str, env: str) -
                     env, backend_email.strip(), backend_password.strip(), phone.strip(),
                     cancel_start.isoformat(), cancel_end.isoformat(),
                     memo_filter=memo_filter, periods=cancel_periods, return_debug=True,
+                    memo_keyword=memo_keyword,
                 )
             st.session_state.reserve_menu_cancel_rows = rows
             st.session_state.reserve_menu_cancel_filter = memo_filter
