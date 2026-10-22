@@ -178,6 +178,31 @@ def _is_current_run(run):
     return st.session_state.get('optimized_cloud_current_run') == (run['id'], run.get('run_attempt', 1))
 
 
+def _cancel_run(run_id):
+    """直接取消 GitHub Actions 執行（舊版程式啟動、看不到暫停要求的執行也停得了）。"""
+    r = requests.post(
+        f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/cancel",
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {_token()}",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        timeout=15,
+    )
+    if r.status_code not in (202, 409):  # 409：已經結束或正在取消
+        raise RuntimeError(f"停止失敗：HTTP {r.status_code} {r.text[:200]}")
+
+
+def _render_stop_button(run):
+    box = st.expander("⏹ 立即停止（暫停沒反應時使用）")
+    box.caption("直接停止雲端執行，可能停在一組建單中途。已成立但還沒回填的訂單，下次執行會先到後台找回並補回工作表，"
+                "不會重複建單；中斷復原的列不會自動補寄確認信。停止後請等 1～2 分鐘再重新開始。")
+    confirm = box.checkbox("我確認要立即停止這次雲端執行", key=f"optimized_cloud_stop_confirm_{run['id']}")
+    if box.button("⏹ 立即停止", key=f"optimized_cloud_stop_{run['id']}", disabled=not confirm):
+        try:
+            _cancel_run(run['id'])
+            box.warning("已送出停止，雲端會在數秒內停止；請等 1～2 分鐘後再重新開始。")
+        except Exception as exc:
+            box.error(str(exc))
+
+
 def _render_pause_button(run):
     """雲端執行中可暫停：寫入暫停要求，雲端做完目前這一組、回填後就停，不會停在建單一半。"""
     from cloud_booking_progress import PAUSE, request_pause
@@ -239,6 +264,7 @@ def _render_cloud_status():
             if run.get("status") == "in_progress":
                 st.info("雲端批次執行中；每 15 秒更新狀態。")
                 _render_pause_button(run)
+                _render_stop_button(run)
                 try:
                     _render_running_steps(run['id'], dev="(dev)" in str(run.get("display_title") or ""))
                 except Exception:

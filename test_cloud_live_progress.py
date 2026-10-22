@@ -227,3 +227,17 @@ def test_latest_run_falls_back_when_filtered_list_is_empty():
     with patch.object(ui, '_github_get', side_effect=get):
         assert ui._latest_run() == {"id": 17}
     assert len(calls) == 2
+
+
+def test_cancel_run_posts_cancel_and_accepts_already_finished():
+    import cloud_batch_booking_ui as ui
+    import pytest
+    with patch.object(ui, '_token', return_value='t'), patch.object(ui.requests, 'post') as post:
+        post.return_value = MagicMock(status_code=202)
+        ui._cancel_run(17)
+        assert post.call_args.args[0].endswith('/actions/runs/17/cancel')
+        post.return_value = MagicMock(status_code=409)
+        ui._cancel_run(17)
+        post.return_value = MagicMock(status_code=403, text='forbidden')
+        with pytest.raises(RuntimeError):
+            ui._cancel_run(17)
