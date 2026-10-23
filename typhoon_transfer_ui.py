@@ -56,6 +56,12 @@ def _render_tracking(backend_email, backend_password, env, copy_button=None):
     if text.strip():
         with_expected = sum(1 for item in items if item.get("expected_date"))
         st.caption(f"讀到 {len(items)} 筆訂單，其中 {with_expected} 筆有表單新日期可比對")
+        if items and with_expected < len(items):
+            st.warning(
+                f"有 {len(items) - with_expected} 筆讀不到新日期，只會查目前日期、不會比對。"
+                "請連同標題列（含「訂單編號」「新日期」「新時段」）一起貼上，"
+                "或每行只貼：訂單編號、姓名、新日期、新時段。"
+            )
     if st.button("🔎 查詢目前日期", type="primary", use_container_width=True, key="tt_track_run", disabled=not items):
         if not backend_email.strip() or not backend_password.strip():
             st.error("請先在上方輸入後台帳號密碼")
