@@ -1742,6 +1742,9 @@ def apply_sheet_row_to_form(form_data: dict, controls: dict, item: dict,
         return
 
     if status in STATUS_DONE_CHARGE_ALIASES:
+        if status != "已扣儲值金" and not _sheet_cell(raw, "R"):
+            # 已收款的加收金流取自 R 欄；空白就回填會把後台加收金流清空
+            raise ValueError("R 欄付款方式空白，無法回填加收金流；請先填 R 欄（例如 ATM）再回寫")
         _set_radio_value(form_data, controls, "isCharge", "2", ui_logger=ui_logger)
         _set_progress_done(form_data, controls, ui_logger=ui_logger)
         _set_field(form_data, controls, FIELD_CHARGE_DATE, charge_date,
