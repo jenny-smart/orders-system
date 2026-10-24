@@ -425,7 +425,7 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
     plan = [by_order[no] for no in selected["訂單編號"]]
 
     st.markdown("**先通知客人**（移轉前可先複製名單，用 LINE 或電話通知客人）")
-    _copy(copy_button, f"複製 {len(plan)} 筆通知名單（訂單編號～原專員，不含標題列）",
+    _copy(copy_button, f"複製 {len(plan)} 筆通知名單（訂單編號～原專員，含標題列）",
           tt.notice_tsv(plan), "tt_copy_notice")
 
     try:
