@@ -341,6 +341,12 @@ def plan_restore(env_name, backend_email, backend_password, settings, client=Non
             raise ValueError(f"返回原班表需要設定{label}")
     worksheet = _open_target(settings, client)
     items = read_sheet_orders(worksheet.get_all_values(), settings)
+    return plan_restore_items(env_name, backend_email, backend_password, items, progress=progress)
+
+
+def plan_restore_items(env_name, backend_email, backend_password, items, progress=None):
+    """依 items（row／order_no／orig_date／orig_period／orig_staff）查後台目前狀態，
+    列出要返回的訂單；不修改後台。orig_staff 可為「、」分隔文字或姓名清單。"""
     session, _base_url = tt._login(env_name, backend_email, backend_password)
     rows = []
     for index, item in enumerate(items, 1):
@@ -350,13 +356,14 @@ def plan_restore(env_name, backend_email, backend_password, settings, client=Non
             "row": item["row"], "order_no": item["order_no"], "name": "",
             "orig_date": tt._normalize_date_text(item["orig_date"]) if item["orig_date"] else "",
             "orig_period": tt._compact_period(item["orig_period"]),
-            "orig_staff": tt.parse_staff_text(item["orig_staff"]),
+            "orig_staff": (list(item["orig_staff"]) if isinstance(item["orig_staff"], (list, tuple))
+                           else tt.parse_staff_text(item["orig_staff"])),
             "now_date": "", "now_period": "", "now_staff": [], "status": "",
         }
         if not row["orig_date"] or not row["orig_period"]:
-            row["status"] = "表單缺原日期／原時段"
+            row["status"] = "缺原日期／原時段"
         elif not row["orig_staff"]:
-            row["status"] = "表單缺原專員"
+            row["status"] = "缺原專員"
         else:
             try:
                 row["now_date"], row["now_period"], row["now_staff"], row["name"] = _order_now(session, item["order_no"])

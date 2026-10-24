@@ -238,7 +238,7 @@ class RestoreTests(unittest.TestCase):
     def test_plan_statuses(self):
         rows = tss.plan_restore("dev", "a", "b", RESTORE_SETTINGS, client=self.client)
         self.assertEqual([(r["order_no"], r["status"]) for r in rows], [
-            ("LC1", "待返回"), ("LC2", "待配回原專員"), ("LC3", "已在原班表"), ("LC4", "表單缺原專員"),
+            ("LC1", "待返回"), ("LC2", "待配回原專員"), ("LC3", "已在原班表"), ("LC4", "缺原專員"),
         ])
         self.assertEqual(rows[0]["orig_staff"], ["宋芳儀", "陳佩琪"])
 
