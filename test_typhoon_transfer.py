@@ -178,20 +178,20 @@ class CopyResultsTests(unittest.TestCase):
             {"order_no": "LC1", "name": "王小明", "phone": "0912345678", "service_date_before": "2026-10-23",
              "line_url": "https://chat.line.biz/Uabc/chat/U123", "address": "台北市大安區復興南路一段1號",
              "period": "08:30-12:30", "success": True, "new_date": "2027-03-02", "message": "已移到",
-             "transferred_at": "2026-10-23 14:32"},
+             "transferred_at": "2026-10-23 14:32", "staff": "宋芳儀(2)X陳佩琪(3)"},
             {"order_no": "LC2", "name": "李\t大", "phone": "", "service_date_before": "2026-10-23",
              "period": "09:00-12:00", "success": False, "new_date": "", "message": "無法安排"},
         ]
         lines = tt.results_tsv(results).split("\n")
         self.assertEqual(lines[0].split("\t"), [
-            "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數",
+            "訂單編號", "姓名", "LINE@連結", "電話", "客戶地址", "原日期", "原時段", "服務時數", "原專員",
             "新日期", "新時段", "結果", "說明", "移轉時間",
         ])
-        self.assertEqual(lines[1].split("\t")[:11], [
+        self.assertEqual(lines[1].split("\t")[:12], [
             "LC1", "王小明", "https://chat.line.biz/Uabc/chat/U123", "0912345678", "台北市大安區復興南路一段1號",
-            "2026-10-23", "08:30-12:30", "4", "2027-03-02", "08:30-12:30", "成功",
+            "2026-10-23", "08:30-12:30", "4", "宋芳儀、陳佩琪", "2027-03-02", "08:30-12:30", "成功",
         ])
-        self.assertEqual(lines[2].split("\t")[5:11], ["2026-10-23", "09:00-12:00", "3", "", "", "失敗"])
+        self.assertEqual(lines[2].split("\t")[5:12], ["2026-10-23", "09:00-12:00", "3", "", "", "", "失敗"])
         self.assertEqual(lines[1].split("\t")[-1], "2026-10-23 14:32")
         self.assertEqual(lines[2].split("\t")[-1], "")
 
@@ -318,13 +318,19 @@ class NoticeCopyTests(unittest.TestCase):
         rows = [{"order_no": "LC00217763", "name": "邱秀美",
                  "line_url": "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
                  "phone": "0928244622", "address": "台北市萬華區萬大路344巷22號3樓",
-                 "service_date": "2026-10-28", "period": "09:00-12:00"}]
-        self.assertEqual(tt.NOTICE_COPY_HEADERS, tt.RESULT_COPY_HEADERS[:8])
+                 "service_date": "2026-10-28", "period": "09:00-12:00", "staff": "鄭淵涼 X 吳奐"}]
+        self.assertEqual(tt.NOTICE_COPY_HEADERS, tt.RESULT_COPY_HEADERS[:9])
         self.assertEqual(tt.notice_tsv(rows), "\t".join([
             "LC00217763", "邱秀美",
             "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
-            "0928244622", "台北市萬華區萬大路344巷22號3樓", "2026-10-28", "09:00-12:00", "3",
+            "0928244622", "台北市萬華區萬大路344巷22號3樓", "2026-10-28", "09:00-12:00", "3", "鄭淵涼、吳奐",
         ]))
+
+    def test_staff_text_round_trip(self):
+        self.assertEqual(tt.staff_text("宋芳儀(2)X陳佩琪(3)"), "宋芳儀、陳佩琪")
+        self.assertEqual(tt.staff_text("檸檬人2 X 檸檬人11"), "檸檬人2、檸檬人11")
+        self.assertEqual(tt.parse_staff_text("宋芳儀、陳佩琪"), ["宋芳儀", "陳佩琪"])
+        self.assertEqual(tt.parse_staff_text("宋芳儀(2) X 陳佩琪(3)"), ["宋芳儀", "陳佩琪"])
 
 
 if __name__ == "__main__":

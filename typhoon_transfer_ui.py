@@ -28,7 +28,7 @@ def _rows_to_frame(rows):
 
 
 def render(backend_email, backend_password, env, copy_button=None):
-    tab_transfer, tab_track = st.tabs(["🌀 移轉", "🔎 追蹤目前日期"])
+    tab_transfer, tab_track = st.tabs(["🌀 移轉", "🔎 追蹤／↩️ 返回原班表"])
     with tab_transfer:
         _render_transfer(backend_email, backend_password, env, copy_button)
     with tab_track:
@@ -51,10 +51,92 @@ def _render_tracking(backend_email, backend_password, env, copy_button=None):
     _render_sheet_sync(backend_email, backend_password, env)
     with st.expander("改用貼上內容比對（不寫回表單）", expanded=False):
         _render_paste_tracking(backend_email, backend_password, env, copy_button)
+    st.divider()
+    _render_restore(backend_email, backend_password, env)
+
+
+def _render_restore(backend_email, backend_password, env):
+    import typhoon_sheet_sync as tss
+
+    st.markdown("**↩️ 返回原班表**（誤傳颱風假時使用）")
+    st.caption(
+        "依上方 Google 表單設定，讀每列的原日期／原時段／原專員：先用「修改日期」改回原日期與原時段，"
+        "再到「排班修改」選回原專員。原專員已被同時段其他訂單排走、或排班修改頁選不到時不送出，改列出請手動處理。"
+    )
+    account = backend_email.strip()
+    if not account:
+        return
+    settings = {key: st.session_state.get(f"tt_sheet_{key}", "") for key in tss.DEFAULT_SETTINGS}
+    if st.button("🔎 檢查要返回的訂單（不修改）", use_container_width=True, key="tt_restore_plan"):
+        if not backend_password.strip():
+            st.error("請先在上方輸入後台帳號密碼")
+            return
+        bar = st.progress(0.0)
+
+        def _progress(index, total, item):
+            bar.progress((index - 1) / max(total, 1))
+
+        try:
+            st.session_state.tt_restore_rows = tss.plan_restore(
+                env, account, backend_password.strip(), settings, progress=_progress,
+            )
+            st.session_state.pop("tt_restore_results", None)
+        except Exception as exc:
+            st.error(f"檢查失敗：{exc}")
+            return
+        bar.progress(1.0)
+
+    rows = st.session_state.get("tt_restore_rows")
+    if rows is None:
+        return
+    results = st.session_state.get("tt_restore_results")
+    shown = results if results is not None else rows
+
+    def _fmt(r):
+        return {
+            "列": r["row"], "訂單編號": r["order_no"], "姓名": r.get("name", ""),
+            "原日期": r["orig_date"], "原時段": r["orig_period"], "原專員": "、".join(r["orig_staff"]),
+            "目前日期": r["now_date"], "目前時段": r["now_period"], "目前專員": "、".join(r["now_staff"]),
+            "狀態": r["status"],
+        }
+
+    pending = [r for r in rows if r["status"] in tss.RESTORE_PENDING]
+    if results is None:
+        (st.warning if pending else st.success)(
+            f"共 {len(rows)} 筆：待返回 {sum(r['status'] == '待返回' for r in rows)} 筆、"
+            f"待配回原專員 {sum(r['status'] == '待配回原專員' for r in rows)} 筆、"
+            f"已在原班表 {sum(r['status'] == '已在原班表' for r in rows)} 筆"
+        )
+    else:
+        done = sum(r["status"] == "已返回原班表" for r in results)
+        (st.success if done == len(results) else st.warning)(f"返回完成：{done}／{len(results)} 筆已返回原班表，其餘請看狀態")
+    st.dataframe(pd.DataFrame([_fmt(r) for r in shown]), hide_index=True, use_container_width=True)
+
+    if results is None and pending:
+        confirm = st.checkbox(
+            f"確認把 {len(pending)} 筆訂單改回原日期／原時段並配回原專員", key="tt_restore_confirm",
+        )
+        if st.button("↩️ 開始返回原班表", type="primary", use_container_width=True,
+                     disabled=not confirm, key="tt_restore_run"):
+            bar = st.progress(0.0)
+            status = st.empty()
+
+            def _progress_run(index, total, row):
+                bar.progress((index - 1) / max(total, 1))
+                status.write(f"返回第 {index}/{total} 筆：{row['order_no']} → {row['orig_date']} {row['orig_period']}")
+
+            try:
+                st.session_state.tt_restore_results = tss.execute_restore(
+                    env, account, backend_password.strip(), rows, progress=_progress_run,
+                )
+            except Exception as exc:
+                st.error(f"返回失敗：{exc}")
+                return
+            st.rerun()
 
 
 _SHEET_FIELD_LABELS = {
-    "order_col": "訂單編號欄", "orig_date_col": "原日期欄", "orig_period_col": "原時段欄",
+    "order_col": "訂單編號欄", "orig_date_col": "原日期欄", "orig_period_col": "原時段欄", "orig_staff_col": "原專員欄",
     "new_date_col": "新日期欄", "new_period_col": "新時段欄",
     "change_date_col": "異動日期欄", "change_period_col": "異動時段欄", "start_row": "起始列",
 }
@@ -93,10 +175,11 @@ def _render_sheet_sync(backend_email, backend_password, env):
     # 第一列：訂單編號欄＋起始列；第二列：日期／時段欄（原、新、異動）
     layout = [
         ["order_col", "start_row"],
-        ["orig_date_col", "orig_period_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col"],
+        ["orig_date_col", "orig_period_col", "orig_staff_col", "new_date_col", "new_period_col",
+         "change_date_col", "change_period_col"],
     ]
     for row_keys in layout:
-        for col, key in zip(st.columns(6), row_keys):
+        for col, key in zip(st.columns(7), row_keys):
             with col:
                 st.text_input(_SHEET_FIELD_LABELS[key], key=f"tt_sheet_{key}")
     st.caption("新日期／新時段只用來比對、不會修改；有異動的訂單把目前日期／時段填進異動欄，沒有異動的維持空白。")
@@ -340,7 +423,7 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
     plan = [by_order[no] for no in selected["訂單編號"]]
 
     st.markdown("**先通知客人**（移轉前可先複製名單，用 LINE 或電話通知客人）")
-    _copy(copy_button, f"複製 {len(plan)} 筆通知名單（訂單編號～服務時數，不含標題列）",
+    _copy(copy_button, f"複製 {len(plan)} 筆通知名單（訂單編號～原專員，不含標題列）",
           tt.notice_tsv(plan), "tt_copy_notice")
 
     try:
