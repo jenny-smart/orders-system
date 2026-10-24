@@ -290,5 +290,28 @@ class LemonShiftTests(unittest.TestCase):
         self.assertEqual(calls["type_values"], ["全8", "上4"])
 
 
+class AttentionTests(unittest.TestCase):
+    def test_flags_same_customer_and_lemon_staff(self):
+        rows = [
+            {"order_no": "LC00217516", "name": "柯宗育", "phone": "0911975612", "service_date": "2026-10-28",
+             "period": "14:00-18:00", "staff": "吳珍嫻X魏思遠X胡偉勝"},
+            {"order_no": "LC00217507", "name": "柯宗育", "phone": "0911975612", "service_date": "2026-10-28",
+             "period": "09:00-16:00", "staff": "檸檬人1(0)X檸檬人2(0)"},
+            {"order_no": "LC00217399", "name": "吳昭潔", "phone": "0928989191", "service_date": "2026-10-28",
+             "period": "09:00-12:00", "staff": "李心媛X謝孟諭"},
+        ]
+        notes = tt.attention_notes(rows)
+        self.assertEqual(set(notes), {"LC00217516", "LC00217507"})
+        self.assertIn("同客人 2 筆", notes["LC00217516"])
+        self.assertIn("LC00217507（2026-10-28 09:00-16:00）", notes["LC00217516"])
+        self.assertIn("專員含檸檬人", notes["LC00217507"])
+        self.assertNotIn("專員含檸檬人", notes["LC00217516"])
+
+    def test_same_name_without_phone(self):
+        rows = [{"order_no": "LC1", "name": "王", "phone": "", "staff": ""},
+                {"order_no": "LC2", "name": "王", "phone": "", "staff": ""}]
+        self.assertEqual(set(tt.attention_notes(rows)), {"LC1", "LC2"})
+
+
 if __name__ == "__main__":
     unittest.main()

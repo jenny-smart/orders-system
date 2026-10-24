@@ -8,10 +8,12 @@ import typhoon_transfer as tt
 
 
 def _rows_to_frame(rows):
+    notes = tt.attention_notes(rows)
     return pd.DataFrame([
         {
             "移轉": True,
             "順序": idx,
+            "注意": ("⚠️ " + notes[row["order_no"]]) if row["order_no"] in notes else "",
             "日期": row["service_date"],
             "時段": row["period"],
             "訂單編號": row["order_no"],
@@ -314,9 +316,18 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
         return
 
     st.markdown("**移轉名單**（依後台列表由上而下；可取消勾選，或改「順序」調整先後）")
+    notes = tt.attention_notes(rows)
+    if notes:
+        st.warning(
+            f"有 {len(notes)} 筆需要留意（同一客人多筆訂單、或專員含檸檬人），"
+            "請確認是合併訂單還是獨立訂單，再決定是否移轉："
+        )
+        for row in rows:
+            if row["order_no"] in notes:
+                st.caption(f"⚠️ {row['order_no']} {row['name']}｜{row['service_date']} {row['period']}｜{notes[row['order_no']]}")
     edited = st.data_editor(
         _rows_to_frame(rows), hide_index=True, use_container_width=True, key="tt_editor",
-        disabled=["日期", "時段", "訂單編號", "姓名", "電話", "人數", "專員", "付款狀態"],
+        disabled=["注意", "日期", "時段", "訂單編號", "姓名", "電話", "人數", "專員", "付款狀態"],
         column_config={
             "移轉": st.column_config.CheckboxColumn("移轉"),
             "順序": st.column_config.NumberColumn("順序", min_value=1, step=1),
