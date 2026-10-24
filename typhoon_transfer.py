@@ -379,6 +379,18 @@ def result_copy_rows(results):
     ]
 
 
+NOTICE_COPY_HEADERS = RESULT_COPY_HEADERS[:RESULT_COPY_HEADERS.index("服務時數") + 1]
+
+
+def notice_tsv(rows):
+    """移轉前通知客人用：訂單編號～服務時數（同移轉結果前 8 欄），不含標題列，Tab 分隔。"""
+    copy_rows = result_copy_rows([{**row, "service_date_before": row.get("service_date", "")} for row in rows])
+    return "\n".join(
+        "\t".join(str(r.get(h, "") or "").replace("\t", " ").replace("\n", " ") for h in NOTICE_COPY_HEADERS)
+        for r in copy_rows
+    )
+
+
 def results_tsv(results):
     """Tab 分隔文字，貼到 Google Sheets 會自動分欄。"""
     lines = ["\t".join(RESULT_COPY_HEADERS)]

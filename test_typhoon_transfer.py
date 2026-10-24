@@ -313,5 +313,19 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(set(tt.attention_notes(rows)), {"LC1", "LC2"})
 
 
+class NoticeCopyTests(unittest.TestCase):
+    def test_notice_row_matches_result_first_columns(self):
+        rows = [{"order_no": "LC00217763", "name": "邱秀美",
+                 "line_url": "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
+                 "phone": "0928244622", "address": "台北市萬華區萬大路344巷22號3樓",
+                 "service_date": "2026-10-28", "period": "09:00-12:00"}]
+        self.assertEqual(tt.NOTICE_COPY_HEADERS, tt.RESULT_COPY_HEADERS[:8])
+        self.assertEqual(tt.notice_tsv(rows), "\t".join([
+            "LC00217763", "邱秀美",
+            "https://chat.line.biz/U70866032f75cbfed9c32ce87366562ce/chat/Ub6ccb2bade49e71d15f65c4b968721a6",
+            "0928244622", "台北市萬華區萬大路344巷22號3樓", "2026-10-28", "09:00-12:00", "3",
+        ]))
+
+
 if __name__ == "__main__":
     unittest.main()

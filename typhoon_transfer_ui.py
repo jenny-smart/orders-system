@@ -334,6 +334,15 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
         },
     )
 
+    by_order = {row["order_no"]: row for row in rows}
+    selected = edited[edited["移轉"]].copy()
+    selected = selected.sort_values("順序", kind="stable")
+    plan = [by_order[no] for no in selected["訂單編號"]]
+
+    st.markdown("**先通知客人**（移轉前可先複製名單，用 LINE 或電話通知客人）")
+    _copy(copy_button, f"複製 {len(plan)} 筆通知名單（訂單編號～服務時數，不含標題列）",
+          tt.notice_tsv(plan), "tt_copy_notice")
+
     try:
         start, end = tt.parse_date_range(range_text)
         dates_by_day = tt.candidate_dates_by_day([row["service_date"] for row in rows], start, end, day_type)
@@ -349,11 +358,6 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
     if not all_dates:
         st.error("移轉區間內沒有符合日別的日期")
         return
-
-    by_order = {row["order_no"]: row for row in rows}
-    selected = edited[edited["移轉"]].copy()
-    selected = selected.sort_values("順序", kind="stable")
-    plan = [by_order[no] for no in selected["訂單編號"]]
 
     shift_names, shift_day_list = [], []
     if do_shift:
