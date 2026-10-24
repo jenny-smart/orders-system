@@ -22,7 +22,7 @@ def _fmt(r):
         "#": r["row"], "訂單編號": r["order_no"], "姓名": r.get("name", ""),
         "記錄日期": r["orig_date"], "記錄時段": r["orig_period"], "記錄專員": "、".join(r["orig_staff"]),
         "目前日期": r["now_date"], "目前時段": r["now_period"], "目前專員": "、".join(r["now_staff"]),
-        "狀態": r["status"], "返回時間": r.get("restored_at", ""),
+        "核對": tss.check_mark(r), "狀態": r["status"], "返回時間": r.get("restored_at", ""),
     }
 
 
@@ -71,7 +71,7 @@ def _render_record(backend_email, backend_password, env, copy_button=None):
     st.caption(f"{label} 共 {len(rows)} 筆已付款服務訂單")
     if not rows:
         return
-    st.dataframe(pd.DataFrame([_fmt(r) for r in rows]).drop(columns=["目前日期", "目前時段", "目前專員", "返回時間"]),
+    st.dataframe(pd.DataFrame([_fmt(r) for r in rows]).drop(columns=["目前日期", "目前時段", "目前專員", "核對", "返回時間"]),
                  hide_index=True, use_container_width=True)
     _copy(copy_button, "複製目前班表（含標題列，貼到 Google Sheets 會自動分欄）", tss.restore_tsv(rows), "rs_copy_record")
 
@@ -151,7 +151,7 @@ def _render_return(backend_email, backend_password, env, copy_button=None):
             f"已在原班表 {sum(r['status'] == '已在原班表' for r in rows)} 筆"
         )
     else:
-        done = sum(r["status"] == "已返回原班表" for r in results)
+        done = sum(r["status"].startswith("已返回原班表") for r in results)
         (st.success if done == len(results) else st.warning)(f"返回完成：{done}／{len(results)} 筆已返回記錄的班表，其餘請看狀態")
     st.dataframe(pd.DataFrame([_fmt(r) for r in shown]), hide_index=True, use_container_width=True)
     _copy(copy_button,
