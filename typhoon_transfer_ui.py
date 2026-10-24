@@ -180,9 +180,16 @@ def _render_sheet_sync(backend_email, backend_password, env):
     if applied is not None:
         filled = sum(1 for r in applied if r["status"] == "已填異動")
         cleared = sum(1 for r in applied if r["status"] == "已清除異動欄")
-        st.success(f"已填入 {filled} 筆異動、清除 {cleared} 筆")
+        written = next((r for r in applied if r.get("written_to")), None)
+        where = ""
+        if written:
+            col_d, col_p = compared.get("change_date_col", ""), compared.get("change_period_col", "")
+            where = f"（已讀回確認：{written['written_to']} 的 {col_d}／{col_p} 欄）"
+        st.success(f"已填入 {filled} 筆異動、清除 {cleared} 筆{where}")
+        if written and written.get("sheet_url"):
+            st.link_button("開啟寫入的工作表", written["sheet_url"])
         for r in applied:
-            if r["status"].startswith("已跳過"):
+            if r["status"] not in ("已填異動", "已清除異動欄"):
                 st.warning(f"第 {r['row']} 列 {r['order_no']}：{r['status']}")
 
 
