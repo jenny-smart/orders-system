@@ -415,7 +415,7 @@ def _render_transfer(backend_email, backend_password, env, copy_button=None):
             st.error(err)
         warnings = shift_result.get("warnings") or []
         if warnings:
-            with st.expander(f"排班衝突提醒（{len(warnings)} 筆）", expanded=False):
+            with st.expander(f"排班提醒（{len(warnings)} 筆）", expanded=True):
                 for w in warnings:
                     st.caption(w)
 

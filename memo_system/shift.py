@@ -423,20 +423,48 @@ def confirm_lemon_ren_assignment(session: requests.Session, candidate: Dict, log
     return merged
 
 
+FULL_DAY_HOURS = {"6": ("0900", "1600"), "8": ("0900", "1800")}
+
+
+def _extends_full_day(full_value: str, slot: str, half_value: str) -> Optional[bool]:
+    """全日班＋半天班是否為延長上班時間（全8＋上4 提早到 08:30、全6＋下3 延到 17:00）。
+
+    無法判斷時回傳 None。
+    """
+    full = FULL_DAY_HOURS.get(str(full_value))
+    match = re.fullmatch(r"(\d{4})-(\d{4})", str(half_value or ""))
+    if not full or not match:
+        return None
+    start, end = match.groups()
+    if slot == "1":
+        return start < full[0]
+    if slot == "2":
+        return end > full[1]
+    return None
+
+
 def check_merged_conflicts(merged: Dict[str, str]) -> List[str]:
+    """勾班後的提醒。全日班＋半天班若是延長上班時間（例：全8＋上4、全6＋下3）屬正常排法，
+    不提醒；半天班完全落在全日班時間內（沒有延長）才提醒確認。"""
     warnings = []
     by_date: Dict[str, Dict[str, str]] = {}
     for key, value in merged.items():
         date_val, slot = key.rsplit("_", 1)
         by_date.setdefault(date_val, {})[slot] = value
     for date_val, slots in by_date.items():
-        for slot in slots:
-            for conflicting_slot in CONFLICT_MAP.get(slot, set()):
-                if conflicting_slot in slots:
-                    pair = tuple(sorted([slot, conflicting_slot]))
-                    msg = f"⚠️ {date_val} 同時勾選了 {pair[0]}={slots[pair[0]]} 跟 {pair[1]}={slots[pair[1]]}，請確認"
-                    if msg not in warnings:
-                        warnings.append(msg)
+        if "all" not in slots:
+            continue
+        for slot in ("1", "2"):
+            if slot not in slots:
+                continue
+            if _extends_full_day(slots["all"], slot, slots[slot]):
+                continue
+            msg = (
+                f"⚠️ {date_val} 同時勾選了 all={slots['all']} 跟 {slot}={slots[slot]}，"
+                "半天班沒有延長全日班的上班時間，請確認"
+            )
+            if msg not in warnings:
+                warnings.append(msg)
     return warnings
 
 
