@@ -88,10 +88,13 @@ def _render_sheet_sync(backend_email, backend_password, env):
         st.text_input("Google 試算表 ID（或貼整個網址）", key="tt_sheet_spreadsheet_id")
     with c2:
         st.text_input("工作表名稱", key="tt_sheet_worksheet")
-    field_keys = ["order_col", "orig_date_col", "orig_period_col", "new_date_col", "new_period_col",
-                  "change_date_col", "change_period_col", "start_row"]
-    for row_keys in (field_keys[:4], field_keys[4:]):
-        for col, key in zip(st.columns(4), row_keys):
+    # 第一列：訂單編號欄＋起始列；第二列：日期／時段欄（原、新、異動）
+    layout = [
+        ["order_col", "start_row"],
+        ["orig_date_col", "orig_period_col", "new_date_col", "new_period_col", "change_date_col", "change_period_col"],
+    ]
+    for row_keys in layout:
+        for col, key in zip(st.columns(6), row_keys):
             with col:
                 st.text_input(_SHEET_FIELD_LABELS[key], key=f"tt_sheet_{key}")
     st.caption("新日期／新時段只用來比對、不會修改；有異動的訂單把目前日期／時段填進異動欄，沒有異動的維持空白。")
