@@ -100,7 +100,9 @@ class CloudDevTest(unittest.TestCase):
         cols[1].number_input.return_value = 0
         cols[0].date_input.return_value = None
         cols[1].date_input.return_value = None
-        st.columns.side_effect = [cols, cols[:2], cols[:2]]
+        for col in cols:
+            col.checkbox.return_value = False
+        st.columns.side_effect = lambda n: cols[:n]
         st.checkbox.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_confirm"
         st.button.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_start"
         st.multiselect.return_value = ["可約"]
@@ -138,8 +140,8 @@ class RefreshDevCopyTest(unittest.TestCase):
                _row("李曉微", "2027/01/11", "14:00", event="e2"),
                _row("陳靜萱", "2026/12/30", "9:00", event="e3"),
                _row("新客人", "2026/12/20", "9:00", event="e4")]
-        updates, appended, carried = dsc.carry_booked_rows(old, new)
-        self.assertEqual(carried, 1)
+        updates, appended, carried, dropped = dsc.carry_booked_rows(old, new)
+        self.assertEqual((carried, dropped), (1, []))
         self.assertEqual(updates[0], {"range": "I2", "values": [["已安排"]]})
         self.assertEqual(updates[1]["range"], "K2:AG2")
         self.assertEqual(updates[1]["values"][0][2:4], ["TT1", "成功"])
@@ -149,7 +151,7 @@ class RefreshDevCopyTest(unittest.TestCase):
     def test_rows_already_booked_in_new_schedule_are_not_overwritten(self):
         old = [_header(), _row("王小明", "2026/12/05", "9:00", "TT1", "e1", "已安排")]
         new = [_header(), _row("王小明", "2026/12/05", "9:00", "LC9", "e1", "已安排")]
-        self.assertEqual(dsc.carry_booked_rows(old, new), ([], [], 0))
+        self.assertEqual(dsc.carry_booked_rows(old, new), ([], [], 0, []))
 
     def test_rows_without_event_id_match_by_customer_date_and_time(self):
         old = [[""] * 34, _row("王小明", "2026/12/5", "9:00", "TT1")]
@@ -168,7 +170,7 @@ class RefreshDevCopyTest(unittest.TestCase):
         client.open_by_key.return_value = sh
         with patch("orders.build_gsheet_client", return_value=client):
             result = dsc.refresh_dev_copy("台北202612-202702", "台北202612-202702_dev1028-0800")
-        self.assertEqual(result, {"carried": 1, "appended": 0})
+        self.assertEqual(result, {"carried": 1, "appended": 0, "dropped": []})
         sh.duplicate_sheet.assert_called_once_with(1, insert_sheet_index=5, new_sheet_name="台北202612-202702_dev1028-0800_更新中")
         sh.del_worksheet.assert_called_once_with(old_ws)
         fresh.update_title.assert_called_once_with("台北202612-202702_dev1028-0800")
@@ -182,3 +184,30 @@ class RefreshDevCopyTest(unittest.TestCase):
     def test_refresh_refuses_non_dev_sheet(self):
         with self.assertRaisesRegex(ValueError, "_dev"):
             dsc.refresh_dev_copy("台北202612-202702", "台北202612-202702")
+
+    def test_only_paid_orders_are_carried(self):
+        old = [_header(),
+               _row("王小明", "2026/12/05", "9:00", "TT1", "e1", "已安排"),
+               _row("李曉微", "2026/12/06", "9:00", "TT2", "e2", "已安排"),
+               _row("陳靜萱", "2026/12/07", "9:00", "TT3", "e3", "已安排"),
+               _row("林大同", "2026/12/08", "9:00", "TT4", "e4", "已安排")]
+        new = [_header()] + [_row(r[2], r[5], r[6], event=r[33]) for r in old[1:]]
+        statuses = {"TT1": "已付款", "TT2": "取消訂單", "TT3": "待付款"}
+        updates, appended, carried, dropped = dsc.carry_booked_rows(old, new, statuses)
+        self.assertEqual(carried, 1)
+        self.assertEqual(updates[0]["range"], "I2")
+        self.assertEqual(dropped, [("TT2", "取消訂單"), ("TT3", "待付款"), ("TT4", "後台查無")])
+
+    def test_status_lookup_runs_before_copy_so_failure_leaves_copy_untouched(self):
+        old_ws = Mock(index=5)
+        old_ws.get_values.return_value = [_header(), _row("王小明", "2026/12/05", "9:00", "TT1", "e1", "已安排")]
+        sh = Mock()
+        sh.worksheet.side_effect = lambda name: {"台北202612": Mock(id=1), "台北202612_dev1": old_ws}[name]
+        client = Mock()
+        client.open_by_key.return_value = sh
+        lookup = Mock(side_effect=RuntimeError("測試機後台登入失敗"))
+        with patch("orders.build_gsheet_client", return_value=client), self.assertRaises(RuntimeError):
+            dsc.refresh_dev_copy("台北202612", "台北202612_dev1", lookup)
+        lookup.assert_called_once_with(["TT1"])
+        sh.duplicate_sheet.assert_not_called()
+        sh.del_worksheet.assert_not_called()

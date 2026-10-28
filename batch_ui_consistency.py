@@ -37,9 +37,8 @@ def _region_credentials(region: str, fallback_email: str, fallback_password: str
 
 def render_optimized_like_batch(backend_email: str, backend_password: str, env: str) -> None:
     import batch_booking_optimized as batch_opt
-    from selected_row_status_guard import (_auto_filter_rows, _held_for_request, _safe_load_candidates, held_message,
-                                           render_o_text_filter, render_service_date_filter, render_stage_filter,
-                                           validate_service_date_range)
+    from selected_row_status_guard import (_auto_filter_rows, _held_for_request, _safe_load_candidates, filter_modes,
+                                           held_message, render_batch_options, validate_service_date_range)
 
     st = batch_opt.st
     batch_opt.step("4", "執行設定")
@@ -61,15 +60,11 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
         default=dev_sheet_copy.default_actions(env), key="batch_opt_actions_same_ui", label_visibility="collapsed",
     )
     st.markdown('<div class="hint-box">建單與回填優先；只有勾選改日曆且該筆已有訂單編號後，才初始化 Google Calendar。</div>', unsafe_allow_html=True)
-    allow_auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key="batch_opt_allow_auto_lemon")
-    st.caption("指定範圍及自動篩選可包含失敗列；調整後可直接重試，不必清空 N 欄結果。")
-    st.caption("三種批次共用建單條件：訂單編號空白＋狀態未安排＋「預約條件」空白或在本次預約對象內；其他列會略過並在執行過程註明原因。")
-    render_stage_filter(st, "batch_opt_booking_stages")
-    service_start, service_end = render_service_date_filter(st, "batch_opt_service_date")
-    auto_no_slot = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋無班表", value=False, key="batch_opt_auto_no_slot")
-    auto_missing_o = st.checkbox("自動篩選：狀態未安排＋訂單編號空白＋O欄找不到訂單編號", value=False, key="batch_opt_auto_missing_o")
-    o_texts = render_o_text_filter(st, batch_opt, dev_sheet_copy.read_sheet(st, env, sheet_name), region, "batch_opt_o_texts") if auto_missing_o else []
-    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt")
+    options = render_batch_options(st, "batch_opt")
+    allow_auto_lemon, service_start, service_end = options["auto_lemon"], options["service_start"], options["service_end"]
+    modes = filter_modes(options["filter_mode"])
+    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt", region=region,
+                                 credentials=_region_credentials(region, backend_email, backend_password))
 
     run_clicked = st.button("🚀  開始執行", use_container_width=True, key="batch_opt_same_ui_run")
     with st.expander("📄  執行過程", expanded=True):
@@ -107,14 +102,11 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
     try:
         explicit_rows = _parse_rows(batch_opt, row_spec)
         requested_rows = set(explicit_rows)
-        if auto_no_slot:
-            requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "no_schedule", region=region, allow_failed=True,
+        for mode in modes:
+            requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, mode, region=region, allow_failed=True,
                                                     service_start=service_start, service_end=service_end))
-        if auto_missing_o:
-            requested_rows.update(_auto_filter_rows(batch_opt, sheet_name, "missing_order", region=region, allow_failed=True,
-                                                    o_texts=o_texts, service_start=service_start, service_end=service_end))
         requested_rows = sorted(requested_rows)
-        if not requested_rows and not (auto_no_slot or auto_missing_o):
+        if not requested_rows and not modes:
             raise ValueError("沒有指定列號，也沒有自動篩選到符合條件的列。")
 
         candidates = _safe_load_candidates(batch_opt, sheet_name, allow_failed=True,
@@ -131,8 +123,7 @@ def render_optimized_like_batch(backend_email: str, backend_password: str, env: 
                 continue
             target_rows.append(row_no)
 
-        modes = [mode for mode, on in (("no_schedule", auto_no_slot), ("missing_order", auto_missing_o)) if on]
-        held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, modes, o_texts=o_texts,
+        held = _held_for_request(batch_opt, sheet_name, region, explicit_rows, modes,
                                  service_start=service_start, service_end=service_end)
         invalid = [row_no for row_no in invalid if row_no not in set(held)]
         if held:

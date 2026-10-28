@@ -28,9 +28,18 @@ class CloudCandidatesTest(unittest.TestCase):
         self.df.loc[self.df['__sheet_row__'].eq(3), '結果'] = ''
         self.assertEqual([x[0] for x in cloud.load_pending('sheet')], [2, 3])
 
+    def test_stored_value_filter_retries_failed_rows_without_retry_flag(self):
+        # 截圖情境：N 欄失敗、O 欄「系統未產生新訂單編號」，客人儲值後要能直接篩出重新成單。
+        self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = '系統未產生新訂單編號'
+        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='stored_value')], [3])
+        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both')], [2, 3])
+        # 無班表的失敗列仍要勾「重試失敗列」才會重跑。
+        self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = '無班表'
+        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both')], [2])
+        self.assertEqual([x[0] for x in cloud.load_pending('sheet', filter_mode='both', retry_failed=True)], [2, 3])
+
     def test_explicit_retry_applies_to_all_filter_modes(self):
-        self.df.loc[self.df['__sheet_row__'].eq(3), '原因'] = '無班表；找不到訂單編號'
-        for mode in ('all', 'no_schedule', 'missing_order', 'both'):
+        for mode in ('all', 'no_schedule'):
             with self.subTest(mode=mode):
                 self.assertIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode, retry_failed=True)])
                 self.assertNotIn(3, [x[0] for x in cloud.load_pending('sheet', filter_mode=mode)])
@@ -96,15 +105,7 @@ class CloudDispatchTest(unittest.TestCase):
                 inputs = post.call_args.kwargs['json']['inputs']
                 self.assertEqual(inputs['retry_failed'], str(retry).lower())
                 self.assertEqual(inputs['allow_auto_lemon'], 'false')
-                self.assertEqual(inputs['o_texts'], '[]')
-
-    def test_selected_o_texts_are_sent_as_json(self):
-        with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
-             patch.object(ui, 'load_config', return_value={}), \
-             patch.object(ui.requests, 'post', return_value=Mock(status_code=204)) as post:
-            ui._dispatch('sheet', 50, 0, 'missing_order', '台北', False, False, ['系統未產生新訂單編號', '（O欄空白）'])
-        import json
-        self.assertEqual(json.loads(post.call_args.kwargs['json']['inputs']['o_texts']), ['系統未產生新訂單編號', '（O欄空白）'])
+                self.assertNotIn('o_texts', inputs)
 
     def test_service_date_bounds_are_sent_to_workflow(self):
         with patch.object(ui, '_token', return_value='test'), patch.object(ui, '_latest_run', return_value=None), \
@@ -115,12 +116,6 @@ class CloudDispatchTest(unittest.TestCase):
         inputs = post.call_args.kwargs['json']['inputs']
         self.assertEqual(inputs['service_start'], '2026-12-01')
         self.assertEqual(inputs['service_end'], '2027-01-31')
-
-    def test_o_texts_env_is_parsed_safely(self):
-        with patch.dict('os.environ', {'O_TEXTS_JSON': '["無訂單編號", "a\\"b"]'}):
-            self.assertEqual(cloud._o_texts_from_env(), ['無訂單編號', 'a"b'])
-        with patch.dict('os.environ', {'O_TEXTS_JSON': ''}):
-            self.assertEqual(cloud._o_texts_from_env(), [])
 
     def test_ui_uses_same_retry_flag_for_count_and_dispatch(self):
         class Session(dict):
@@ -138,7 +133,9 @@ class CloudDispatchTest(unittest.TestCase):
                 cols[1].number_input.return_value = 0
                 cols[0].date_input.return_value = None
                 cols[1].date_input.return_value = None
-                st.columns.side_effect = [cols, cols[:2], cols[:2]]
+                for col in cols:
+                    col.checkbox.return_value = False
+                st.columns.side_effect = lambda n: cols[:n]
                 st.checkbox.side_effect = lambda *a, **kw: {
                     'optimized_cloud_retry_failed': retry,
                     'optimized_cloud_confirm': True,
@@ -151,8 +148,8 @@ class CloudDispatchTest(unittest.TestCase):
                     ui.render('prod')
                 self.assertIs(pending.call_args.kwargs['retry_failed'], retry)
                 self.assertIs(dispatch.call_args.args[6], retry)
-                self.assertEqual(dispatch.call_args.args[7], [])
-                self.assertEqual(dispatch.call_args.args[8], ['可約'])
+                self.assertEqual(dispatch.call_args.args[3], 'all')
+                self.assertEqual(dispatch.call_args.args[7], ['可約'])
                 # 送出後工作表會被回填，先前檢查的筆數必須失效，避免完成頁仍顯示舊總數。
                 self.assertNotIn('optimized_cloud_pending_key', st.session_state)
                 self.assertNotIn('optimized_cloud_pending', st.session_state)
