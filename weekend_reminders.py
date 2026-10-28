@@ -28,8 +28,8 @@ TRACKING_HEADERS = [
 NOTICE_STATUSES = ["待通知", "已排程", "已通知", "發送失敗"]
 REPLY_STATUSES = ["未回覆", "已回覆", "需追蹤"]
 TRACKED_ORDER_STATUSES = {"已付款", "取消訂單", "已退款"}
-# 內勤工作表單（台北）的「週末提醒」分頁以 IMPORTRANGE 帶入追蹤表 A:H，右側回覆欄為手動填寫；
-# 新增追蹤列前要先在該分頁插入同樣位置的空白列，手動回覆欄才不會錯位。
+# 內勤工作表單（台北）的「週末提醒」分頁以 IMPORTRANGE 帶入追蹤表 A:H，I 欄回覆狀態為手動填寫；
+# 新增追蹤列前要先在該分頁插入同樣位置的空白列，I 欄才不會錯位。
 STAFF_SHEET_CATEGORY = "內勤工作表單"
 STAFF_SHEET_AREA = "台北"
 STAFF_SHEET_TITLE = "週末提醒"
