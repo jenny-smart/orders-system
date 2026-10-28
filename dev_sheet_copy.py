@@ -249,44 +249,46 @@ def resolve_run_sheet(st, env, sheet_name: str, creator=None) -> str:
 
 
 def render_notice(st, env, sheet_name: str, key: str, region: str = "", credentials=("", "")) -> None:
-    """dev 時顯示本次會使用的分頁，並提供改用新副本的按鈕。"""
+    """dev 時顯示本次使用的測試副本：沿用既有副本、以最新排程更新、改用新副本。"""
     if not is_dev(env):
         return
     source = str(sheet_name or "").strip()
     if not source:
-        st.info("🧪 測試機 dev：執行時會先複製輸入的工作表分頁，所有讀取與回填都在副本進行，原分頁不受影響。")
+        st.caption("🧪 測試機：執行時會先複製工作表分頁，讀取與回填都在副本，原分頁不受影響。")
         return
-    existing = st.text_input(
-        "沿用既有測試工作表（選填，不另開新分頁）",
-        placeholder=f"例如：{source}_dev1028-080000",
-        key=f"{key}_dev_copy_existing",
-        help="貼上先前由測試機建立的完整分頁名稱，再按「沿用此工作表」。",
-    )
-    if st.button("沿用此測試工作表", key=f"{key}_dev_copy_use", disabled=not str(existing or "").strip()):
-        try:
-            use_existing_copy(st, env, source, existing)
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            st.rerun()
+    box = st.container(border=True)
     copy = current_copy(st, env, source)
     if not copy:
-        st.info(f"🧪 測試機 dev：按下執行時會先把「{source}」複製成測試副本，所有讀取與回填都在副本進行，原分頁不受影響。")
+        box.markdown(f"🧪 **測試副本**：尚未指定，執行時自動把「{source}」複製一份。要接續先前的測試，請貼上副本名稱：")
+        c1, c2 = box.columns([3, 1], vertical_alignment="bottom")
+        existing = c1.text_input("既有測試副本名稱", placeholder=f"例如：{source}_dev1028-080000",
+                                 key=f"{key}_dev_copy_existing", label_visibility="collapsed")
+        if c2.button("沿用此副本", key=f"{key}_dev_copy_use", disabled=not str(existing or "").strip(),
+                     use_container_width=True):
+            try:
+                use_existing_copy(st, env, source, existing)
+            except ValueError as exc:
+                box.error(str(exc))
+            else:
+                st.rerun()
         return
-    st.info(f"🧪 測試機 dev：沿用測試副本「{copy}」（原分頁「{source}」不受影響）。")
-    if st.button("以最新排程更新此測試副本（保留已成單測試結果）", key=f"{key}_dev_copy_refresh",
-                 help=f"排程工作表「{source}」更新後使用：重新複製最新內容；日曆事件ID、日期、開始時間都相同且測試機後台「已付款」的列，保留訂單編號與結果，分頁名稱不變。"):
-        try:
-            result = refresh_dev_copy(source, copy, lambda nos: backend_order_statuses(nos, region, credentials))
-        except Exception as exc:
-            st.error(f"更新測試副本失敗：{exc}（原副本未變更）")
-        else:
-            st.success(f"已用最新排程更新「{copy}」：保留已付款訂單 {result['carried']} 列"
-                       + (f"，新排程日期／時段已改的已付款訂單 {result['appended']} 列放在最下方" if result["appended"] else "") + "。")
-            if result["dropped"]:
-                st.info("以下訂單非已付款，未帶入（該列可重新成單）："
-                        + "、".join(f"{no}（{status}）" for no, status in result["dropped"]))
-    if st.button("下次執行改用新的測試副本", key=f"{key}_dev_copy_reset"):
+    box.markdown(f"🧪 **測試副本**：{copy}（原分頁「{source}」不受影響）")
+    c1, c2 = box.columns(2)
+    refresh = c1.button("以最新排程更新此副本", key=f"{key}_dev_copy_refresh", use_container_width=True,
+                        help=f"「{source}」更新後使用：重新複製最新排程；日曆事件ID、日期、開始時間都相同，"
+                             "且測試機後台「已付款」的列，保留訂單編號與結果，副本名稱不變。")
+    if c2.button("改用新的測試副本", key=f"{key}_dev_copy_reset", use_container_width=True):
         _copies(st).pop(source, None)
         st.session_state.pop(f"{key}_dev_copy_existing", None)
         st.rerun()
+    if refresh:
+        try:
+            result = refresh_dev_copy(source, copy, lambda nos: backend_order_statuses(nos, region, credentials))
+        except Exception as exc:
+            box.error(f"更新測試副本失敗：{exc}（原副本未變更）")
+        else:
+            box.success(f"已更新：保留已付款訂單 {result['carried']} 列"
+                        + (f"；日期／時段已改的已付款訂單 {result['appended']} 列放在最下方" if result["appended"] else "") + "。")
+            if result["dropped"]:
+                box.info("非已付款、未帶入（該列可重新成單）："
+                         + "、".join(f"{no}（{status}）" for no, status in result["dropped"]))

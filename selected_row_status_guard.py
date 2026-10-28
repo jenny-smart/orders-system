@@ -92,14 +92,6 @@ def filter_row_numbers_by_service_date(batch_opt, sheet_name, rows, service_star
     return [row for row in rows if row in allowed], [row for row in rows if row not in allowed]
 
 
-def render_service_date_filter(st, key):
-    c1, c2 = st.columns(2)
-    start = c1.date_input("服務起日（F欄，空白＝不限）", value=None, key=f"{key}_start")
-    end = c2.date_input("服務迄日（F欄，空白＝不限）", value=None, key=f"{key}_end")
-    st.caption("日期篩選含起日與迄日；只填迄日時，F 欄日期在迄日以前（含當日）皆可成單。")
-    return start, end
-
-
 def _safe_load_candidates(batch_opt, sheet_name, allow_failed=False, service_start=None, service_end=None):
     try: _, df = _load_worksheet_unique(sheet_name)
     except Exception as exc:
@@ -219,10 +211,10 @@ def held_message(batch_opt, sheet_name, rows):
 def render_stage_filter(st, key):
     """三種批次共用：勾選本次要約排程「預約條件」的哪些階段（預設只有可約）。"""
     stages = st.multiselect(
-        "本次預約對象（排程「預約條件」欄；空白的列一律照常判斷）", list(STAGES),
-        default=list(DEFAULT_STAGES), key=key,
+        "本次預約對象（排程「預約條件」欄）", list(STAGES), default=list(DEFAULT_STAGES), key=key,
+        help="預約條件空白的列一律照常成單。建議順序：可約 → 改加 → 人時不足 → 已確認 → 未回覆；"
+             "單一客人要例外處理，可直接改該列「預約條件」。",
     )
-    st.caption("建議順序：可約 → 改加 → 人時不足 → 已確認 → 未回覆。單一客人要例外處理，可直接改該列「預約條件」。")
     set_booking_stages(stages)
     return stages
 
@@ -236,27 +228,33 @@ def filter_modes(mode: str) -> list:
     return {"no_schedule": ["no_schedule"], "stored_value": ["stored_value"], "both": ["no_schedule", "stored_value"]}.get(mode, [])
 
 
-def render_batch_options(st, key, retry_option=False):
-    """三種批次共用的成單選項；回傳 dict（auto_lemon、retry_failed、stages、service_start/end、filter_mode）。"""
-    auto_lemon = st.checkbox("查無班表時自動補檸檬人（不動其他客人已配班專員）", value=False, key=f"{key}_auto_lemon")
+def render_target_section(st, key):
+    """三種批次共用「要約哪些列」：本次預約對象、服務起迄日（F欄）、自動篩選。"""
+    c1, c2, c3 = st.columns([2, 1, 1])
+    stages = render_stage_filter(c1, f"{key}_booking_stages")
+    service_start = c2.date_input("服務起日（F欄）", value=None, key=f"{key}_service_date_start", help="空白＝不限")
+    service_end = c3.date_input("服務迄日（F欄）", value=None, key=f"{key}_service_date_end",
+                                help="空白＝不限；只填迄日時，迄日以前（含當日）皆可成單。")
+    c1, c2 = st.columns(2)
+    no_schedule = c1.checkbox("自動篩選：O欄「無班表」", value=False, key=f"{key}_auto_no_slot")
+    stored_value = c2.checkbox("自動篩選：O欄「系統未產生新訂單編號」", value=False, key=f"{key}_auto_stored_value",
+                               help="多半是儲值金不足沒成單；客人儲值完成後，勾這個篩出來重新成單。")
+    st.caption("只建「狀態未安排＋訂單編號空白」且預約條件在本次對象內的列；兩個自動篩選可複選，都不勾＝依列號。")
+    return {"stages": stages, "service_start": service_start, "service_end": service_end,
+            "filter_mode": filter_mode(no_schedule, stored_value)}
+
+
+def render_run_options(st, key, retry_option=False):
+    """三種批次共用的執行選項：補檸檬人；雲端另有重試失敗列（本機一律包含 N 欄失敗列）。"""
+    c1, c2 = st.columns(2)
+    auto_lemon = c1.checkbox("查無班表時自動補檸檬人", value=False, key=f"{key}_auto_lemon",
+                             help="只補「無班表」的列，不動其他客人已配班專員。")
     retry_failed = True
     if retry_option:
-        retry_failed = st.checkbox(
-            "我確認已調整，重試失敗列（N欄結果為「失敗」）", value=False, key=f"{key}_retry_failed",
-            help="雲端預設略過 N 欄「失敗」的列；已補班或要補檸檬人時勾選，不必清空 N 欄。儲值金篩選不受此限。",
-        )
-    stages = render_stage_filter(st, f"{key}_booking_stages")
-    service_start, service_end = render_service_date_filter(st, f"{key}_service_date")
-    st.markdown("自動篩選（可複選；都不勾＝依執行列號）")
-    c1, c2 = st.columns(2)
-    no_schedule = c1.checkbox("O欄：無班表", value=False, key=f"{key}_auto_no_slot")
-    stored_value = c2.checkbox("O欄：系統未產生新訂單編號（含餘額不足，儲值後重新成單）", value=False,
-                               key=f"{key}_auto_stored_value", help="客人儲值完成後，用來篩出先前因儲值金不足沒成單的列。")
-    st.caption("只會建「狀態未安排＋訂單編號空白＋預約條件在本次對象內」的列"
-               + ("；本機批次一律包含 N 欄失敗列，調整後可直接重試。" if not retry_option else "。"))
-    return {"auto_lemon": auto_lemon, "retry_failed": retry_failed, "stages": stages,
-            "service_start": service_start, "service_end": service_end,
-            "filter_mode": filter_mode(no_schedule, stored_value)}
+        retry_failed = c2.checkbox("重試 N 欄「失敗」的列", value=False, key=f"{key}_retry_failed",
+                                   help="雲端預設略過 N 欄「失敗」的列；已補班或要補檸檬人時勾選，不必清空 N 欄。"
+                                        "「系統未產生新訂單編號」篩選不受此限。")
+    return {"auto_lemon": auto_lemon, "retry_failed": retry_failed}
 
 
 def _update_sheet_rows_first_header(ws, row_results):

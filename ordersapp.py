@@ -1156,36 +1156,28 @@ if mode == "VIP 訂單／Google 日曆同步":
 # 模式一：批次建單
 # =========================================================
 if mode == "批次建單（Google Sheet）":
-    step("3", "批次建單")
-    info_panel("功能說明", [
-        "適合已將多筆訂單整理在 Google Sheet 的批次處理情境。",
-        "可依列號建立訂單、寄確認信、改 Google 日曆，並回填結果。",
-        "勾自動篩選時，可在輸入的列號範圍內篩出 O 欄「無班表」或「系統未產生新訂單編號」（儲值後重新成單）的列。",
+    from selected_row_status_guard import (filter_modes, filter_row_numbers_by_service_date, render_run_options,
+                                           render_target_section, validate_service_date_range)
+    info_panel("批次建單", [
+        "依列號逐筆建立訂單，可寄確認信、改 Google 日曆，並回填結果。",
+        "勾自動篩選時，在輸入的列號範圍內（空白＝全部）篩出 O 欄「無班表」或「系統未產生新訂單編號」的列。",
     ])
-    info_panel("使用說明", ["先選擇執行區域與工作表名稱。", "輸入要執行的列號，例如 2、2,3,5 或 5-10。", "勾選要執行的項目後按開始執行。"])
-    step("4", "執行設定")
+    step("3", "工作表與列號")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        region = st.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
-    with c2:
-        sheet_name = st.text_input("工作表名稱", value="", placeholder="例：202604")
-    with c3:
-        row_input = st.text_input("執行列號", value="", placeholder="例：2,3,5-7")
-    st.markdown('<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code></div>', unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
-    step("3", "執行項目")
-    default_actions = dev_sheet_copy.default_actions(env)
-    selected_actions = st.multiselect("執行項目", options=dev_sheet_copy.action_options(env), default=default_actions, label_visibility="collapsed")
-    st.markdown('<div class="hint-box">可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。</div>', unsafe_allow_html=True)
-    from selected_row_status_guard import (filter_modes, filter_row_numbers_by_service_date, render_batch_options,
-                                           validate_service_date_range)
-    _batch_options = render_batch_options(st, "batch")
-    batch_allow_auto_lemon = _batch_options["auto_lemon"]
-    service_start, service_end = _batch_options["service_start"], _batch_options["service_end"]
-    auto_modes = filter_modes(_batch_options["filter_mode"])
+    region = c1.selectbox("執行區域", ["台北", "台中", "桃園", "新竹", "高雄"])
+    sheet_name = c2.text_input("工作表名稱", value="", placeholder="例：台北202610")
+    row_input = c3.text_input("執行列號", value="", placeholder="例：2,3,5-7", help="單列 2、逗號 2,3,5、區間 5-7。")
     dev_sheet_copy.render_notice(st, env, sheet_name, "batch_booking", region=region,
                                  credentials=(backend_email.strip(), backend_password.strip()))
-    st.markdown("<hr>", unsafe_allow_html=True)
+    step("4", "要約哪些列")
+    _target = render_target_section(st, "batch")
+    service_start, service_end = _target["service_start"], _target["service_end"]
+    auto_modes = filter_modes(_target["filter_mode"])
+    step("5", "執行項目")
+    default_actions = dev_sheet_copy.default_actions(env)
+    selected_actions = st.multiselect("執行項目", options=dev_sheet_copy.action_options(env), default=default_actions,
+                                      label_visibility="collapsed", help="可自由組合，例如只寄確認信、只改日曆，或全流程一起跑。")
+    batch_allow_auto_lemon = render_run_options(st, "batch")["auto_lemon"]
     run_clicked = st.button("🚀  開始執行", use_container_width=True)
     with st.expander("📄  執行過程", expanded=True):
         log_box = st.empty()

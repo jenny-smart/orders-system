@@ -94,18 +94,21 @@ class CloudDevTest(unittest.TestCase):
         import cloud_batch_booking_ui as ui
         st = _st()
         cols = [Mock(), Mock(), Mock()]
+        cols[0].multiselect.return_value = ['可約']
         cols[0].selectbox.return_value = "台北"
         cols[1].text_input.return_value = "台北202610"
         cols[0].number_input.return_value = 50
         cols[1].number_input.return_value = 0
         cols[0].date_input.return_value = None
         cols[1].date_input.return_value = None
-        for col in cols:
-            col.checkbox.return_value = False
-        st.columns.side_effect = lambda n: cols[:n]
+        cols[2].date_input.return_value = None
+        st.columns.side_effect = lambda spec, **kw: cols[:spec if isinstance(spec, int) else len(spec)]
+        st.container.return_value = st
         st.checkbox.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_confirm"
         st.button.side_effect = lambda *a, **kw: kw.get("key") == "optimized_cloud_start"
         st.multiselect.return_value = ["可約"]
+        for col in cols:
+            col.checkbox.side_effect, col.button.side_effect = st.checkbox.side_effect, st.button.side_effect
         with patch.object(ui, "st", st), patch.object(ui, "_render_cloud_status"), \
              patch.object(dsc, "create_dev_copy", return_value="台北202610_devX"), \
              patch.object(ui, "_dispatch", return_value={}) as dispatch:

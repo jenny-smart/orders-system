@@ -38,33 +38,33 @@ def _region_credentials(region: str, fallback_email: str, fallback_password: str
 def render_optimized_like_batch(backend_email: str, backend_password: str, env: str) -> None:
     import batch_booking_optimized as batch_opt
     from selected_row_status_guard import (_auto_filter_rows, _held_for_request, _safe_load_candidates, filter_modes,
-                                           held_message, render_batch_options, validate_service_date_range)
+                                           held_message, render_run_options, render_target_section,
+                                           validate_service_date_range)
 
     st = batch_opt.st
-    batch_opt.step("4", "執行設定")
+    batch_opt.step("3", "工作表與列號")
     c1, c2, c3 = st.columns(3)
     regions = list(ACCOUNTS.keys()) or ["台北"]
     default_index = regions.index("台北") if "台北" in regions else 0
-    with c1:
-        region = st.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
-    with c2:
-        sheet_name = st.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
-    with c3:
-        row_spec = st.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec").strip()
-    st.markdown('<div class="hint-box">💡 列號支援：單列 <code>2</code>、逗號分隔 <code>2,3,5</code>、區間 <code>2,3,5-7</code>。範圍內不符合條件的列會略過，不會中止整批。</div>', unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
+    region = c1.selectbox("執行區域", regions, index=default_index, key="batch_opt_region")
+    sheet_name = c2.text_input("工作表名稱", placeholder="例：台北202610", key="batch_opt_sheet_name").strip()
+    row_spec = c3.text_input("執行列號", placeholder="例：2,3,5-7", key="batch_opt_row_spec",
+                             help="單列 2、逗號 2,3,5、區間 5-7；範圍內不符合條件的列會略過，不中止整批。").strip()
+    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt", region=region,
+                                 credentials=_region_credentials(region, backend_email, backend_password))
 
-    batch_opt.step("3", "執行項目")
+    batch_opt.step("4", "要約哪些列")
+    target = render_target_section(st, "batch_opt")
+    service_start, service_end = target["service_start"], target["service_end"]
+    modes = filter_modes(target["filter_mode"])
+
+    batch_opt.step("5", "執行項目")
     selected_actions = st.multiselect(
         "執行項目", dev_sheet_copy.action_options(env),
         default=dev_sheet_copy.default_actions(env), key="batch_opt_actions_same_ui", label_visibility="collapsed",
+        help="同組 2 筆以上先批次建單並回填，再處理日曆。",
     )
-    st.markdown('<div class="hint-box">建單與回填優先；只有勾選改日曆且該筆已有訂單編號後，才初始化 Google Calendar。</div>', unsafe_allow_html=True)
-    options = render_batch_options(st, "batch_opt")
-    allow_auto_lemon, service_start, service_end = options["auto_lemon"], options["service_start"], options["service_end"]
-    modes = filter_modes(options["filter_mode"])
-    dev_sheet_copy.render_notice(st, env, sheet_name, "batch_opt", region=region,
-                                 credentials=_region_credentials(region, backend_email, backend_password))
+    allow_auto_lemon = render_run_options(st, "batch_opt")["auto_lemon"]
 
     run_clicked = st.button("🚀  開始執行", use_container_width=True, key="batch_opt_same_ui_run")
     with st.expander("📄  執行過程", expanded=True):

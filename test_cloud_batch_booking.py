@@ -127,21 +127,24 @@ class CloudDispatchTest(unittest.TestCase):
                 st = MagicMock()
                 st.session_state = Session()
                 cols = [Mock(), Mock(), Mock()]
+                cols[0].multiselect.return_value = ['可約']
                 cols[0].selectbox.return_value = '台北'
                 cols[1].text_input.return_value = 'sheet'
                 cols[0].number_input.return_value = 50
                 cols[1].number_input.return_value = 0
                 cols[0].date_input.return_value = None
                 cols[1].date_input.return_value = None
-                for col in cols:
-                    col.checkbox.return_value = False
-                st.columns.side_effect = lambda n: cols[:n]
+                cols[2].date_input.return_value = None
+                st.columns.side_effect = lambda spec, **kw: cols[:spec if isinstance(spec, int) else len(spec)]
+                st.container.return_value = st
                 st.checkbox.side_effect = lambda *a, **kw: {
                     'optimized_cloud_retry_failed': retry,
                     'optimized_cloud_confirm': True,
                 }.get(kw.get('key'), False)
                 st.button.return_value = True
                 st.multiselect.return_value = ['可約']
+                for col in cols:
+                    col.checkbox.side_effect, col.button.side_effect = st.checkbox.side_effect, st.button.side_effect
                 with patch.object(ui, 'st', st), patch.object(ui, '_render_cloud_status'), \
                      patch.object(cloud, 'load_pending', return_value=[(3, '台北', '')]) as pending, \
                      patch.object(ui, '_dispatch', return_value={}) as dispatch:

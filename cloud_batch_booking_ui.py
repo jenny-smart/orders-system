@@ -9,8 +9,8 @@ import requests
 import streamlit as st
 from accounts import ACCOUNTS
 from batch_recovery_meta import install_patch as install_recovery_meta_patch
-from selected_row_status_guard import (install_patch as install_selected_row_status_guard, render_batch_options,
-                                       validate_service_date_range)
+from selected_row_status_guard import (install_patch as install_selected_row_status_guard, render_run_options,
+                                       render_target_section, validate_service_date_range)
 from batch_booking_safety import install_streamlit_batch_hooks
 import dev_sheet_copy
 from cloud_booking_progress import PAUSED_PHASE
@@ -331,25 +331,29 @@ def render(env: str):
     if active:
         st.info(f"⏳ 雲端成單執行中（{active}），進度見頁面最下方「雲端成單進度」；同一環境一次只跑一個，新送出的會排隊。")
 
-    st.markdown("#### 4　執行設定")
-    c1, c2, c3 = st.columns(3)
+    st.markdown("#### 3　工作表")
+    c1, c2 = st.columns(2)
     regions = list(ACCOUNTS.keys()) or ["台北"]
     default_index = regions.index("台北") if "台北" in regions else 0
     region = c1.selectbox("執行區域", regions, index=default_index, key="optimized_cloud_region")
-    sheet = c2.text_input("工作表名稱", placeholder="例：台北202610", key="optimized_cloud_sheet").strip()
-    c3.text_input("執行列號", value="雲端依下方篩選自動取得", disabled=True, key="optimized_cloud_rows_hint")
-    st.info("💡 雲端版由篩選條件自動取得列號；中斷重跑會先反查後台，避免重複建單。")
+    sheet = c2.text_input("工作表名稱", placeholder="例：台北202610", key="optimized_cloud_sheet",
+                          help="雲端依下方條件自動取得列號；中斷重跑會先反查後台，避免重複建單。").strip()
+    dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud", region=region)
 
-    st.markdown("#### 3　執行項目")
+    st.markdown("#### 4　要約哪些列")
+    target = render_target_section(st, "optimized_cloud")
+    stages, service_start, service_end, filter_mode = (target["stages"], target["service_start"],
+                                                       target["service_end"], target["filter_mode"])
+
+    st.markdown("#### 5　執行項目")
     cloud_actions = ["建單"] if is_dev else ["建單", "寄確認信", "改 Google 日曆"]
     st.multiselect(
         "執行項目", cloud_actions,
         default=cloud_actions, disabled=True,
         key="optimized_cloud_actions", label_visibility="collapsed",
     )
-    options = render_batch_options(st, "optimized_cloud", retry_option=True)
-    allow_auto_lemon, retry_failed, stages = options["auto_lemon"], options["retry_failed"], options["stages"]
-    service_start, service_end, filter_mode = options["service_start"], options["service_end"], options["filter_mode"]
+    run_options = render_run_options(st, "optimized_cloud", retry_option=True)
+    allow_auto_lemon, retry_failed = run_options["auto_lemon"], run_options["retry_failed"]
     c1, c2 = st.columns(2)
     chunk = c1.number_input("每輪最多處理列數", 1, 200, 50, 10, key="optimized_cloud_chunk")
     max_rows = c2.number_input("本次最多處理列數（0＝全部）", 0, 5000, 0, 10, key="optimized_cloud_max")
@@ -357,9 +361,7 @@ def render(env: str):
     pending_key = (sheet, region, filter_mode, allow_auto_lemon, retry_failed, tuple(stages),
                    str(service_start or ""), str(service_end or ""))
     _sync_cloud_settings(pending_key + (int(chunk), int(max_rows)))
-    st.caption("同一次執行中，每列處理後不會在下一輪重複執行。")
 
-    dev_sheet_copy.render_notice(st, env, sheet, "optimized_cloud", region=region)
     if st.button("檢查待成單筆數", disabled=not sheet, key="optimized_cloud_check"):
         try:
             validate_service_date_range(service_start, service_end)
