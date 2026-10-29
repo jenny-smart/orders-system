@@ -66,6 +66,11 @@ for name in ("memo_system", "config"):
 for name in ("__init__.py", "atm.py", "atm_schedule.py", "memo.py", "env.py"):
     shutil.copy2(Path(repo_dir) / "memo_system" / name, runtime_dir / "memo_system" / name)
 shutil.copy2(Path(repo_dir) / "accounts.py", runtime_dir / "accounts.py")
+# memo.py 的 login()／atm.py 的 _atm_sheet_config() 各自 lazy-import 這兩個
+# repo 根目錄共用模組（正本在 tool-system/tools/common/），執行副本沒有的話
+# 排程會整個失敗（ModuleNotFoundError），查詢、貼上、複查取消訂單全部不會跑。
+for name in ("lemon_backend_login.py", "year_roots.py"):
+    shutil.copy2(Path(repo_dir) / name, runtime_dir / name)
 runtime_config = dict(config, calendar_file="taiwan_work_calendar.json")
 (runtime_dir / "config" / "atm_schedule.json").write_text(json.dumps(runtime_config, ensure_ascii=False), encoding="utf-8")
 (runtime_dir / "config" / "taiwan_work_calendar.json").write_text(json.dumps(calendar, ensure_ascii=False), encoding="utf-8")
