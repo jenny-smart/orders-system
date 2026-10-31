@@ -3,6 +3,7 @@
 from __future__ import annotations
 from datetime import date, datetime
 import types
+import re
 import pandas as pd
 import orders
 from booking_eligibility import (DEFAULT_STAGES, HOLD_COLUMN, STAGES, booking_stage, can_create_order, can_process_row,
@@ -276,15 +277,42 @@ def _update_sheet_rows_first_header(ws, row_results):
         ws.batch_update(updates); orders.set_customer_notice_clip_style(ws, headers=headers, row_numbers=row_results.keys())
 
 
+def hours_mismatch_reason(row) -> str:
+    """A 欄寫明時數、時段是標準時段，但兩者時數不同時回傳「請檢查時數…」；否則空字串。
+
+    標準時段一律照工作表時段查班表，後台卻依 A 欄時數列出可約時段，兩者不同就查不到
+    （例：A 欄 2人3小時、時段 08:30-12:30），補檸檬人也沒用。
+    """
+    try:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*小時", str(row.get("服務人時", "") or ""))
+        period = orders.normalize_period_text(row.get("開始時間", ""), row.get("結束時間", ""))
+        if not match or period not in orders.STANDARD_SLOTS:
+            return ""
+        slot_hours = orders.calc_effective_hours_from_time(row.get("開始時間", ""), row.get("結束時間", ""))
+    except Exception:
+        return ""
+    a_hours = float(match.group(1))
+    if slot_hours is None or abs(a_hours - slot_hours) < 1e-9:
+        return ""
+    fmt = lambda h: f"{h:g}"
+    return f"請檢查時數：A欄{fmt(a_hours)}小時，時段{period}為{fmt(slot_hours)}小時"
+
+
 def _process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_service, region, backend_user_id=None, selected_actions=None, allow_auto_lemon_shift=False, used_order_nos=None, logger=print, group_no=None):
     result = _ORIGINAL_PROCESS_ONE_GROUP(
         session, rows_with_idx, token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
         used_order_nos=used_order_nos, logger=logger, group_no=group_no,
     )
+    row_map = {int(row_no): row for row_no, row in rows_with_idx}
+    # 無班表但其實是 A 欄時數與時段不一致：O 欄改「請檢查時數」，也不補檸檬人。
+    for row_no, info in (result or {}).items():
+        reason = str((info or {}).get("原因", "") or "")
+        mismatch = hours_mismatch_reason(row_map.get(int(row_no), {})) if ("無班表" in reason or "沒班表" in reason) else ""
+        if mismatch:
+            info["原因"], info["沒班表日期"] = mismatch, ""
     if not allow_auto_lemon_shift:
         return result
-    row_map = {int(row_no): row for row_no, row in rows_with_idx}
     no_slot_rows = []
     for row_no, info in (result or {}).items():
         reason = str((info or {}).get("原因", "") or "")
