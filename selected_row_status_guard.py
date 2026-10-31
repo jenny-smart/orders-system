@@ -309,12 +309,16 @@ def _process_one_group_with_lemon_retry(session, rows_with_idx, token, gcal_serv
     if not any_shift_added:
         return result
     retry_token = orders.get_csrf_token(session)
-    logger("🍋 已補檸檬人，重新查班表並再次嘗試本筆／本組。")
-    return _ORIGINAL_PROCESS_ONE_GROUP(
-        session, rows_with_idx, retry_token, gcal_service, region, backend_user_id,
+    logger("🍋 已補檸檬人，重新查班表並再次嘗試無班表的列：" + "、".join(map(str, no_slot_rows)))
+    retry_rows = [(row_no, row) for row_no, row in rows_with_idx if int(row_no) in set(no_slot_rows)]
+    retried = _ORIGINAL_PROCESS_ONE_GROUP(
+        session, retry_rows, retry_token, gcal_service, region, backend_user_id,
         selected_actions, allow_auto_lemon_shift=False,
         used_order_nos=used_order_nos, logger=logger, group_no=group_no,
     )
+    merged = dict(result or {})
+    merged.update(retried or {})
+    return merged
 
 
 def _direct_single_dispatch(env_name, region, backend_email, backend_password, sheet_name, start_row, end_row, selected_actions=None, logger=print, allow_auto_lemon_shift=False, selected_rows=None):
