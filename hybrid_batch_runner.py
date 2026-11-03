@@ -164,6 +164,8 @@ def _batch_line_messages(entries, logger=print):
 
     grouped = defaultdict(list)
     for row, result in entries:
+        if not all(str(row.get(field, "") or "").strip() for field in ("日期", "開始時間", "結束時間", "地址")):
+            continue
         key = (
             str(row.get("姓名", "") or "").strip(),
             _orders.normalize_addr_for_match(row.get("地址", "")),
@@ -217,6 +219,22 @@ def _batch_line_messages(entries, logger=print):
         messages.append(message)
         logger(f"📱 {name} 預約完成 LINE 通知（可直接複製）：\n{text}")
     return messages
+
+
+def line_messages_tsv(messages):
+    """可直接整段貼到 Google Sheet；多行通知會保留在同一儲存格。"""
+    def cell(value):
+        text = str(value or "")
+        if any(char in text for char in ('\t', '\n', '"')):
+            return '"' + text.replace('"', '""') + '"'
+        return text
+
+    rows = [["姓名", "地址", "訂單編號", "LINE預約完成通知"]]
+    rows.extend([
+        [message.get("姓名"), message.get("地址"), message.get("訂單編號"), message.get("通知內容")]
+        for message in messages or []
+    ])
+    return "\n".join("\t".join(cell(value) for value in row) for row in rows)
 
 
 def run_process_web_direct_single(
@@ -330,6 +348,7 @@ def run_process_web_direct_single(
         "blocked_count": len(blocked),
         "failed_records": failed_records,
         "line_messages": line_messages,
+        "line_messages_tsv": line_messages_tsv(line_messages),
     }
 
 
@@ -534,4 +553,5 @@ def run_process_web_hybrid(
         "failed_records": failed_records,
         "paused": paused,
         "line_messages": line_messages,
+        "line_messages_tsv": line_messages_tsv(line_messages),
     }

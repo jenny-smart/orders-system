@@ -2,7 +2,7 @@ from unittest.mock import Mock, patch
 
 import orders
 import proxy_reserve
-from hybrid_batch_runner import _batch_line_messages
+from hybrid_batch_runner import _batch_line_messages, line_messages_tsv
 
 
 ADDRESS = "新北市永和區環河西路一段19號17樓"
@@ -72,3 +72,6 @@ def test_successful_batch_builds_combined_line_notice():
     assert "2026/12/01 09:00-12:00" in messages[0]["通知內容"]
     assert "2026/12/08 09:00-12:00" in messages[0]["通知內容"]
     assert ADDRESS in messages[0]["通知內容"]
+    pasted = line_messages_tsv(messages)
+    assert pasted.startswith("姓名\t地址\t訂單編號\tLINE預約完成通知\n")
+    assert '"感謝您預約' in pasted
