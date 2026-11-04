@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 
 _CHECKED = {"TRUE", "V", "Y", "YES", "1", "是", "✓", "✔", "☑", "勾"}
-SOURCE_OUTPUT_HEADERS = ["mail", "LINE連結", "通知內容", "異動檢查"]
+SOURCE_OUTPUT_HEADERS = ["mail", "LINE連結", "通知內容", "異動檢查", "通知處理狀態"]
 
 
 class _CachedRequest:
@@ -64,7 +64,7 @@ def groups_from_dataframe(df, row_spec=""):
         phone = str(row.get("電話", "") or row.get("手機", "") or "").strip()
         email = str(row.get("mail", "") or row.get("Email", "") or row.get("email", "") or row.get("電子信箱", "") or "").strip()
         line_url = str(row.get("LINE連結", "") or row.get("LINE 連結", "") or row.get("LINE@連結", "") or row.get("line_url", "") or row.get("LINE", "") or "").strip()
-        key = (name or f"__row_{row_no}", address or f"__row_{row_no}", service)
+        key = (name or f"__row_{row_no}", address or f"__row_{row_no}")
         item = grouped.setdefault(key, {
             "name": name, "address": str(row.get("地址", "") or "").strip(),
             "service": service, "phone": phone, "email": email, "line_url": line_url,
@@ -85,6 +85,16 @@ def groups_from_dataframe(df, row_spec=""):
             "proxy": str(row.get("代客保留", "") or "").strip().upper() in _CHECKED,
         })
     return list(grouped.values())
+
+
+def filter_completed_address_groups(groups, df):
+    if "通知處理狀態" not in getattr(df, "columns", []): return list(groups or []), 0
+    completed = set()
+    for _, row in df.iterrows():
+        if str(row.get("通知處理狀態", "") or "").strip().startswith("完成"):
+            completed.add((str(row.get("姓名", "") or "").strip(), re.sub(r"\s+", "", str(row.get("地址", "") or ""))))
+    pending = [group for group in groups or [] if _customer_address_key(group) not in completed]
+    return pending, len(list(groups or [])) - len(pending)
 
 
 def _proxy_name_exists(service, calendar_id, orders_module, entry):
@@ -182,6 +192,8 @@ def build_source_writeback(source_groups, results, skipped):
         key = (str(entry.get("name") or "").strip(), re.sub(r"\s+", "", str(entry.get("address") or "")), str(entry.get("service") or "").strip())
         skipped_by_key.setdefault(key, []).append(entry)
     row_updates, insertions, reduction_rows = {}, [], []
+    address_states = {}
+    for item in results or []: address_states.setdefault(_customer_address_key(item.get("group") or {}), []).append("失敗" if item.get("error") else "完成")
     for group in source_groups or []:
         entries = group.get("entries") or []
         if not entries: continue
@@ -213,13 +225,15 @@ def build_source_writeback(source_groups, results, skipped):
     for group in source_groups or []:
         entries = group.get("entries") or []
         if entries: address_groups.setdefault(_customer_address_key(group), []).extend(int(entry["row"]) for entry in entries)
-    for rows in address_groups.values():
-        rows = sorted(set(rows)); first_row = rows[0]; candidates = [row_updates.get(row, {}) for row in rows]
+    for customer_key, raw_rows in address_groups.items():
+        rows = sorted(set(raw_rows)); first_row = rows[0]; candidates = [row_updates.get(row, {}) for row in rows]
         combined = {"mail": next((x.get("mail") for x in candidates if x.get("mail")), ""), "LINE連結": next((x.get("LINE連結") for x in candidates if x.get("LINE連結")), ""), "通知內容": next((x.get("通知內容") for x in candidates if x.get("通知內容")), "")}
         changes = list(dict.fromkeys(x.get("異動檢查") for x in candidates if x.get("異動檢查"))); combined["異動檢查"] = "；".join(changes)
         if any(x.get("狀態") == "安排減少" for x in candidates): combined["狀態"] = "安排減少"
+        states = address_states.get(customer_key, [])
+        combined["通知處理狀態"] = "失敗（下次將自動續跑）" if "失敗" in states else ("完成" if "完成" in states else "完成（無日曆行程，略過）")
         row_updates[first_row] = combined
-        for row in rows[1:]: row_updates.setdefault(row, {}).update({"通知內容": "", "異動檢查": "", "mail": "", "LINE連結": ""})
+        for row in rows[1:]: row_updates.setdefault(row, {}).update({"通知內容": "", "異動檢查": "", "mail": "", "LINE連結": "", "通知處理狀態": ""})
     return row_updates, insertions, reduction_rows
 
 
