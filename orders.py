@@ -810,6 +810,10 @@ def load_worksheet(sheet_name):
     headers = values[0]
     rows = values[1:]
     df = pd.DataFrame(rows, columns=headers)
+    # 重複欄名會讓 df[欄名] 變成 DataFrame，導致後續 .str/.map 報錯；
+    # 讀取時與回填規則一致，一律採用最左邊第一個同名欄。
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
     df["__sheet_row__"] = range(2, len(df) + 2)
     for name, short in HEADER_ALIASES.items():
         if name not in df.columns and short in df.columns:
