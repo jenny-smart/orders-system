@@ -4,7 +4,7 @@ import streamlit as st
 import orders
 from accounts import ACCOUNTS
 from line_notice_sheet import (
-    filter_groups_by_calendar, groups_from_dataframe, results_tsv,
+    filter_groups_by_calendar, groups_from_dataframe,
     write_results_to_source,
 )
 from quick_order import build_many_combined_line_messages
@@ -96,15 +96,6 @@ def render(backend_email, backend_password, env):
         st.success(f"已直接寫回原工作表「{writeback['sheet']}」：{writeback['written']} 列；新增安排 {writeback['inserted']} 列；減少警示 {writeback['reduced']} 組。")
     if skipped:
         st.info(f"日曆沒有對應行程，已略過 {len(skipped)} 筆，不產生通知。")
-    valid = [item for item in results if not item.get("error")]
-    if valid:
-        st.caption("通知已直接寫入工作表；以下僅供預覽或備用複製。")
-        st.code(results_tsv(valid), language=None)
-    for index, item in enumerate(results):
+    for item in results:
         if item.get("error"):
             st.error(f"訂單 {item['order_no']} 產生失敗：{item['error']}")
-            continue
-        st.text_area(
-            f"{item['group'].get('name') or '客戶'}｜{item['order_no']}", item["text"],
-            height=360, key=f"completed_notice_text_{index}",
-        )
