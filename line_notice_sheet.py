@@ -181,7 +181,9 @@ def _customer_address_key(group):
 def _slot(date_value, start_value, end_value=""):
     date_s = str(date_value or "")[:10].replace("-", "/")
     period = str(start_value or "") if not end_value else f"{start_value}-{end_value}"
-    return date_s, re.sub(r"\s+", "", period).replace("～", "-").replace("~", "-")
+    period = re.sub(r"\s+", "", period).replace("～", "-").replace("~", "-")
+    period = re.sub(r"(?<!\d)(\d{1,2}):(\d{2})", lambda match: f"{int(match.group(1)):02d}:{match.group(2)}", period)
+    return date_s, period
 
 
 def build_source_writeback(source_groups, results, skipped):
