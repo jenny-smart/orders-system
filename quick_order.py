@@ -771,8 +771,16 @@ def _fetch_purchase_block_for_order_no(session, order_no):
     if resp.status_code != 200:
         raise Exception(f"查詢訂單失敗：HTTP {resp.status_code}")
     target = str(order_no or "").strip()
+    line_url = ""
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tr in soup.find_all("tr"):
+        if target in tr.get_text():
+            line_a = tr.find("a", href=re.compile(r"chat\.line\.biz"))
+            if line_a: line_url = str(line_a.get("href", "")).strip()
+            break
     for block in extract_order_cards_from_purchase_html(resp.text):
         if block.get("order_no") == target:
+            block["line_url"] = line_url
             return block
     raise Exception(f"查無訂單：{target}")
 
@@ -1085,7 +1093,8 @@ def _count_staff_from_lines(lines):
     if not staff_str:
         return ""
     parts = [p.strip() for p in re.split(r"\s*X\s*", staff_str) if p.strip()]
-    count = sum(1 for p in parts if "檸檬人" not in p)
+    # 檸檬人也是實際占用本單人力，通知的人數／人時不可略過。
+    count = len(parts)
     return str(count) if count > 0 else ""
 
 
@@ -3649,7 +3658,7 @@ def build_line_message(order_result):
     multi_date = order_result.get("multi_date", False)
     multi_address = order_result.get("multi_address", False)
     if (multi_date or multi_address) and combined_period:
-        service_time_line = f"服務時間 :\n{period}"
+        service_time_line = f"服務時間：\n{period}"
     else:
         service_time_line = f"服務時間 : {date_disp}  {period}"
     # v2026.07.10：訂單轉換／儲值金補價差用的「合併訂單」專用格式，蓋掉上面
@@ -3695,7 +3704,7 @@ def build_line_message(order_result):
         # 「日期＋時段」逐行排列，不能再於前方加 date_disp，否則第一筆日期
         # 會重複成「2026/09/15 2026/09/15 ...」。同日合併與單筆維持原格式。
         if multi_date and combined_period:
-            stored_value_service_time_line = f"服務時間：{period}"
+            stored_value_service_time_line = f"服務時間：\n{period}"
         else:
             stored_value_service_time_line = f"服務時間：{date_disp} {period}"
         return f"""感謝您預約檸檬家事【{service_label}】服務
@@ -4446,11 +4455,18 @@ def build_line_message_from_order_no(env_name, backend_email, backend_password, 
     return result, build_line_message(result)
 
 
-def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北"):
+def prepare_notification_session(env_name, backend_email, backend_password):
+    """建立一次可重複使用的通知查詢工作階段，避免每位客戶重新登入。"""
     base_url = _configure_environment(env_name)
     session = requests.Session()
     if not login(session, backend_email, backend_password):
         raise Exception("後台登入失敗，請確認帳號密碼")
+    return session
+
+
+def build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, order_nos, fallback_region="台北", session=None):
+    base_url = _configure_environment(env_name)
+    session = session or prepare_notification_session(env_name, backend_email, backend_password)
     orders_info = []
     for ono in order_nos:
         block = _fetch_purchase_block_for_order_no(session, ono)
@@ -4477,7 +4493,8 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
             raise Exception(f"訂單 {ono} 缺少服務地址，無法合併")
         if not payway:
             raise Exception(f"訂單 {ono} 無法判斷付款方式，請至後台確認")
-        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines)})
+        email_match = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", joined)
+        orders_info.append({"order_no": ono, "service_date": service_date, "period_s": service_time, "actual_period": actual_time, "person": person_extracted, "address": address, "fare": fare, "payway": payway, "service_amount": service_amount, "region": region, "service_label": _extract_service_type_label(lines), "phone": _extract_phone_from_block_lines(lines), "email": email_match.group(0) if email_match else "", "line_url": block.get("line_url", "")})
     payways = {o["payway"] for o in orders_info if o["payway"]}
     if len(payways) > 1:
         raise Exception(f"合併的訂單付款方式不同（{', '.join(payways)}），請分開輸入分別產生通知。")
@@ -4529,6 +4546,7 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         except Exception:
             pass
     first = orders_info[0]
+    line_url = next((o["line_url"] for o in orders_info if o.get("line_url")), "")
     result = {
         "order_no": first["order_no"], "all_order_nos": order_nos,
         "address": first["address"], "date": first["service_date"],
@@ -4538,10 +4556,36 @@ def build_combined_line_message_from_order_nos(env_name, backend_email, backend_
         "service_amount": amount_display, "price_with_tax": str(total_amount),
         "fare": str(total_fare) if total_fare else "0", "payway": first["payway"],
         "region": first["region"], "service_label": first["service_label"],
+        "phone": next((o["phone"] for o in orders_info if o.get("phone")), ""),
+        "email": next((o["email"] for o in orders_info if o.get("email")), ""),
+        "line_url": line_url,
+        "orders_info": orders_info,
         "env_name": env_name, "session": session,
         "source_url": f"{base_url}/purchase?orderNo={first['order_no']}",
     }
     return result, build_line_message(result)
+
+
+def build_many_combined_line_messages(env_name, backend_email, backend_password, groups, max_workers=4, progress_callback=None):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    local = threading.local(); groups = list(groups or [])
+    def worker(index, group):
+        if not getattr(local, "session", None): local.session = prepare_notification_session(env_name, backend_email, backend_password)
+        result, text = build_combined_line_message_from_order_nos(env_name, backend_email, backend_password, group.get("order_nos") or [], session=local.session)
+        return index, group, result, text
+    output = [None] * len(groups)
+    with ThreadPoolExecutor(max_workers=min(max(int(max_workers or 1), 1), 4, max(len(groups), 1))) as executor:
+        futures = {executor.submit(worker, i, group): (i, group) for i, group in enumerate(groups)}
+        completed = 0
+        for future in as_completed(futures):
+            index, group = futures[future]; label = "、".join(group.get("order_nos") or [])
+            try:
+                _, _, result, message = future.result(); output[index] = {"order_no": label, "group": group, "result": result, "text": message, "error": None}
+            except Exception as exc: output[index] = {"order_no": label, "group": group, "result": None, "text": "", "error": str(exc)}
+            completed += 1
+            if progress_callback: progress_callback(completed, len(groups), label)
+    return output
 
 
 # =========================================================
